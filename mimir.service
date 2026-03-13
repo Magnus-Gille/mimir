@@ -1,0 +1,23 @@
+[Unit]
+Description=Mímir File Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=magnus
+WorkingDirectory=/home/magnus/mimir
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=5
+EnvironmentFile=/home/magnus/mimir/.env
+
+# Sandboxing
+ProtectSystem=strict
+ReadWritePaths=/home/magnus/mimir
+ReadOnlyPaths=/home/magnus/artifacts
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
