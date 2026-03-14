@@ -4,7 +4,7 @@
 
 NAS_HOST="100.99.119.52"
 DEPLOY_USER="magnus"
-SOURCE="$HOME/mimir/"
+SOURCE="$HOME/mimir/mgc/"
 DEST="$DEPLOY_USER@$NAS_HOST:/home/$DEPLOY_USER/artifacts/mgc/"
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Sync triggered"
