@@ -30,15 +30,17 @@ Agents don't talk to Mímir directly via MCP. Instead:
 3. Only environments that can pass Bearer headers (Claude Code, Codex) can fetch full files
 4. Web/Mobile agents get summaries from Munin — sufficient for ~90% of queries
 
-### Security
+### Security (2-layer, same model as Munin)
 
-- Bearer token auth on all endpoints except `/health`
-- Path traversal prevention (resolve + startsWith jail to root dir)
-- Rate limiting (60 req/min per IP)
-- DNS rebinding protection via allowed hosts
-- Security headers (X-Content-Type-Options, X-Frame-Options, CSP, X-Robots-Tag)
-- Dotfiles hidden from directory listings
-- systemd sandboxing (ProtectSystem=strict, ReadOnlyPaths for artifacts, NoNewPrivileges)
+1. **Cloudflare Access** — Service Token (`munin-memory-mcp`) required at edge. CF Access app: `mimir.gille.ai`
+2. **Bearer token** — `MIMIR_API_KEY` at origin, timing-safe comparison
+3. **App hardening:**
+   - Path traversal prevention (resolve + startsWith jail to root dir)
+   - Rate limiting (60 req/min per IP)
+   - DNS rebinding protection via allowed hosts
+   - Security headers (X-Content-Type-Options, X-Frame-Options, CSP, X-Robots-Tag)
+   - Dotfiles hidden from directory listings
+   - systemd sandboxing (ProtectSystem=strict, ReadOnlyPaths for artifacts, NoNewPrivileges)
 
 ## Project structure
 
@@ -83,11 +85,21 @@ MIMIR_API_KEY=dev-key MIMIR_ROOT_DIR=./tests/__test_fixtures__ npm run dev
 ./scripts/deploy-nas.sh [hostname-or-ip]
 ```
 
+Default host: `100.99.119.52` (NAS Pi via Tailscale).
+
 The NAS Pi needs a `.env` file at `/home/magnus/mimir/.env`:
 ```
 MIMIR_API_KEY=<generate with: openssl rand -hex 32>
 MIMIR_ALLOWED_HOSTS=mimir.gille.ai
 ```
+
+### Tunnel infrastructure
+
+- **Tunnel ID:** `9e8bc8af-dcf6-459d-90ed-f014c714b7d2`
+- **cloudflared:** v2026.3.0, systemd service (enabled), config at `/etc/cloudflared/config.yml`
+- **CF Access App:** `mimir.gille.ai` with Service Token Auth policy (reuses `munin-memory-mcp` token)
+- **DNS:** CNAME `mimir.gille.ai` → tunnel
+- **Public URL:** `https://mimir.gille.ai`
 
 ## Syncing files from laptop
 
