@@ -4,24 +4,29 @@
 **Branch:** main
 
 ## Completed This Session
-- **Munin Local path rewrite**: updated all 98 `documents/*` entries from `~/mgc/...` to `~/mimir/mgc/...` (validated all files exist on disk; 98 updated, 0 skipped, 0 missing)
-- Wrote Round 2 Codex rebuttal at `debate/munin-path-fix-codex-rebuttal-1.md`; verdict: define authoritative `Local` path contract before any Munin rewrite
-- Created `/index-artifacts` skill and indexed 98 files from ~/mimir/mgc/ into Munin `documents/*` namespaces (3929b2b)
-- Created launchd auto-sync plist (30-min interval) (3929b2b)
-- Migrated laptop archive from ~/mgc/ to ~/mimir/mgc/ (b63ba52, 04ad61b)
-- Debated migration plan with Codex — split into Stage 1 (laptop) and Stage 2 (NAS)
-- Completed Stage 1: ~/mimir/ as archive root, sync scripts updated, ~/mgc/ renamed to ~/mgc-tools/
-- Updated 3 skills (close, index-artifacts, draft-email) for new ~/mimir/ path
-- Cleaned up 3 old Munin entries (documents/lofalk-*) using pre-convention naming
-- Marked daniel-birthday project as completed
+- Fixed 98 stale Munin `documents/*` Local paths: `~/mgc/` → `~/mimir/mgc/` (validated against filesystem, 0 missing)
+- Debated path fix strategy with Codex (2 rounds) — valid safety improvements (line-targeted replace, filesystem validation), false alarm on path contract ambiguity
+- Added README.md (b238a9f)
+- **Built Hugin task dispatcher** — new repo at ~/repos/hugin/, deployed to huginmunin Pi
+  - Polls Munin for pending tasks, spawns Claude Code or Codex, writes results back
+  - 5 tasks successfully executed including self-updating Claude Code (2.1.39→2.1.76) and installing Codex (0.114.0)
+  - Pushed to GitHub (private): Magnus-Gille/hugin
+- Cloned all 3 Jarvis repos onto huginmunin Pi at /home/magnus/repos/
+- Documented Munin backup infrastructure in Munin
+- Submitted overnight task: Jarvis architecture guide running autonomously on Pi
 
 ## In Progress
-- Stage 2 of ~/mgc/ → ~/mimir/ migration (NAS paths, URLs) — Munin rewrite DONE, remaining: deploy-nas.sh, NAS moves, systemd, compatibility redirect
+- **Overnight task on Pi**: Jarvis architecture guide with Mermaid diagrams → hugin/docs/
+  - Check from phone: `memory_read("projects/jarvis-architecture", "guide")`
+  - Check from laptop: `cd ~/repos/hugin && git pull && cat docs/architecture.md`
+  - Task result: `memory_read("tasks/20260314-233000-jarvis-arch-guide", "result")`
 
 ## Blockers
 - None
 
 ## Next Steps
-1. **Stage 2 migration** (when ready): update deploy-nas.sh → NAS moves → systemd → compatibility redirect → Munin rewrite
-2. Consider marking Mímir project as `maintenance` since MVP + index are complete
-3. 11 open tickets in `feedback/munin-memory`
+1. **Review overnight task output** — architecture guide quality, diagrams, accuracy
+2. **Build `/submit-task` skill** — natural task submission from any environment
+3. **Hugin Phase 2** — email delivery for task results (morning briefing)
+4. **Mark Mímir as `maintenance`** — MVP + indexing + path fix all complete
+5. 11 open tickets in `feedback/munin-memory`
