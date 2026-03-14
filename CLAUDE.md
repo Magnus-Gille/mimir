@@ -13,6 +13,7 @@ Part of the Hugin & Munin system: **Munin** (memory/brain), **Mímir** (file arc
 - **Auth:** Bearer token (`MIMIR_API_KEY`), timing-safe comparison
 - **Deployment:** NAS Pi (Pi 2), Cloudflare Tunnel, systemd
 - **Storage:** `/home/magnus/artifacts/` on SD card, backed up to `/mnt/timemachine/backups/mimir/`
+- **Laptop archive:** `~/mimir/` — dedicated artifact directory, synced to NAS
 
 ### Endpoints
 
@@ -118,7 +119,7 @@ cat ~/.local/share/mimir/logs/sync-stdout.log  # View logs
 ./scripts/sync-artifacts.sh [hostname-or-ip]
 ```
 
-Syncs `~/mgc/` to `/home/magnus/artifacts/mgc/` on the NAS Pi.
+Syncs `~/mimir/` to `/home/magnus/artifacts/mgc/` on the NAS Pi. The `~/mimir/` directory is a pure artifact archive — no excludes needed.
 
 ## Environment variables
 

@@ -4,7 +4,7 @@
 
 NAS_HOST="100.99.119.52"
 DEPLOY_USER="magnus"
-SOURCE="$HOME/mgc/"
+SOURCE="$HOME/mimir/"
 DEST="$DEPLOY_USER@$NAS_HOST:/home/$DEPLOY_USER/artifacts/mgc/"
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Sync triggered"
@@ -15,15 +15,6 @@ if ! ssh -o ConnectTimeout=2 -o BatchMode=yes "$DEPLOY_USER@$NAS_HOST" true 2>/d
     exit 0
 fi
 
-rsync -a --delete \
-    --exclude='.git/' \
-    --exclude='.DS_Store' \
-    --exclude='node_modules/' \
-    --exclude='.playwright-mcp/' \
-    --exclude='tools/' \
-    --exclude='files/' \
-    --exclude='.pytest_cache/' \
-    --exclude='test-results/' \
-    "$SOURCE" "$DEST"
+rsync -a --delete "$SOURCE" "$DEST"
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Sync complete"
