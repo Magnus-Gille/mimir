@@ -55,9 +55,10 @@ mimir/
 ├── tests/
 │   └── server.test.ts     # supertest integration tests
 └── scripts/
-    ├── deploy-nas.sh      # Deploy to NAS Pi
-    ├── sync-artifacts.sh  # rsync mgc/ from laptop to NAS
-    └── backup-artifacts.sh # Backup artifacts SD→NAS disk (cron on Pi)
+    ├── deploy-nas.sh           # Deploy to NAS Pi
+    ├── sync-artifacts.sh       # Manual rsync mgc/ from laptop to NAS
+    ├── sync-artifacts-daemon.sh # Launchd daemon wrapper (auto-sync)
+    └── backup-artifacts.sh     # Backup artifacts SD→NAS disk (cron on Pi)
 ```
 
 ## How to build
@@ -103,6 +104,16 @@ MIMIR_ALLOWED_HOSTS=mimir.gille.ai
 
 ## Syncing files from laptop
 
+**Automatic (launchd):** Runs every 30 minutes via `com.magnusgille.mimir-sync` launch agent. Checks NAS reachability before syncing — skips silently if offline.
+
+```bash
+# Manage the agent
+launchctl list | grep mimir          # Check status
+launchctl start com.magnusgille.mimir-sync  # Trigger manual sync
+cat ~/.local/share/mimir/logs/sync-stdout.log  # View logs
+```
+
+**Manual:**
 ```bash
 ./scripts/sync-artifacts.sh [hostname-or-ip]
 ```
