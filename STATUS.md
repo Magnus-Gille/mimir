@@ -4,22 +4,22 @@
 **Branch:** main
 
 ## Completed This Session
-- **Refactored Pi directory layout for symmetric paths** (c184963)
-  - Server moved from `~/mimir` to `~/mimir-server` on Pi
-  - Artifacts now at `~/mimir/` on both laptop and Pi (symmetric)
-  - Updated: systemd unit, .env, deploy script, sync scripts, backup script, crontab, CLAUDE.md, src/index.ts default
-  - Migrated existing artifacts from `~/artifacts/mgc/` to `~/mimir/` on Pi
-  - Service restarted and verified healthy (serving from `/home/magnus/mimir`)
+- **Debated SD card intermediate architecture** with Codex (debate/sd-intermediate-summary.md)
+  - Original proposal to remove SD tier was withdrawn after debate
+  - Concluded: keep SD for fault isolation, fix `--delete` in backup script
+- **Submitted fix-backup-delete task to Hugin** — completed in ~2 min (b71faa1 on Pi)
+  - backup-artifacts.sh: removed `--delete`, added mount check (HD is now append-only)
+  - sync-artifacts.sh: added `--delete` with 20% safety threshold (laptop = source of truth)
+  - sync-artifacts-daemon.sh: added matching safety threshold
+  - CLAUDE.md updated on Pi
 
 ## In Progress
-- None
+- Pi commit b71faa1 not yet pushed to origin — next `git pull` from laptop will pick it up once pushed
 
 ## Blockers
 - None
 
 ## Next Steps
-1. **Review overnight task output** — architecture guide quality, diagrams, accuracy
-2. **Build `/submit-task` skill** — natural task submission from any environment
-3. **Hugin Phase 2** — email delivery for task results (morning briefing)
-4. **Mark Mimir as `maintenance`** — MVP + indexing + path fix all complete
-5. 11 open tickets in `feedback/munin-memory`
+1. **Pull Pi changes** once pushed — verify scripts look correct locally
+2. **Hugin Phase 2** — email delivery for task results (morning briefing)
+3. 11 open tickets in `feedback/munin-memory`
