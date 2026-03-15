@@ -12,8 +12,8 @@ Part of the Hugin & Munin system: **Munin** (memory/brain), **Mímir** (file arc
 - **Framework:** Express (minimal — static file serving + auth + directory listing)
 - **Auth:** Bearer token (`MIMIR_API_KEY`), timing-safe comparison
 - **Deployment:** NAS Pi (Pi 2), Cloudflare Tunnel, systemd
-- **Storage:** `/home/magnus/artifacts/` on SD card, backed up to `/mnt/timemachine/backups/mimir/`
-- **Laptop archive:** `~/mimir/` — dedicated artifact directory, synced to NAS
+- **Storage:** `~/mimir/` on both laptop and Pi (symmetric), backed up to `/mnt/timemachine/backups/mimir/`
+- **Server code:** `~/mimir-server/` on Pi (separate from artifacts)
 
 ### Endpoints
 
@@ -57,7 +57,7 @@ mimir/
 │   └── server.test.ts     # supertest integration tests
 └── scripts/
     ├── deploy-nas.sh           # Deploy to NAS Pi
-    ├── sync-artifacts.sh       # Manual rsync mgc/ from laptop to NAS
+    ├── sync-artifacts.sh       # Manual rsync ~/mimir/ from laptop to NAS
     ├── sync-artifacts-daemon.sh # Launchd daemon wrapper (auto-sync)
     └── backup-artifacts.sh     # Backup artifacts SD→NAS disk (cron on Pi)
 ```
@@ -89,7 +89,7 @@ MIMIR_API_KEY=dev-key MIMIR_ROOT_DIR=./tests/__test_fixtures__ npm run dev
 
 Default host: `100.99.119.52` (NAS Pi via Tailscale).
 
-The NAS Pi needs a `.env` file at `/home/magnus/mimir/.env`:
+The NAS Pi needs a `.env` file at `/home/magnus/mimir-server/.env`:
 ```
 MIMIR_API_KEY=<generate with: openssl rand -hex 32>
 MIMIR_ALLOWED_HOSTS=mimir.gille.ai
@@ -119,7 +119,7 @@ cat ~/.local/share/mimir/logs/sync-stdout.log  # View logs
 ./scripts/sync-artifacts.sh [hostname-or-ip]
 ```
 
-Syncs `~/mimir/` to `/home/magnus/artifacts/mgc/` on the NAS Pi. The `~/mimir/` directory is a pure artifact archive — no excludes needed.
+Syncs `~/mimir/` to `~/mimir/` on the NAS Pi. Symmetric paths on both machines — no excludes needed.
 
 ## Environment variables
 
@@ -128,7 +128,7 @@ Syncs `~/mimir/` to `/home/magnus/artifacts/mgc/` on the NAS Pi. The `~/mimir/` 
 | `MIMIR_PORT` | `3031` | HTTP server port |
 | `MIMIR_HOST` | `127.0.0.1` | Bind address (localhost for tunnel) |
 | `MIMIR_API_KEY` | — | Bearer token (required) |
-| `MIMIR_ROOT_DIR` | `/home/magnus/artifacts` | Root directory to serve |
+| `MIMIR_ROOT_DIR` | `/home/magnus/mimir` | Root directory to serve |
 | `MIMIR_ALLOWED_HOSTS` | — | Extra allowed Host headers (comma-separated) |
 | `MIMIR_RATE_LIMIT` | `60` | Max requests per minute per IP |
 

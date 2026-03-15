@@ -7,7 +7,7 @@ set -euo pipefail
 NAS_HOST="${1:-100.99.119.52}"
 DEPLOY_USER="${DEPLOY_USER:-magnus}"
 REMOTE="$DEPLOY_USER@$NAS_HOST"
-REMOTE_DIR="/home/$DEPLOY_USER/mimir"
+REMOTE_DIR="/home/$DEPLOY_USER/mimir-server"
 
 echo "==> Building locally..."
 npm run build
@@ -37,7 +37,7 @@ else
 fi
 
 echo "==> Checking artifacts directory..."
-ssh "$REMOTE" "mkdir -p /home/$DEPLOY_USER/artifacts && echo '  /home/$DEPLOY_USER/artifacts exists'"
+ssh "$REMOTE" "mkdir -p /home/$DEPLOY_USER/mimir && echo '  /home/$DEPLOY_USER/mimir exists'"
 
 echo "==> Restarting service..."
 ssh "$REMOTE" "sudo systemctl restart mimir && sleep 2 && sudo systemctl status mimir --no-pager"

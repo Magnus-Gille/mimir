@@ -6,8 +6,8 @@ set -euo pipefail
 
 NAS_HOST="${1:-100.99.119.52}"
 DEPLOY_USER="${DEPLOY_USER:-magnus}"
-SOURCE="$HOME/mimir/mgc/"
-DEST="$DEPLOY_USER@$NAS_HOST:/home/$DEPLOY_USER/artifacts/mgc/"
+SOURCE="$HOME/mimir/"
+DEST="$DEPLOY_USER@$NAS_HOST:/home/$DEPLOY_USER/mimir/"
 
 echo "==> Syncing $SOURCE to $DEST..."
 rsync -av "$SOURCE" "$DEST"

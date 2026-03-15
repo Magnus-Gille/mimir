@@ -5,9 +5,9 @@ set -euo pipefail
 # Run via cron on the NAS Pi itself
 # Usage: backup-artifacts.sh
 
-SOURCE="/home/magnus/artifacts/"
+SOURCE="/home/magnus/mimir/"
 DEST="/mnt/timemachine/backups/mimir/"
 
 mkdir -p "$DEST"
 rsync -a --delete "$SOURCE" "$DEST"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Backup complete" >> /home/magnus/mimir/backup.log
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) Backup complete" >> /home/magnus/mimir-server/backup.log

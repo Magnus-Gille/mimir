@@ -6,16 +6,16 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=magnus
-WorkingDirectory=/home/magnus/mimir
+WorkingDirectory=/home/magnus/mimir-server
 ExecStart=/usr/bin/node dist/index.js
 Restart=always
 RestartSec=5
-EnvironmentFile=/home/magnus/mimir/.env
+EnvironmentFile=/home/magnus/mimir-server/.env
 
 # Sandboxing
 ProtectSystem=strict
-ReadWritePaths=/home/magnus/mimir
-ReadOnlyPaths=/home/magnus/artifacts
+ReadWritePaths=/home/magnus/mimir-server
+ReadOnlyPaths=/home/magnus/mimir
 NoNewPrivileges=true
 PrivateTmp=true
 

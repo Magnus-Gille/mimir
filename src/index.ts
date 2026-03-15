@@ -10,7 +10,7 @@ import { timingSafeEqual } from "node:crypto";
 const PORT = parseInt(process.env.MIMIR_PORT ?? "3031", 10);
 const HOST = process.env.MIMIR_HOST ?? "127.0.0.1";
 const API_KEY = process.env.MIMIR_API_KEY;
-const ROOT_DIR = resolve(process.env.MIMIR_ROOT_DIR ?? "/home/magnus/artifacts");
+const ROOT_DIR = resolve(process.env.MIMIR_ROOT_DIR ?? "/home/magnus/mimir");
 const ALLOWED_HOSTS = (process.env.MIMIR_ALLOWED_HOSTS ?? "")
   .split(",")
   .map((h) => h.trim())
