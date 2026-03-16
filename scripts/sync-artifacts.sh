@@ -1,15 +1,21 @@
 #!/bin/bash
 set -euo pipefail
 
-# Sync ~/mimir/ archive from laptop to NAS Pi
-# Usage: ./scripts/sync-artifacts.sh [hostname]
+# Manual sync — same logic as daemon but with verbose output
+#
+# Usage: ./scripts/sync-artifacts.sh [nas-host]
 
-NAS_HOST="${1:-100.99.119.52}"
-DEPLOY_USER="${DEPLOY_USER:-magnus}"
-SOURCE="$HOME/mimir/"
-DEST="$DEPLOY_USER@$NAS_HOST:/home/$DEPLOY_USER/mimir/"
+NAS="${1:-magnus@100.99.119.52}"
+LOCAL="$HOME/mimir/"
+REMOTE="$NAS:/home/magnus/mimir/"
+INBOX="$NAS:/home/magnus/mimir-inbox/"
 
-echo "==> Syncing $SOURCE to $DEST..."
-rsync -av "$SOURCE" "$DEST"
+# Step 1: Import new files from inbox
+echo "==> Importing from inbox..."
+rsync -av --ignore-existing --remove-source-files "$INBOX" "$LOCAL"
+
+# Step 2: Mirror laptop → NAS
+echo "==> Pushing laptop → NAS (with --delete)..."
+rsync -av --delete "$LOCAL" "$REMOTE"
 
 echo "==> Sync complete."
