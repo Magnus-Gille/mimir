@@ -1,8 +1,8 @@
 # Mímir
 
-Self-hosted authenticated file server for the [Jarvis](https://github.com/magnusgille) personal AI system. Named after the Norse figure of wisdom.
+Self-hosted authenticated file server for the Grimnir personal AI system. Named after the Norse figure of wisdom.
 
-Serves documents, presentations, PDFs, and images over HTTPS with Bearer token auth. Part of the Hugin & Munin system: **Munin** (memory/brain), **Mímir** (file archive), **Hugin** (signal hunter).
+Serves documents, presentations, PDFs, and images over HTTPS with Bearer token auth. Part of the Grimnir system: **Munin** (memory/brain), **Mímir** (file archive), **Hugin** (task dispatcher).
 
 ## How it works
 

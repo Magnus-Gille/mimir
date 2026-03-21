@@ -1,7 +1,7 @@
 {
   "name": "mimir",
   "version": "0.1.0",
-  "description": "Self-hosted authenticated file server for the Jarvis personal AI system",
+  "description": "Self-hosted authenticated file server for the Grimnir personal AI system",
   "type": "module",
   "scripts": {
     "build": "tsc",

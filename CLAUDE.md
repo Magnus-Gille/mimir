@@ -2,9 +2,9 @@
 
 ## What this project is
 
-Mímir is a self-hosted authenticated file server for the Jarvis personal AI system. Named after the Norse figure of wisdom. Serves documents, presentations, PDFs, and images over HTTPS with Bearer token auth.
+Mímir is a self-hosted authenticated file server for the Grimnir personal AI system. Named after the Norse figure of wisdom. Serves documents, presentations, PDFs, and images over HTTPS with Bearer token auth.
 
-Part of the Hugin & Munin system: **Munin** (memory/brain), **Mímir** (file archive), **Hugin** (signal hunter).
+Part of the Grimnir system: **Munin** (memory/brain), **Mímir** (file archive), **Hugin** (task dispatcher).
 
 ## Architecture
 
