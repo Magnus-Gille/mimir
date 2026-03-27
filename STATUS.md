@@ -24,6 +24,12 @@
 - **Tested end-to-end** — `/share` of timeline-v3.png returned 200 image/png via public URL
 - 47 tests passing (37 server + 10 token unit)
 
+- **Re-applied lost Hugin fixes** to backup/sync scripts (5e7d54a)
+  - backup-artifacts.sh: removed --delete, added mount check (HD is append-only)
+  - sync-artifacts.sh + daemon: added 20% delete threshold safety gate
+  - Root cause: deploy-nas.sh overwrote Pi changes. Added submit-task rule 16.
+- Deployed fixed scripts to NAS Pi
+
 ## In Progress
 - None
 
@@ -31,6 +37,5 @@
 - None
 
 ## Next Steps
-1. **Pull Pi changes** from fix-backup-delete task (b71faa1) — verify scripts locally
-2. **Hugin Phase 2** — email delivery for task results (morning briefing)
-3. 11 open tickets in `feedback/munin-memory`
+1. **Hugin Phase 2** — email delivery for task results (morning briefing)
+2. 11 open tickets in `feedback/munin-memory`
