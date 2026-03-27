@@ -22,6 +22,7 @@ Part of the Grimnir system: **Munin** (memory/brain), **Mímir** (file archive),
 | `/health` | GET | None | Health check |
 | `/files/*` | GET | Bearer | Serve file from archive |
 | `/list/*` | GET | Bearer | JSON directory listing |
+| `/share/:token` | GET | None (HMAC token) | Temporary public file sharing |
 
 ### How agents use Mímir
 
@@ -52,11 +53,16 @@ mimir/
 ├── CLAUDE.md              # This file
 ├── mimir.service          # systemd unit file
 ├── src/
-│   └── index.ts           # Express server — all in one file
+│   ├── index.ts           # Express server
+│   ├── share-token.ts     # HMAC token generation + validation
+│   └── cli/
+│       └── share.ts       # Pi-side CLI for generating share URLs
 ├── tests/
-│   └── server.test.ts     # supertest integration tests
+│   ├── server.test.ts     # supertest integration tests
+│   └── share-token.test.ts # Token unit tests
 └── scripts/
     ├── deploy-nas.sh           # Deploy to NAS Pi
+    ├── share.sh                # Generate share URL (sync + ssh + clipboard)
     ├── sync-artifacts.sh       # Manual rsync ~/mimir/ from laptop to NAS
     ├── sync-artifacts-daemon.sh # Launchd daemon wrapper (auto-sync)
     └── backup-artifacts.sh     # Backup artifacts SD→NAS disk (cron on Pi)
@@ -131,6 +137,24 @@ Syncs `~/mimir/` to `~/mimir/` on the NAS Pi. Symmetric paths on both machines �
 | `MIMIR_ROOT_DIR` | `/home/magnus/mimir` | Root directory to serve |
 | `MIMIR_ALLOWED_HOSTS` | — | Extra allowed Host headers (comma-separated) |
 | `MIMIR_RATE_LIMIT` | `60` | Max requests per minute per IP |
+| `MIMIR_SHARE_SECRET` | — | HMAC secret for share links (optional, enables `/share`) |
+| `MIMIR_BASE_URL` | `https://mimir.gille.ai` | Base URL for generated share links (CLI only) |
+
+## Sharing files
+
+Generate a temporary public URL for any file in `~/mimir/`:
+
+```bash
+./scripts/share.sh ~/mimir/presentations/deck.pdf       # 24h default
+./scripts/share.sh ~/mimir/presentations/deck.pdf 7d    # custom TTL
+./scripts/share.sh presentations/deck.pdf 1h             # relative path ok
+```
+
+The script: syncs the file to Pi, generates an HMAC-signed token on the Pi, prints the URL and copies to clipboard. TTL formats: `1h`, `6h`, `12h`, `24h`, `3d`, `7d`.
+
+**Requires:** `MIMIR_SHARE_SECRET` in the Pi's `.env` file. Generate with `openssl rand -hex 32`.
+
+**CF Access:** The `/share/*` path needs a Cloudflare Access bypass policy (Allow Everyone) since recipients don't have service tokens. The HMAC token provides authentication instead.
 
 ## Key design decisions
 

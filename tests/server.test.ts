@@ -1,11 +1,13 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import request from "supertest";
 import { createApp } from "../src/index.js";
+import { generateToken } from "../src/share-token.js";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 const TEST_ROOT = join(import.meta.dirname, "__test_fixtures__");
 const TEST_API_KEY = "test-key-for-mimir";
+const TEST_SHARE_SECRET = "test-share-secret-for-mimir-32bytes!";
 
 function setup() {
   // Create test fixture directory
@@ -24,7 +26,7 @@ let app: ReturnType<typeof createApp>;
 
 beforeAll(() => {
   setup();
-  app = createApp({ apiKey: TEST_API_KEY, rootDir: TEST_ROOT });
+  app = createApp({ apiKey: TEST_API_KEY, rootDir: TEST_ROOT, shareSecret: TEST_SHARE_SECRET });
 });
 
 afterAll(() => {
@@ -124,6 +126,8 @@ describe("file serving: /files/*", () => {
       .set(auth);
     expect(res.headers["x-content-type-options"]).toBe("nosniff");
     expect(res.headers["x-frame-options"]).toBe("DENY");
+    expect(res.headers["cache-control"]).toBe("no-store");
+    expect(res.headers["referrer-policy"]).toBe("no-referrer");
   });
 
   it("includes content-length and accept-ranges", async () => {
@@ -233,5 +237,103 @@ describe("directory listing: /list/*", () => {
     const dir = res.body.entries.find((e: { name: string }) => e.name === "subdir/");
     expect(dir.type).toBe("directory");
     expect(dir.size).toBeUndefined();
+  });
+});
+
+describe("share links: /share/:token", () => {
+  it("serves a file with a valid share token", async () => {
+    const token = generateToken("hello.txt", 3600, TEST_SHARE_SECRET);
+    const res = await request(app).get(`/share/${token}`);
+    expect(res.status).toBe(200);
+    expect(res.text).toBe("Hello, Mímir!");
+    expect(res.headers["content-type"]).toMatch(/text\/plain/);
+    expect(res.headers["content-disposition"]).toBe("inline");
+  });
+
+  it("serves nested files via share token", async () => {
+    const token = generateToken("subdir/nested.md", 3600, TEST_SHARE_SECRET);
+    const res = await request(app).get(`/share/${token}`);
+    expect(res.status).toBe(200);
+    expect(res.text).toContain("# Nested file");
+  });
+
+  it("serves PDFs inline", async () => {
+    const token = generateToken("doc.pdf", 3600, TEST_SHARE_SECRET);
+    const res = await request(app).get(`/share/${token}`);
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toBe("application/pdf");
+    expect(res.headers["content-disposition"]).toBe("inline");
+  });
+
+  it("rejects expired tokens", async () => {
+    // Generate a token that expired 1 hour ago
+    const token = generateToken("hello.txt", -3600, TEST_SHARE_SECRET);
+    const res = await request(app).get(`/share/${token}`);
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/expired/i);
+  });
+
+  it("rejects tampered tokens", async () => {
+    const token = generateToken("hello.txt", 3600, TEST_SHARE_SECRET);
+    // Flip last character of signature
+    const tampered = token.slice(0, -1) + (token.slice(-1) === "a" ? "b" : "a");
+    const res = await request(app).get(`/share/${tampered}`);
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/invalid/i);
+  });
+
+  it("rejects tokens signed with wrong secret", async () => {
+    const token = generateToken("hello.txt", 3600, "wrong-secret");
+    const res = await request(app).get(`/share/${token}`);
+    expect(res.status).toBe(403);
+  });
+
+  it("rejects malformed tokens", async () => {
+    const res = await request(app).get("/share/not-a-valid-token");
+    expect(res.status).toBe(403);
+  });
+
+  it("blocks path traversal in share tokens", async () => {
+    const token = generateToken("../../../etc/passwd", 3600, TEST_SHARE_SECRET);
+    const res = await request(app).get(`/share/${token}`);
+    expect([400, 404]).toContain(res.status);
+  });
+
+  it("returns 404 for missing files", async () => {
+    const token = generateToken("nonexistent.txt", 3600, TEST_SHARE_SECRET);
+    const res = await request(app).get(`/share/${token}`);
+    expect(res.status).toBe(404);
+  });
+
+  it("does not require Bearer auth", async () => {
+    const token = generateToken("hello.txt", 3600, TEST_SHARE_SECRET);
+    // No auth header — should still work
+    const res = await request(app).get(`/share/${token}`);
+    expect(res.status).toBe(200);
+  });
+
+  it("includes security headers on share responses", async () => {
+    const token = generateToken("hello.txt", 3600, TEST_SHARE_SECRET);
+    const res = await request(app).get(`/share/${token}`);
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
+    expect(res.headers["cache-control"]).toBe("no-store");
+    expect(res.headers["referrer-policy"]).toBe("no-referrer");
+  });
+
+  it("supports range requests on share links", async () => {
+    const token = generateToken("hello.txt", 3600, TEST_SHARE_SECRET);
+    const res = await request(app)
+      .get(`/share/${token}`)
+      .set("Range", "bytes=0-4");
+    expect(res.status).toBe(206);
+    expect(res.text).toBe("Hello");
+  });
+});
+
+describe("share links disabled", () => {
+  it("returns 501 when share secret is not configured", async () => {
+    const appNoShare = createApp({ apiKey: TEST_API_KEY, rootDir: TEST_ROOT });
+    const res = await request(appNoShare).get("/share/some-token");
+    expect(res.status).toBe(501);
   });
 });

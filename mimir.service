@@ -11,6 +11,8 @@ ExecStart=/usr/bin/node dist/index.js
 Restart=always
 RestartSec=5
 EnvironmentFile=/home/magnus/mimir-server/.env
+# Required: MIMIR_API_KEY
+# Optional: MIMIR_SHARE_SECRET (enables /share/:token endpoint)
 
 # Sandboxing
 ProtectSystem=strict

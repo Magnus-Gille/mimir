@@ -4,12 +4,14 @@ import { stat, readdir } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { lookup } from "mime-types";
 import { timingSafeEqual } from "node:crypto";
+import { validateToken } from "./share-token.js";
 
 // --- Configuration ---
 
 const PORT = parseInt(process.env.MIMIR_PORT ?? "3031", 10);
 const HOST = process.env.MIMIR_HOST ?? "127.0.0.1";
 const API_KEY = process.env.MIMIR_API_KEY;
+const SHARE_SECRET = process.env.MIMIR_SHARE_SECRET;
 const ROOT_DIR = resolve(process.env.MIMIR_ROOT_DIR ?? "/home/magnus/mimir");
 const ALLOWED_HOSTS = (process.env.MIMIR_ALLOWED_HOSTS ?? "")
   .split(",")
@@ -59,11 +61,104 @@ setInterval(() => {
   }
 }, 60_000);
 
+// --- Shared file-serving helper ---
+
+const INLINE_TYPES = new Set([
+  "application/pdf",
+  "text/plain",
+  "text/html",
+  "text/csv",
+  "text/markdown",
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/svg+xml",
+  "image/webp",
+  "audio/mpeg",
+  "audio/ogg",
+  "video/mp4",
+  "video/webm",
+]);
+
+async function serveFile(
+  req: express.Request,
+  res: express.Response,
+  rootDir: string,
+  requestPath: string,
+  options?: { disposition?: "inline" | "attachment" },
+): Promise<void> {
+  if (!requestPath) {
+    res.status(400).json({ error: "File path required. Use /list/ for directory listings." });
+    return;
+  }
+
+  const resolved = resolveFilePath(rootDir, requestPath);
+  if (!resolved) {
+    res.status(400).json({ error: "Invalid path." });
+    return;
+  }
+
+  try {
+    const stats = await stat(resolved);
+    if (stats.isDirectory()) {
+      res.status(400).json({ error: "Path is a directory. Use /list/ for directory listings, /files/ for individual files." });
+      return;
+    }
+
+    const mimeType = lookup(resolved) || "application/octet-stream";
+    const fileSize = stats.size;
+
+    // Content-Disposition for share links
+    if (options?.disposition) {
+      const filename = resolved.split("/").pop() ?? "download";
+      const useInline = options.disposition === "inline" && INLINE_TYPES.has(mimeType);
+      res.setHeader("Content-Disposition", useInline ? "inline" : `attachment; filename="${filename}"`);
+    }
+
+    // Range request support
+    const range = req.headers.range;
+    if (range) {
+      const match = range.match(/bytes=(\d+)-(\d*)/);
+      if (match) {
+        const start = parseInt(match[1], 10);
+        const end = match[2] ? parseInt(match[2], 10) : fileSize - 1;
+
+        if (start >= fileSize || end >= fileSize || start > end) {
+          res.status(416).setHeader("Content-Range", `bytes */${fileSize}`).end();
+          return;
+        }
+
+        res.status(206);
+        res.setHeader("Content-Range", `bytes ${start}-${end}/${fileSize}`);
+        res.setHeader("Accept-Ranges", "bytes");
+        res.setHeader("Content-Length", end - start + 1);
+        res.setHeader("Content-Type", mimeType);
+        res.setHeader("Last-Modified", stats.mtime.toUTCString());
+        createReadStream(resolved, { start, end }).pipe(res);
+        return;
+      }
+    }
+
+    res.setHeader("Content-Type", mimeType);
+    res.setHeader("Content-Length", fileSize);
+    res.setHeader("Accept-Ranges", "bytes");
+    res.setHeader("Last-Modified", stats.mtime.toUTCString());
+    createReadStream(resolved).pipe(res);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      res.status(404).json({ error: `File not found: /${requestPath}` });
+      return;
+    }
+    throw err;
+  }
+}
+
 // --- Express app ---
 
-export function createApp(config?: { apiKey?: string; rootDir?: string }) {
+export function createApp(config?: { apiKey?: string; rootDir?: string; shareSecret?: string }) {
   const apiKey = config?.apiKey ?? API_KEY;
   const rootDir = resolve(config?.rootDir ?? ROOT_DIR);
+  const shareSecret = config?.shareSecret ?? SHARE_SECRET;
 
   if (!apiKey) {
     throw new Error("MIMIR_API_KEY is required. Set it in .env or pass via config.");
@@ -71,12 +166,17 @@ export function createApp(config?: { apiKey?: string; rootDir?: string }) {
 
   const app = express();
 
+  // Trust proxy (behind Cloudflare Tunnel)
+  app.set("trust proxy", true);
+
   // Security headers
   app.use((_req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("X-Frame-Options", "DENY");
     res.setHeader("Content-Security-Policy", "default-src 'none'");
     res.setHeader("X-Robots-Tag", "noindex, nofollow");
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Referrer-Policy", "no-referrer");
     next();
   });
 
@@ -99,20 +199,39 @@ export function createApp(config?: { apiKey?: string; rootDir?: string }) {
     });
   }
 
-  // Health endpoint (no auth)
-  app.get("/health", (_req, res) => {
-    res.json({ status: "ok", service: "mimir", root_dir: rootDir });
-  });
-
-  // Auth middleware for all other routes
+  // Rate limiting (standalone — applies to all routes)
   app.use((req, res, next) => {
-    // Rate limiting
     const ip = req.ip ?? req.socket.remoteAddress ?? "unknown";
     if (!checkRateLimit(ip)) {
       res.status(429).json({ error: "Rate limit exceeded. Max 60 requests per minute." });
       return;
     }
+    next();
+  });
 
+  // Health endpoint (no auth)
+  app.get("/health", (_req, res) => {
+    res.json({ status: "ok", service: "mimir", root_dir: rootDir });
+  });
+
+  // Share endpoint (no Bearer auth — token in URL provides auth)
+  app.get("/share/:token", async (req, res) => {
+    if (!shareSecret) {
+      res.status(501).json({ error: "Share links are not configured on this server." });
+      return;
+    }
+
+    const result = validateToken(req.params.token, shareSecret);
+    if (!result.valid) {
+      res.status(403).json({ error: result.error });
+      return;
+    }
+
+    await serveFile(req, res, rootDir, result.path, { disposition: "inline" });
+  });
+
+  // Auth middleware for all remaining routes
+  app.use((req, res, next) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith("Bearer ")) {
       res.status(401).json({ error: "Authorization header with Bearer token required." });
@@ -180,63 +299,7 @@ export function createApp(config?: { apiKey?: string; rootDir?: string }) {
   app.get("/files/{*path}", async (req, res) => {
     const rawPath = (req.params as Record<string, string | string[]>).path;
     const requestPath = Array.isArray(rawPath) ? rawPath.join("/") : (rawPath ?? "");
-    if (!requestPath) {
-      res.status(400).json({ error: "File path required. Use /list/ for directory listings." });
-      return;
-    }
-
-    const resolved = resolveFilePath(rootDir, requestPath);
-    if (!resolved) {
-      res.status(400).json({ error: "Invalid path." });
-      return;
-    }
-
-    try {
-      const stats = await stat(resolved);
-      if (stats.isDirectory()) {
-        res.status(400).json({ error: "Path is a directory. Use /list/ for directory listings, /files/ for individual files." });
-        return;
-      }
-
-      const mimeType = lookup(resolved) || "application/octet-stream";
-      const fileSize = stats.size;
-
-      // Range request support
-      const range = req.headers.range;
-      if (range) {
-        const match = range.match(/bytes=(\d+)-(\d*)/);
-        if (match) {
-          const start = parseInt(match[1], 10);
-          const end = match[2] ? parseInt(match[2], 10) : fileSize - 1;
-
-          if (start >= fileSize || end >= fileSize || start > end) {
-            res.status(416).setHeader("Content-Range", `bytes */${fileSize}`).end();
-            return;
-          }
-
-          res.status(206);
-          res.setHeader("Content-Range", `bytes ${start}-${end}/${fileSize}`);
-          res.setHeader("Accept-Ranges", "bytes");
-          res.setHeader("Content-Length", end - start + 1);
-          res.setHeader("Content-Type", mimeType);
-          res.setHeader("Last-Modified", stats.mtime.toUTCString());
-          createReadStream(resolved, { start, end }).pipe(res);
-          return;
-        }
-      }
-
-      res.setHeader("Content-Type", mimeType);
-      res.setHeader("Content-Length", fileSize);
-      res.setHeader("Accept-Ranges", "bytes");
-      res.setHeader("Last-Modified", stats.mtime.toUTCString());
-      createReadStream(resolved).pipe(res);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-        res.status(404).json({ error: `File not found: /${requestPath}` });
-        return;
-      }
-      throw err;
-    }
+    await serveFile(req, res, rootDir, requestPath);
   });
 
   return app;
@@ -249,6 +312,11 @@ if (process.env.NODE_ENV !== "test" && process.argv[1] && import.meta.url === `f
   app.listen(PORT, HOST, () => {
     console.log(`Mímir file server listening on ${HOST}:${PORT}`);
     console.log(`Serving files from: ${ROOT_DIR}`);
+    if (SHARE_SECRET) {
+      console.log("Share links: enabled");
+    } else {
+      console.log("Share links: disabled (set MIMIR_SHARE_SECRET to enable)");
+    }
     if (ALLOWED_HOSTS.length > 0) {
       console.log(`Allowed hosts: ${HOST}:${PORT}, localhost:${PORT}, 127.0.0.1:${PORT}, ${ALLOWED_HOSTS.join(", ")}`);
     }
