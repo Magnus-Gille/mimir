@@ -25,8 +25,19 @@ fi
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Importing from inbox..."
 rsync -a --ignore-existing --remove-source-files "$INBOX" "$LOCAL"
 
-# Step 2: Mirror laptop → NAS (authoritative, with --delete)
+# Step 2: Mirror laptop → NAS (laptop is source of truth)
+# Safety: abort if --delete would remove >20% of remote files
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Pushing laptop → NAS..."
+DRY_OUTPUT=$(rsync -an --delete "$LOCAL" "$REMOTE" 2>/dev/null)
+TOTAL=$(echo "$DRY_OUTPUT" | grep -c '.' || true)
+DELETES=$(echo "$DRY_OUTPUT" | grep -c '^deleting ' || true)
+if [ "$TOTAL" -gt 0 ] && [ "$DELETES" -gt 0 ]; then
+  PCT=$(( DELETES * 100 / TOTAL ))
+  if [ "$PCT" -gt 20 ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ABORT: --delete would remove $DELETES files ($PCT%). Skipping sync."
+    exit 1
+  fi
+fi
 rsync -a --delete "$LOCAL" "$REMOTE"
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Sync complete"
