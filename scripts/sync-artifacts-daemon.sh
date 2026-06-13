@@ -38,6 +38,15 @@ if [ "$TOTAL" -gt 0 ] && [ "$DELETES" -gt 0 ]; then
     exit 1
   fi
 fi
-rsync -a --delete "$LOCAL" "$REMOTE"
-
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Sync complete"
+if rsync -a --delete "$LOCAL" "$REMOTE"; then
+  # Heartbeat for Heimdall's sync-freshness probe. Written OUTSIDE the mirrored
+  # tree so the --delete above can't remove it. Records when the sync last ran
+  # successfully (every 30 min) rather than newest-content age — which avoids
+  # false "Backup stale" criticals when no new files have been created lately.
+  ssh -o ConnectTimeout=5 -o BatchMode=yes "$NAS" "date +%s > /home/magnus/mimir-sync.stamp" 2>/dev/null || true
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Sync complete"
+else
+  RC=$?
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Push FAILED (rsync exit $RC)"
+  exit "$RC"
+fi
