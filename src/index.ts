@@ -227,7 +227,11 @@ export function createApp(config?: { apiKey?: string; rootDir?: string; shareSec
       return;
     }
 
-    await serveFile(req, res, rootDir, result.path, { disposition: "inline" });
+    // ?dl=1 forces a download (attachment) instead of inline browser playback
+    const forceDownload = req.query.dl === "1" || req.query.download === "1";
+    await serveFile(req, res, rootDir, result.path, {
+      disposition: forceDownload ? "attachment" : "inline",
+    });
   });
 
   // Auth middleware for all remaining routes
