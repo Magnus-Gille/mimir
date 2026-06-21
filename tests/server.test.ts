@@ -337,3 +337,33 @@ describe("share links disabled", () => {
     expect(res.status).toBe(501);
   });
 });
+
+describe("share links: ?dl=1 force-download", () => {
+  it("serves inline without dl param (baseline)", async () => {
+    const token = generateToken("hello.txt", 3600, TEST_SHARE_SECRET);
+    const res = await request(app).get(`/share/${token}`);
+    expect(res.status).toBe(200);
+    expect(res.headers["content-disposition"]).toBe("inline");
+  });
+
+  it("serves attachment with ?dl=1", async () => {
+    const token = generateToken("hello.txt", 3600, TEST_SHARE_SECRET);
+    const res = await request(app).get(`/share/${token}?dl=1`);
+    expect(res.status).toBe(200);
+    expect(res.headers["content-disposition"]).toMatch(/^attachment; filename="hello\.txt"$/);
+  });
+
+  it("serves attachment with ?download=1", async () => {
+    const token = generateToken("hello.txt", 3600, TEST_SHARE_SECRET);
+    const res = await request(app).get(`/share/${token}?download=1`);
+    expect(res.status).toBe(200);
+    expect(res.headers["content-disposition"]).toMatch(/^attachment; filename="hello\.txt"$/);
+  });
+
+  it("forces attachment on PDF with ?dl=1 (overrides inline-PDF default)", async () => {
+    const token = generateToken("doc.pdf", 3600, TEST_SHARE_SECRET);
+    const res = await request(app).get(`/share/${token}?dl=1`);
+    expect(res.status).toBe(200);
+    expect(res.headers["content-disposition"]).toMatch(/^attachment; filename="doc\.pdf"$/);
+  });
+});
