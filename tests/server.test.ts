@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import request from "supertest";
-import { createApp } from "../src/index.js";
+import { createApp, HEIMDALL_DESCRIPTOR } from "../src/index.js";
 import { generateToken } from "../src/share-token.js";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -41,6 +41,43 @@ describe("health", () => {
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("ok");
     expect(res.body.service).toBe("mimir");
+  });
+});
+
+describe("heimdall.json", () => {
+  it("returns 200 without auth", async () => {
+    const res = await request(app).get("/heimdall.json");
+    expect(res.status).toBe(200);
+  });
+
+  it("returns the descriptor object", async () => {
+    const res = await request(app).get("/heimdall.json");
+    expect(res.body).toMatchObject({
+      _schema: "https://heimdall.gille.ai/schema/service/v1",
+      service: { name: "mimir", label: "Mímir", namespace: "grimnir", instance_id: "nas" },
+      kind: "http-service",
+      status: "pass",
+    });
+  });
+
+  it("matches the exported HEIMDALL_DESCRIPTOR const", async () => {
+    const res = await request(app).get("/heimdall.json");
+    expect(res.body).toMatchObject(HEIMDALL_DESCRIPTOR as unknown as Record<string, unknown>);
+  });
+
+  it("deploy block has host=nas and systemd_unit=mimir", async () => {
+    const res = await request(app).get("/heimdall.json");
+    expect(res.body.deploy).toMatchObject({ host: "nas", systemd_unit: "mimir", platform: "bare-metal" });
+  });
+
+  it("links are root-relative or https (no protocol-relative)", async () => {
+    const res = await request(app).get("/heimdall.json");
+    const links: Record<string, string> = res.body.links;
+    for (const [, href] of Object.entries(links)) {
+      expect(href.startsWith("//")).toBe(false);
+      const safe = href.startsWith("/") || /^https?:\/\//i.test(href);
+      expect(safe).toBe(true);
+    }
   });
 });
 
