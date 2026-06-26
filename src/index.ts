@@ -153,6 +153,38 @@ async function serveFile(
   }
 }
 
+// --- Heimdall self-descriptor ---
+// Served at GET /heimdall.json for Tier-1 discovery by the Heimdall dashboard.
+// Shape must satisfy Heimdall's validateDescriptor (schema/service/v1).
+// Keep version in sync with package.json when bumping.
+export const HEIMDALL_DESCRIPTOR = {
+  _schema: 'https://heimdall.gille.ai/schema/service/v1',
+  service: {
+    name: 'mimir',
+    label: 'Mímir',
+    namespace: 'grimnir',
+    instance_id: 'nas',
+    criticality: 'normal',
+  },
+  kind: 'http-service',
+  status: 'pass',
+  version: '0.1.0',
+  deploy: {
+    host: 'nas',
+    systemd_unit: 'mimir',
+    platform: 'bare-metal',
+  },
+  metrics: [],
+  alerts: { rules: [], active_count: 0, firing: [] },
+  panels: [],
+  links: {
+    self: '/heimdall.json',
+    health: '/health',
+    repo: 'https://github.com/Magnus-Gille/mimir',
+  },
+  ui: { icon: 'book', category: 'infra' },
+} as const;
+
 // --- Express app ---
 
 export function createApp(config?: { apiKey?: string; rootDir?: string; shareSecret?: string }) {
@@ -212,6 +244,11 @@ export function createApp(config?: { apiKey?: string; rootDir?: string; shareSec
   // Health endpoint (no auth)
   app.get("/health", (_req, res) => {
     res.json({ status: "ok", service: "mimir", root_dir: rootDir });
+  });
+
+  // Heimdall self-descriptor (no auth)
+  app.get("/heimdall.json", (_req, res) => {
+    res.json(HEIMDALL_DESCRIPTOR);
   });
 
   // Share endpoint (no Bearer auth — token in URL provides auth)
