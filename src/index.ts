@@ -5,6 +5,7 @@ import { createReadStream } from "node:fs";
 import { lookup } from "mime-types";
 import { timingSafeEqual } from "node:crypto";
 import { validateToken } from "./share-token.js";
+import { startHeimdallReporter } from "./heimdall-report.js";
 
 // --- Configuration ---
 
@@ -361,5 +362,13 @@ if (process.env.NODE_ENV !== "test" && process.argv[1] && import.meta.url === `f
     if (ALLOWED_HOSTS.length > 0) {
       console.log(`Allowed hosts: ${HOST}:${PORT}, localhost:${PORT}, 127.0.0.1:${PORT}, ${ALLOWED_HOSTS.join(", ")}`);
     }
+
+    // Start Heimdall self-report (no-op if env vars are absent).
+    // The interval is unref()'d, so it never blocks process exit and we
+    // deliberately register NO signal handlers here — adding a SIGTERM/SIGINT
+    // listener would override Node's default termination and leave the file
+    // server running on systemd stop / Ctrl-C. Node's default handling exits
+    // the process; the unref'd timer simply stops with it.
+    startHeimdallReporter(ROOT_DIR);
   });
 }
