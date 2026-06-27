@@ -67,7 +67,7 @@ async function pushPanel(
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), PUSH_TIMEOUT_MS);
   try {
-    await fetch(hubUrl, {
+    const response = await fetch(hubUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -76,6 +76,13 @@ async function pushPanel(
       body: JSON.stringify(panel),
       signal: ac.signal,
     });
+    // Treat non-2xx as a (logged) failure — fetch resolves for 4xx/5xx.
+    // Log only the panel id + status code; never the token, headers, or body.
+    if (!response.ok) {
+      console.warn(
+        `[mimir] Heimdall push rejected (panel=${panel.panel}, status=${response.status}).`,
+      );
+    }
   } catch (err) {
     console.warn(
       `[mimir] Heimdall push failed (panel=${panel.panel}):`,
@@ -123,7 +130,15 @@ export function startHeimdallReporter(rootDir: string): (() => void) | null {
   }
 
   const fire = (): void => {
-    void runReport(hubUrl, token, rootDir);
+    // Terminal catch: runReport is fail-soft internally, but guard the
+    // fire-and-forget call so any unexpected rejection (e.g. outside the
+    // inner fetch try/catch) can never become an unhandled rejection / crash.
+    runReport(hubUrl, token, rootDir).catch((err) => {
+      console.warn(
+        "[mimir] Heimdall report cycle errored:",
+        err instanceof Error ? err.message : String(err),
+      );
+    });
   };
 
   // Immediate report on startup, then every 60 s
