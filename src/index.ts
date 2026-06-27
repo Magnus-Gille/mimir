@@ -5,6 +5,7 @@ import { createReadStream } from "node:fs";
 import { lookup } from "mime-types";
 import { timingSafeEqual } from "node:crypto";
 import { validateToken } from "./share-token.js";
+import { startHeimdallReporter } from "./heimdall-report.js";
 
 // --- Configuration ---
 
@@ -360,6 +361,13 @@ if (process.env.NODE_ENV !== "test" && process.argv[1] && import.meta.url === `f
     }
     if (ALLOWED_HOSTS.length > 0) {
       console.log(`Allowed hosts: ${HOST}:${PORT}, localhost:${PORT}, 127.0.0.1:${PORT}, ${ALLOWED_HOSTS.join(", ")}`);
+    }
+
+    // Start Heimdall self-report (no-op if env vars are absent)
+    const stopReporter = startHeimdallReporter(ROOT_DIR);
+    if (stopReporter) {
+      process.once("SIGTERM", stopReporter);
+      process.once("SIGINT", stopReporter);
     }
   });
 }
