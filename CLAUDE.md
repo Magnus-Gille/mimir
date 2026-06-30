@@ -12,7 +12,7 @@ Part of the Grimnir system: **Munin** (memory/brain), **Mímir** (file archive),
 - **Framework:** Express (minimal — static file serving + auth + directory listing)
 - **Auth:** Bearer token (`MIMIR_API_KEY`), timing-safe comparison
 - **Deployment:** NAS Pi (Pi 2), Cloudflare Tunnel, systemd
-- **Storage:** `~/mimir/` on both laptop and Pi (symmetric), backed up to `/mnt/timemachine/backups/mimir/`
+- **Storage:** `~/mimir/` on both laptop and Pi (symmetric), backed up to `/mnt/timemachine/backups/mimir/`. Mímir owns this rsync (`backup-artifacts.sh`); the **destination disk** — its mount, capacity, Samba/Time Machine share, and hardware health — is owned by **Brokkr**, the platform/substrate layer ([brokkr](https://github.com/Magnus-Gille/brokkr) repo). Boundary: Mímir guarantees *what* gets backed up; Brokkr guarantees the disk it lands on is mounted, healthy, and has headroom.
 - **Server code:** `~/mimir-server/` on Pi (separate from artifacts)
 
 ### Endpoints
