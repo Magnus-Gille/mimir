@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Mímir offsite backup daily
+
+[Timer]
+# Daily at 03:30 local, jittered up to 15 min to avoid thundering-herd on the
+# provider. Persistent=true runs a missed backup on next boot (e.g. Pi was off).
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=900
+Persistent=true
+
+[Install]
+WantedBy=timers.target
