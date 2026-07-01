@@ -6,21 +6,17 @@ set -euo pipefail
 #
 # ┌─ REFERENCE IMPLEMENTATION of the Grimnir offsite-backup pattern (mimir#9) ─┐
 # │ munin-memory#172 and brokkr#1 copy-adapt this script. The shared contract: │
-# │   • Encrypted: rclone crypt — file CONTENTS and NAMES never leave in clear. │
-# │   • Mirror `current/` + N-day history via --backup-dir → `archive/<date>/`. │
-# │   • Non-destructive: deletions are MOVED to archive, pruned after N days.   │
-# │   • --max-delete guard: abort a run that would delete an implausible count. │
-# │   • Heartbeat stamp + Heimdall status panel so a silent failure is visible. │
-# │   • Fail-loud: any error exits non-zero AND pushes a `fail` panel.          │
+# │   • Encrypted: rclone crypt — file CONTENTS and NAMES never leave in clear, │
+# │     and the script fails closed if the remote is not a verified crypt.      │
+# │   • Mirror `current/` + N-day history via --backup-dir → `archive/<run>/`.  │
+# │   • Non-destructive: deletions are MOVED to a per-run archive dir; whole    │
+# │     archive dirs older than N days are pruned by their NAME (not mtime).     │
+# │   • Preflight delete-count gate + --max-delete: abort an implausible wipe.   │
+# │   • Heartbeat stamp + Heimdall status panel so a silent failure is visible.  │
+# │   • Fail-loud: every expected failure pushes a `fail` panel and exits ≠0.    │
 # └────────────────────────────────────────────────────────────────────────────┘
 #
-# Prereqs (see docs/offsite-backup.md for the one-time setup):
-#   • rclone installed on the Pi.
-#   • An rclone crypt remote (default name `mimir-crypt`) wrapping a OneDrive remote.
-#   • RCLONE_CONFIG chmod 600, owned by magnus — it holds the OneDrive OAuth token
-#     AND the (obscured) crypt password. NEVER commit it to the repo.
-#   • The crypt password + salt backed up independently (lose them = the offsite
-#     copy is permanently unreadable). See the doc's "Key custody" section.
+# Runs on Linux (GNU date). Prereqs / setup / key custody: docs/offsite-backup.md.
 #
 # Usage:
 #   ./offsite-backup.sh              run the backup
@@ -28,14 +24,15 @@ set -euo pipefail
 
 # ---- Config (override via environment / EnvironmentFile) ----
 SERVICE="${MIMIR_OFFSITE_SERVICE:-mimir}"                 # Heimdall service id
+PANEL="${MIMIR_OFFSITE_PANEL:-offsite}"                   # Heimdall panel id
 SOURCE="${MIMIR_OFFSITE_ROOT:-/home/magnus/mimir}"        # directory to back up
-REMOTE="${MIMIR_OFFSITE_REMOTE:-mimir-crypt}"             # rclone crypt remote name
-RETENTION_DAYS="${MIMIR_OFFSITE_RETENTION_DAYS:-30}"      # archive prune horizon
-MAX_DELETE="${MIMIR_OFFSITE_MAX_DELETE:-1000}"            # abort if a run deletes > this
+REMOTE="${MIMIR_OFFSITE_REMOTE:-mimir-crypt}"             # rclone crypt remote NAME (no ':' / path)
+RETENTION_DAYS="${MIMIR_OFFSITE_RETENTION_DAYS:-30}"      # archive prune horizon (days)
+MAX_DELETE="${MIMIR_OFFSITE_MAX_DELETE:-1000}"            # abort if a run would remove ≥ this many files
+MAX_DELETE_PCT="${MIMIR_OFFSITE_MAX_DELETE_PCT:-25}"      # ...or more than this % of current/
 STAMP="${MIMIR_OFFSITE_STAMP:-$HOME/mimir-server/offsite.stamp}"
 LOG="${MIMIR_OFFSITE_LOG:-$HOME/mimir-server/offsite-backup.log}"
 RCLONE="${RCLONE_BIN:-rclone}"
-PANEL="${MIMIR_OFFSITE_PANEL:-offsite}"                   # Heimdall panel id
 
 DRY_RUN=""
 if [ "${1:-}" = "--dry-run" ] || [ "${MIMIR_OFFSITE_DRYRUN:-}" = "1" ]; then
@@ -57,7 +54,17 @@ push_panel() {
     >/dev/null 2>&1 || true
 }
 
-# Fail loud: report the failing exit code to the log + Heimdall, then propagate it.
+# Expected failure: log, push a fail panel, exit. (ERR trap disabled to avoid
+# a double report.) Used for every preflight/validation failure so a silent
+# dashboard is impossible — the doc's "any error → fail panel" is literal.
+die() {
+  trap - ERR
+  log "ERROR: $*"
+  push_panel fail "$* — see ${LOG}"
+  exit 1
+}
+
+# Unexpected command failure after preflight (e.g. rclone sync aborts).
 on_err() {
   local rc=$?
   trap - ERR
@@ -70,8 +77,9 @@ trap on_err ERR
 mkdir -p "$(dirname "$LOG")"
 
 # ---- Preflight ----
-command -v "$RCLONE" >/dev/null 2>&1 || { log "ERROR: rclone not found (RCLONE_BIN=$RCLONE)"; exit 1; }
-[ -d "$SOURCE" ] || { log "ERROR: source dir missing: $SOURCE"; exit 1; }
+command -v "$RCLONE" >/dev/null 2>&1 || die "rclone not found (RCLONE_BIN=$RCLONE)"
+[ -d "$SOURCE" ] || die "source dir missing: $SOURCE"
+case "$REMOTE" in *:*|*/*) die "MIMIR_OFFSITE_REMOTE must be a remote NAME only, got '$REMOTE'";; esac
 
 # Warn (don't fail) if the rclone config is group/world-readable — it holds secrets.
 CONF="${RCLONE_CONFIG:-$HOME/.config/rclone/rclone.conf}"
@@ -80,18 +88,51 @@ if [ -f "$CONF" ]; then
   case "$PERM" in ""|600|400) ;; *) log "WARN: $CONF is mode $PERM — should be 600 (holds OAuth token + crypt password)";; esac
 fi
 
-# Force an auth/connectivity check against the crypt remote before we start.
-"$RCLONE" lsd "${REMOTE}:" >/dev/null 2>>"$LOG" || { log "ERROR: cannot reach remote '${REMOTE}:' — check rclone config / network"; exit 1; }
+# Fail CLOSED unless the remote is provably a crypt remote with filename encryption.
+# Prevents a misconfigured MIMIR_OFFSITE_REMOTE from uploading plaintext client data.
+# Read only the type/encryption fields; never log the config (it contains the key).
+CONF_SHOW=$("$RCLONE" config show "$REMOTE" 2>/dev/null || true)
+RTYPE=$(printf '%s\n' "$CONF_SHOW" | awk -F' = ' '/^type =/{print $2; exit}')
+FENC=$(printf '%s\n' "$CONF_SHOW" | awk -F' = ' '/^filename_encryption =/{print $2; exit}')
+[ "$RTYPE" = "crypt" ] || die "remote '$REMOTE' is type '${RTYPE:-unknown}', not crypt — refusing to upload plaintext"
+case "$FENC" in
+  off) die "remote '$REMOTE' has filename_encryption=off — refusing (names would leak)";;
+esac
 
 DEST="${REMOTE}:current"
-ARCHIVE="${REMOTE}:archive/$(date -u +%F)"
+ARCHIVE="${REMOTE}:archive/$(date -u +%Y-%m-%dT%H%M%SZ)"   # per-run dir, pruned by NAME
+
+# Connectivity + ensure destination exists (mkdir is idempotent and proves auth/write).
+if [ -z "$DRY_RUN" ]; then
+  "$RCLONE" mkdir "$DEST" 2>>"$LOG" || die "cannot reach/create ${DEST} — check rclone config / network"
+else
+  "$RCLONE" lsd "${REMOTE}:" >/dev/null 2>>"$LOG" || log "WARN: dry-run remote check failed (remote may be new/empty)"
+fi
+
+# ---- Preflight delete-count gate (mirrors sync-artifacts.sh's rsync safety) ----
+# Files present in current/ but absent from the source would be MOVED to the archive
+# by --backup-dir. That is non-destructive (30-day history), but an implausibly large
+# change set (e.g. the source got wiped) should STOP and alert, not silently mirror an
+# empty current/ and report success. Skipped on dry-run and on the first run (empty dest).
+if [ -z "$DRY_RUN" ]; then
+  DEST_LIST=$("$RCLONE" lsf -R --files-only "$DEST" 2>/dev/null | sort || true)
+  SRC_LIST=$("$RCLONE" lsf -R --files-only "$SOURCE" 2>/dev/null | sort || true)
+  DEST_N=$(printf '%s\n' "$DEST_LIST" | grep -c . || true)
+  DELETES=$(comm -23 <(printf '%s\n' "$DEST_LIST") <(printf '%s\n' "$SRC_LIST") | grep -c . || true)
+  if [ "$DEST_N" -gt 0 ] && [ "$DELETES" -gt 0 ]; then
+    PCT=$(( DELETES * 100 / DEST_N ))
+    if [ "$DELETES" -ge "$MAX_DELETE" ] || [ "$PCT" -gt "$MAX_DELETE_PCT" ]; then
+      die "aborting: sync would remove ${DELETES}/${DEST_N} files (${PCT}%) from current/ — over threshold (max ${MAX_DELETE} or ${MAX_DELETE_PCT}%)"
+    fi
+    log "delete-count gate ok: ${DELETES}/${DEST_N} files (${PCT}%) would move to archive"
+  fi
+fi
 
 log "starting offsite backup ${DRY_RUN:+(dry-run) }${SOURCE} → ${DEST} (archive: ${ARCHIVE})"
 
-# Mirror the current state. Overwritten/deleted files are MOVED into the dated
-# archive (never destroyed). --max-delete aborts the run if the change set is
-# implausibly large (e.g. the source was accidentally wiped) — even though the
-# archive would still hold them, we'd rather stop and be noticed.
+# Mirror the current state. Overwritten/deleted files are MOVED into the per-run
+# archive dir (never destroyed). --max-delete is a second-line guard behind the
+# preflight gate above.
 # shellcheck disable=SC2086
 "$RCLONE" sync "${SOURCE}/" "$DEST" \
   --backup-dir "$ARCHIVE" \
@@ -105,14 +146,29 @@ if [ -n "$DRY_RUN" ]; then
   exit 0
 fi
 
-# Prune archive entries older than the retention horizon. A prune failure must
-# NOT fail the backup (the mirror already succeeded), so it's best-effort.
-if "$RCLONE" delete "${REMOTE}:archive" --min-age "${RETENTION_DAYS}d" --log-file "$LOG" --log-level INFO; then
-  "$RCLONE" rmdirs "${REMOTE}:archive" --leave-root --log-file "$LOG" --log-level INFO \
-    || log "WARN: archive rmdirs cleanup failed — harmless, will retry next run"
-else
-  log "WARN: archive prune (>${RETENTION_DAYS}d) failed — will retry next run"
-fi
+# Prune whole archive run-dirs older than the retention horizon, BY NAME (the dir's
+# UTC timestamp), not by object mtime — sync preserves source mtimes, so an old file
+# just moved into the archive must NOT be judged old by its own mtime. Best-effort:
+# a prune failure must not fail the backup (the mirror already succeeded).
+prune_archive() {
+  local cutoff d
+  cutoff=$(date -u -d "${RETENTION_DAYS} days ago" +%Y-%m-%dT%H%M%SZ 2>/dev/null || true)
+  if [ -z "$cutoff" ]; then
+    log "WARN: cannot compute retention cutoff (non-GNU date?) — skipping prune"
+    return 0
+  fi
+  while IFS= read -r d; do
+    d="${d%/}"; [ -n "$d" ] || continue
+    if [[ "$d" < "$cutoff" ]]; then
+      if "$RCLONE" purge "${REMOTE}:archive/${d}" 2>>"$LOG"; then
+        log "pruned archive/${d} (older than ${RETENTION_DAYS}d)"
+      else
+        log "WARN: purge archive/${d} failed — will retry next run"
+      fi
+    fi
+  done < <("$RCLONE" lsf --dirs-only "${REMOTE}:archive" 2>/dev/null || true)
+}
+prune_archive
 
 # Heartbeat + success panel.
 date +%s > "$STAMP"

@@ -146,7 +146,8 @@ Syncs `~/mimir/` to `~/mimir/` on the NAS Pi. Symmetric paths on both machines �
 | `MIMIR_OFFSITE_REMOTE` | `mimir-crypt` | rclone crypt remote name (offsite backup) |
 | `MIMIR_OFFSITE_ROOT` | `/home/magnus/mimir` | Directory pushed offsite |
 | `MIMIR_OFFSITE_RETENTION_DAYS` | `30` | Archive (deleted/changed file) prune horizon |
-| `MIMIR_OFFSITE_MAX_DELETE` | `1000` | Abort a run that would delete more than this |
+| `MIMIR_OFFSITE_MAX_DELETE` | `1000` | Abort a run that would delete more than this many files |
+| `MIMIR_OFFSITE_MAX_DELETE_PCT` | `25` | ...or more than this % of `current/` (whichever trips first) |
 
 ## Sharing files
 
@@ -168,10 +169,13 @@ The script: syncs the file to Pi, generates an HMAC-signed token on the Pi, prin
 
 The third copy in a 3-2-1 strategy: `scripts/offsite-backup.sh` pushes `~/mimir/`
 to OneDrive as a **client-side-encrypted** copy via an `rclone crypt` remote (contents
-*and* filenames encrypted — required because `mgc/` is client data). Runs on the Pi via
-`mimir-offsite.timer` (daily). Mirrors `current/` and keeps 30 days of deleted/changed
-versions in `archive/<date>/` (`--backup-dir`, never destructive), with a `--max-delete`
-guard, a heartbeat stamp, and a `pass`/`fail` Heimdall panel. Fail-loud throughout.
+*and* filenames encrypted — required because `mgc/` is client data; the script fails
+*closed* if the remote isn't a verified crypt). Runs on the Pi via `mimir-offsite.timer`
+(daily). Mirrors `current/` and keeps 30 days of deleted/changed versions in per-run
+`archive/<utc-timestamp>/` dirs, pruned **by name** (`--backup-dir`, never destructive).
+Guards: a preflight delete-count gate (+ `--max-delete`) aborts an implausible wipe.
+Emits a heartbeat stamp and a `pass`/`fail` Heimdall panel. The mirror is fail-loud;
+archive pruning is best-effort (warns, still `pass`).
 
 This is the **reference implementation** of the Grimnir offsite-backup pattern
 (mimir#9); munin-memory#172 and brokkr#1 copy-adapt it (each with its **own** crypt key
