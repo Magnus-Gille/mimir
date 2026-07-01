@@ -65,8 +65,12 @@ mimir/
     ├── share.sh                # Generate share URL (sync + ssh + clipboard)
     ├── sync-artifacts.sh       # Manual rsync ~/mimir/ from laptop to NAS
     ├── sync-artifacts-daemon.sh # Launchd daemon wrapper (auto-sync)
-    └── backup-artifacts.sh     # Backup artifacts SD→NAS disk (cron on Pi)
+    ├── backup-artifacts.sh     # Backup artifacts SD→NAS disk (cron on Pi)
+    └── offsite-backup.sh       # Encrypted push to cloud (rclone crypt; systemd timer)
 ```
+
+Offsite backup also ships `mimir-offsite.service` + `mimir-offsite.timer` (systemd
+units, repo root) and `docs/offsite-backup.md` (setup + runbook + disaster recovery).
 
 ## How to build
 
@@ -139,6 +143,10 @@ Syncs `~/mimir/` to `~/mimir/` on the NAS Pi. Symmetric paths on both machines �
 | `MIMIR_RATE_LIMIT` | `60` | Max requests per minute per IP |
 | `MIMIR_SHARE_SECRET` | — | HMAC secret for share links (optional, enables `/share`) |
 | `MIMIR_BASE_URL` | `https://mimir.gille.ai` | Base URL for generated share links (CLI only) |
+| `MIMIR_OFFSITE_REMOTE` | `mimir-crypt` | rclone crypt remote name (offsite backup) |
+| `MIMIR_OFFSITE_ROOT` | `/home/magnus/mimir` | Directory pushed offsite |
+| `MIMIR_OFFSITE_RETENTION_DAYS` | `30` | Archive (deleted/changed file) prune horizon |
+| `MIMIR_OFFSITE_MAX_DELETE` | `1000` | Abort a run that would delete more than this |
 
 ## Sharing files
 
@@ -155,6 +163,24 @@ The script: syncs the file to Pi, generates an HMAC-signed token on the Pi, prin
 **Requires:** `MIMIR_SHARE_SECRET` in the Pi's `.env` file. Generate with `openssl rand -hex 32`.
 
 **CF Access:** The `/share/*` path needs a Cloudflare Access bypass policy (Allow Everyone) since recipients don't have service tokens. The HMAC token provides authentication instead.
+
+## Offsite backup (cloud)
+
+The third copy in a 3-2-1 strategy: `scripts/offsite-backup.sh` pushes `~/mimir/`
+to OneDrive as a **client-side-encrypted** copy via an `rclone crypt` remote (contents
+*and* filenames encrypted — required because `mgc/` is client data). Runs on the Pi via
+`mimir-offsite.timer` (daily). Mirrors `current/` and keeps 30 days of deleted/changed
+versions in `archive/<date>/` (`--backup-dir`, never destructive), with a `--max-delete`
+guard, a heartbeat stamp, and a `pass`/`fail` Heimdall panel. Fail-loud throughout.
+
+This is the **reference implementation** of the Grimnir offsite-backup pattern
+(mimir#9); munin-memory#172 and brokkr#1 copy-adapt it (each with its **own** crypt key
+— never shared). Full setup, key custody, verification, and disaster-recovery steps:
+[`docs/offsite-backup.md`](docs/offsite-backup.md).
+
+> **Boundary:** this is *cloud replication of Mímir's own artifacts* — a service
+> concern, so it lives here. The destination **disk** and **Time Machine** stay Brokkr's
+> (TM is a machine-level backup and does not go to cloud — see the doc/architecture).
 
 ## Key design decisions
 

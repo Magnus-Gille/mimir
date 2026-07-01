@@ -1,0 +1,28 @@
+[Unit]
+Description=Mímir offsite backup (encrypted push to cloud)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=magnus
+WorkingDirectory=/home/magnus/mimir-server
+ExecStart=/home/magnus/mimir-server/scripts/offsite-backup.sh
+EnvironmentFile=/home/magnus/mimir-server/.env
+# Reuses HEIMDALL_HUB_URL + HEIMDALL_FLEET_TOKEN (shared) for the status panel.
+# The rclone crypt remote + OneDrive OAuth token live in the rclone config
+# (~/.config/rclone/rclone.conf, chmod 600) — NOT in this .env and NOT in the repo.
+Nice=10
+IOSchedulingClass=idle
+
+# Sandboxing
+ProtectSystem=strict
+# rclone rewrites rclone.conf when it refreshes the OneDrive OAuth token, so its
+# config dir must be writable. The log + stamp live under mimir-server.
+ReadWritePaths=/home/magnus/mimir-server /home/magnus/.config/rclone
+ReadOnlyPaths=/home/magnus/mimir
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
