@@ -12,7 +12,17 @@ INBOX="$NAS:/home/magnus/mimir-inbox/"
 
 # Step 1: Import new files from inbox
 echo "==> Importing from inbox..."
-rsync -av --ignore-existing --remove-source-files "$INBOX" "$LOCAL"
+IMPORTED=$(rsync -av --ignore-existing --remove-source-files --out-format='%n' "$INBOX" "$LOCAL" | grep -v '/$' || true)
+
+# Step 1.5: Secret-scan newly imported files before they can reach the NAS's
+# Bearer-servable tree. Hits are quarantined out of $LOCAL and alerted —
+# see src/secret-scan.ts and mimir#13.
+if [ -n "$IMPORTED" ]; then
+  echo "==> Scanning imported files for secrets..."
+  echo "$IMPORTED" | node "$(dirname "$0")/../dist/cli/secret-scan.js" --stdin "$LOCAL"
+else
+  echo "==> No new files imported — skipping secret scan."
+fi
 
 # Step 2: Mirror laptop → NAS (laptop is source of truth)
 # Safety: abort if --delete would remove >20% of remote files

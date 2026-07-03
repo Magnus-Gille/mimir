@@ -43,6 +43,9 @@ Agents don't talk to Mímir directly via MCP. Instead:
    - Security headers (X-Content-Type-Options, X-Frame-Options, CSP, X-Robots-Tag)
    - Dotfiles hidden from directory listings
    - systemd sandboxing (ProtectSystem=strict, ReadOnlyPaths for artifacts, NoNewPrivileges)
+   - Ingest-time secret scan (`src/secret-scan.ts`) — newly-imported inbox files are scanned
+     for known secret formats before they reach the servable tree; hits are quarantined and
+     alerted (Heimdall panel, or a loud log if the panel push isn't configured). See mimir#13.
 
 ## Project structure
 
@@ -55,11 +58,15 @@ mimir/
 ├── src/
 │   ├── index.ts           # Express server
 │   ├── share-token.ts     # HMAC token generation + validation
+│   ├── secret-scan.ts     # Ingest-time secret scan + quarantine (mimir#13)
+│   ├── heimdall-report.ts # Periodic self-report + panel push helper
 │   └── cli/
-│       └── share.ts       # Pi-side CLI for generating share URLs
+│       ├── share.ts       # Pi-side CLI for generating share URLs
+│       └── secret-scan.ts # CLI wrapper for the ingest secret scan
 ├── tests/
 │   ├── server.test.ts     # supertest integration tests
-│   └── share-token.test.ts # Token unit tests
+│   ├── share-token.test.ts # Token unit tests
+│   └── secret-scan.test.ts # Secret scan + quarantine unit tests
 └── scripts/
     ├── deploy-nas.sh           # Deploy to NAS Pi
     ├── share.sh                # Generate share URL (sync + ssh + clipboard)
@@ -131,6 +138,20 @@ cat ~/.local/share/mimir/logs/sync-stdout.log  # View logs
 
 Syncs `~/mimir/` to `~/mimir/` on the NAS Pi. Symmetric paths on both machines — no excludes needed.
 
+### Ingest secret scan
+
+Every inbox import (`sync-artifacts.sh` / `sync-artifacts-daemon.sh` Step 1) is followed by a
+secret scan of just the newly-transferred files (`src/cli/secret-scan.ts --stdin`, fed the
+`rsync --out-format='%n'` file list) — before Step 2 mirrors `~/mimir/` to the NAS's
+Bearer-servable tree. Same detector class Munin uses at write-time (known secret-format
+regexes: AWS/GitHub/Slack/Stripe/Google keys, private key blocks, JWTs, generic quoted
+`key=value` assignments), re-implemented locally in `src/secret-scan.ts` — not imported
+across repos. A hit is moved to `MIMIR_QUARANTINE_DIR` (default `<root>-quarantine`,
+outside the servable tree) and never reaches the NAS; the alert always logs loudly and
+additionally pushes a `fail`-state Heimdall panel when `HEIMDALL_HUB_URL`/
+`HEIMDALL_FLEET_TOKEN` are set. Manual full-tree audit: `node dist/cli/secret-scan.js
+~/mimir` (omit `--stdin` to walk the whole tree).
+
 ## Environment variables
 
 | Variable | Default | Description |
@@ -148,6 +169,8 @@ Syncs `~/mimir/` to `~/mimir/` on the NAS Pi. Symmetric paths on both machines �
 | `MIMIR_OFFSITE_RETENTION_DAYS` | `30` | Archive (deleted/changed file) prune horizon |
 | `MIMIR_OFFSITE_MAX_DELETE` | `1000` | Abort a run that would delete more than this many files |
 | `MIMIR_OFFSITE_MAX_DELETE_PCT` | `25` | ...or more than this % of `current/` (whichever trips first) |
+| `MIMIR_QUARANTINE_DIR` | `<target-dir>-quarantine` | Where ingest secret-scan hits are moved (see below) |
+| `HEIMDALL_HUB_URL` / `HEIMDALL_FLEET_TOKEN` | — | Heimdall panel push — periodic self-report and secret-scan `fail` alerts |
 
 ## Sharing files
 
