@@ -15,12 +15,12 @@
 - **Cleaned stale STATUS.md** — an uncommitted March-era edit had been sitting in the working tree since 2026-03-28; replaced with this entry
 
 ## In Progress
-- `feat/offsite-cloud-backup` branch (2 commits, pushed 2026-07-01) — encrypted offsite cloud backup via rclone crypt, codex findings addressed; not yet PR:ed/merged
+- None
 
 ## Blockers
 - None
 
 ## Next Steps
-1. Land `feat/offsite-cloud-backup` (PR + review + merge)
+1. Delete stale branch `feat/offsite-cloud-backup` (local + origin) — already squash-merged as PR #10 (head 6311b75 == branch head); verified nothing unmerged. Deletion needs manual confirmation.
 2. **Hugin Phase 2** — email delivery for task results (morning briefing)
 3. 11 open tickets in `feedback/munin-memory`
