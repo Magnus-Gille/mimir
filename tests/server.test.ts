@@ -16,6 +16,10 @@ function setup() {
   writeFileSync(join(TEST_ROOT, "doc.pdf"), "%PDF-1.4 fake pdf content");
   writeFileSync(join(TEST_ROOT, "subdir", "nested.md"), "# Nested file\n\nSome content.");
   writeFileSync(join(TEST_ROOT, ".hidden"), "should not appear in listings");
+  writeFileSync(join(TEST_ROOT, "data.csv"), "id,namn\n1,Åsa");
+  writeFileSync(join(TEST_ROOT, 'quo"te.md'), "quoted filename");
+  writeFileSync(join(TEST_ROOT, "åäö.md"), "svenska tecken");
+  writeFileSync(join(TEST_ROOT, "line\nbreak.md"), "control char filename");
 }
 
 function teardown() {
@@ -294,6 +298,51 @@ describe("share links: /share/:token", () => {
     expect(res.text).toContain("# Nested file");
   });
 
+  it("serves markdown as attachment (download), not inline", async () => {
+    const token = generateToken("subdir/nested.md", 3600, TEST_SHARE_SECRET);
+    const res = await request(app).get(`/share/${token}`);
+    expect(res.status).toBe(200);
+    expect(res.headers["content-disposition"]).toBe('attachment; filename="nested.md"');
+  });
+
+  it("declares utf-8 charset on inline text types", async () => {
+    const token = generateToken("hello.txt", 3600, TEST_SHARE_SECRET);
+    const res = await request(app).get(`/share/${token}`);
+    expect(res.headers["content-type"]).toBe("text/plain; charset=utf-8");
+  });
+
+  it("serves CSV as attachment with utf-8 charset", async () => {
+    const token = generateToken("data.csv", 3600, TEST_SHARE_SECRET);
+    const res = await request(app).get(`/share/${token}`);
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toBe("text/csv; charset=utf-8");
+    expect(res.headers["content-disposition"]).toBe('attachment; filename="data.csv"');
+  });
+
+  it("escapes double quotes in attachment filenames", async () => {
+    const token = generateToken('quo"te.md', 3600, TEST_SHARE_SECRET);
+    const res = await request(app).get(`/share/${token}`);
+    expect(res.status).toBe(200);
+    expect(res.headers["content-disposition"]).toBe('attachment; filename="quo\\"te.md"');
+  });
+
+  it("serves non-ASCII attachment filenames without error", async () => {
+    const token = generateToken("åäö.md", 3600, TEST_SHARE_SECRET);
+    const res = await request(app).get(`/share/${token}`);
+    expect(res.status).toBe(200);
+    // latin1-representable names stay as a plain quoted filename per RFC 6266
+    expect(res.headers["content-disposition"]).toBe('attachment; filename="åäö.md"');
+  });
+
+  it("encodes control characters in filenames instead of crashing", async () => {
+    const token = generateToken("line\nbreak.md", 3600, TEST_SHARE_SECRET);
+    const res = await request(app).get(`/share/${token}`);
+    expect(res.status).toBe(200);
+    expect(res.headers["content-disposition"]).toContain(
+      "filename*=UTF-8''line%0Abreak.md",
+    );
+  });
+
   it("serves PDFs inline", async () => {
     const token = generateToken("doc.pdf", 3600, TEST_SHARE_SECRET);
     const res = await request(app).get(`/share/${token}`);
@@ -364,6 +413,7 @@ describe("share links: /share/:token", () => {
       .set("Range", "bytes=0-4");
     expect(res.status).toBe(206);
     expect(res.text).toBe("Hello");
+    expect(res.headers["content-type"]).toBe("text/plain; charset=utf-8");
   });
 });
 

@@ -16,11 +16,13 @@
   },
   "license": "MIT",
   "dependencies": {
+    "content-disposition": "^1.1.0",
     "express": "^5.2.1",
     "mime-types": "^3.0.2"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/content-disposition": "^0.5.9",
     "@types/express": "^5.0.6",
     "@types/mime-types": "^3.0.1",
     "@types/node": "^20.19.3",

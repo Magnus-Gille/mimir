@@ -3,6 +3,7 @@ import { resolve, join, relative } from "node:path";
 import { stat, readdir } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { lookup } from "mime-types";
+import contentDisposition from "content-disposition";
 import { timingSafeEqual } from "node:crypto";
 import { validateToken } from "./share-token.js";
 import { startHeimdallReporter } from "./heimdall-report.js";
@@ -68,8 +69,6 @@ const INLINE_TYPES = new Set([
   "application/pdf",
   "text/plain",
   "text/html",
-  "text/csv",
-  "text/markdown",
   "image/png",
   "image/jpeg",
   "image/gif",
@@ -107,13 +106,13 @@ async function serveFile(
     }
 
     const mimeType = lookup(resolved) || "application/octet-stream";
+    const contentType = mimeType.startsWith("text/") ? `${mimeType}; charset=utf-8` : mimeType;
     const fileSize = stats.size;
 
     // Content-Disposition for share links
     if (options?.disposition) {
-      const filename = resolved.split("/").pop() ?? "download";
       const useInline = options.disposition === "inline" && INLINE_TYPES.has(mimeType);
-      res.setHeader("Content-Disposition", useInline ? "inline" : `attachment; filename="${filename}"`);
+      res.setHeader("Content-Disposition", useInline ? "inline" : contentDisposition(resolved));
     }
 
     // Range request support
@@ -133,14 +132,14 @@ async function serveFile(
         res.setHeader("Content-Range", `bytes ${start}-${end}/${fileSize}`);
         res.setHeader("Accept-Ranges", "bytes");
         res.setHeader("Content-Length", end - start + 1);
-        res.setHeader("Content-Type", mimeType);
+        res.setHeader("Content-Type", contentType);
         res.setHeader("Last-Modified", stats.mtime.toUTCString());
         createReadStream(resolved, { start, end }).pipe(res);
         return;
       }
     }
 
-    res.setHeader("Content-Type", mimeType);
+    res.setHeader("Content-Type", contentType);
     res.setHeader("Content-Length", fileSize);
     res.setHeader("Accept-Ranges", "bytes");
     res.setHeader("Last-Modified", stats.mtime.toUTCString());
