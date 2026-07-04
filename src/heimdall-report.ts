@@ -18,7 +18,7 @@ interface StatPanel {
   unit?: string;
 }
 
-type Panel = StatusPanel | StatPanel;
+export type Panel = StatusPanel | StatPanel;
 
 // --- Pure panel builder (unit-testable) ---
 
@@ -59,7 +59,12 @@ export function buildReportPanels({
 const REPORT_INTERVAL_MS = 60_000;
 const PUSH_TIMEOUT_MS = 4_000;
 
-async function pushPanel(
+/**
+ * POST a single panel to the Heimdall hub. Exported so one-shot callers
+ * (e.g. the secret-scan alert) can reuse the same push semantics — fail-soft,
+ * 4 s timeout, never throws — without duplicating them.
+ */
+export async function pushPanel(
   hubUrl: string,
   token: string,
   panel: Panel,

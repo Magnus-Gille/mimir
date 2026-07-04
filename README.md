@@ -53,7 +53,7 @@ TTL formats: `1h`, `6h`, `12h`, `24h`, `3d`, `7d`. Requires `MIMIR_SHARE_SECRET`
 ## Testing
 
 ```bash
-npm test          # 47 tests
+npm test          # 97 tests
 npm run test:watch
 ```
 
@@ -90,6 +90,8 @@ Files arrive via rsync from `~/mimir/` on the laptop — no upload endpoint.
 | `MIMIR_RATE_LIMIT` | `60` | Max requests per minute per IP |
 | `MIMIR_SHARE_SECRET` | — | HMAC secret for share links (optional) |
 | `MIMIR_BASE_URL` | `https://mimir.gille.ai` | Base URL for generated share links |
+| `MIMIR_QUARANTINE_DIR` | `<root>-quarantine` | Where ingest-time secret-scan hits are moved |
+| `HEIMDALL_HUB_URL` / `HEIMDALL_FLEET_TOKEN` | — | Heimdall panel push (status reporting + secret-scan alerts) |
 
 ## Security
 
@@ -100,6 +102,16 @@ Files arrive via rsync from `~/mimir/` on the laptop — no upload endpoint.
 - Security headers (CSP, X-Frame-Options, X-Content-Type-Options, noindex)
 - Dotfiles hidden from listings
 - systemd sandboxing on the Pi
+- Ingest-time secret scan (see below) — hits are quarantined before they can be served
+
+### Secret scanning on ingest
+
+Every rsync inbox import is scanned for known secret formats (AWS/GitHub/Slack/Stripe/Google
+keys, private key blocks, JWTs, generic quoted `key=value` assignments) before the file is
+mirrored to the NAS's Bearer-servable tree. A hit is moved to a quarantine directory
+(`MIMIR_QUARANTINE_DIR`, default `<root>-quarantine`) and logged loudly; if `HEIMDALL_HUB_URL`
+/ `HEIMDALL_FLEET_TOKEN` are set, a `fail`-state Heimdall panel is also pushed. See
+`src/secret-scan.ts`.
 
 ## Design decisions
 
@@ -114,15 +126,19 @@ Files arrive via rsync from `~/mimir/` on the laptop — no upload endpoint.
 src/
 ├── index.ts           # Express server
 ├── share-token.ts     # HMAC token generation + validation
+├── secret-scan.ts     # Ingest-time secret scan + quarantine
+├── heimdall-report.ts # Periodic self-report + panel push helper
 └── cli/
-    └── share.ts       # CLI for generating share URLs
+    ├── share.ts       # CLI for generating share URLs
+    └── secret-scan.ts # CLI wrapper for the ingest secret scan
 tests/
 ├── server.test.ts     # Integration tests (supertest)
-└── share-token.test.ts
+├── share-token.test.ts
+└── secret-scan.test.ts
 scripts/
 ├── deploy-nas.sh      # Deploy to remote host
 ├── share.sh           # Generate share URL
-├── sync-artifacts.sh  # Rsync files to remote host
+├── sync-artifacts.sh  # Rsync files to remote host (scans on import)
 └── backup-artifacts.sh
 ```
 
