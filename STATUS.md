@@ -1,41 +1,26 @@
 # Project Status
 
-**Last session:** 2026-03-27
+**Last session:** 2026-07-04
 **Branch:** main
-**Last commit:** 8f3f046 feat: add temporary share URLs with HMAC-signed tokens
+**Last commit:** bd8c238 fix: share links download text files with correct utf-8 charset (#17)
 
 ## Completed This Session
-- **Implemented share URLs feature** (8f3f046)
-  - `src/share-token.ts` — HMAC token generation + validation (dot-separated format)
-  - `src/cli/share.ts` — Pi-side CLI, verifies file exists before minting
-  - `scripts/share.sh` — laptop wrapper: rsync + ssh + pbcopy
-  - `/share/:token` endpoint in `src/index.ts` (no Bearer auth, HMAC validates)
-- **Server hardening** (same commit)
-  - Extracted rate limiting into standalone middleware (was inside auth middleware)
-  - Added `trust proxy` for Cloudflare Tunnel
-  - Added `Cache-Control: no-store` and `Referrer-Policy: no-referrer`
-  - Extracted file-serving into shared `serveFile()` helper (used by `/files/*` and `/share/*`)
-- **Debated plan with Codex** before implementing (debate/share-urls-summary.md)
-  - 14 critique points, 11 changed the plan, 21% self-review catch rate
-  - Key shifts: Pi-only minting (no shared secret), Node for token logic, hardening as prerequisite
-- **Deployed to Pi** and configured `MIMIR_SHARE_SECRET` in .env
-- **Configured CF Access bypass** — "Public share links" bypass policy on mimir.gille.ai app
-- **Created `/share` skill** — `~/.claude/skills/share/SKILL.md`
-- **Tested end-to-end** — `/share` of timeline-v3.png returned 200 image/png via public URL
-- 47 tests passing (37 server + 10 token unit)
-
-- **Re-applied lost Hugin fixes** to backup/sync scripts (5e7d54a)
-  - backup-artifacts.sh: removed --delete, added mount check (HD is append-only)
-  - sync-artifacts.sh + daemon: added 20% delete threshold safety gate
-  - Root cause: deploy-nas.sh overwrote Pi changes. Added submit-task rule 16.
-- Deployed fixed scripts to NAS Pi
+- **Fixed /share serving bugs** (PR #17, squash-merged + deployed to NAS Pi)
+  - Markdown/CSV now served as `attachment` (download) instead of inline raw text
+  - `charset=utf-8` on all `text/*` responses (Swedish text was mojibake under browsers' Latin-1 guess)
+  - `Content-Disposition` filenames formatted via `content-disposition` pkg (RFC 6266/5987) — quotes, control chars and non-latin1 names no longer break the header or 500
+  - `scripts/share.sh`: macOS openrsync ignores the `/./` marker in `rsync --relative` (file landed at `/home/magnus/mimir/Users/magnus/mimir/...`) — now syncs to an explicit destination; also rejects `..` segments and `printf %q`-quotes all remote-side args
+  - Cross-model Codex review (gpt-5.5) before merge: 3 findings, all fixed red/green
+  - 108 tests passing
+- **Cleaned stale STATUS.md** — an uncommitted March-era edit had been sitting in the working tree since 2026-03-28; replaced with this entry
 
 ## In Progress
-- None
+- `feat/offsite-cloud-backup` branch (2 commits, pushed 2026-07-01) — encrypted offsite cloud backup via rclone crypt, codex findings addressed; not yet PR:ed/merged
 
 ## Blockers
 - None
 
 ## Next Steps
-1. **Hugin Phase 2** — email delivery for task results (morning briefing)
-2. 11 open tickets in `feedback/munin-memory`
+1. Land `feat/offsite-cloud-backup` (PR + review + merge)
+2. **Hugin Phase 2** — email delivery for task results (morning briefing)
+3. 11 open tickets in `feedback/munin-memory`
