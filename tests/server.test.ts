@@ -294,6 +294,19 @@ describe("share links: /share/:token", () => {
     expect(res.text).toContain("# Nested file");
   });
 
+  it("serves markdown as attachment (download), not inline", async () => {
+    const token = generateToken("subdir/nested.md", 3600, TEST_SHARE_SECRET);
+    const res = await request(app).get(`/share/${token}`);
+    expect(res.status).toBe(200);
+    expect(res.headers["content-disposition"]).toBe('attachment; filename="nested.md"');
+  });
+
+  it("declares utf-8 charset on inline text types", async () => {
+    const token = generateToken("hello.txt", 3600, TEST_SHARE_SECRET);
+    const res = await request(app).get(`/share/${token}`);
+    expect(res.headers["content-type"]).toBe("text/plain; charset=utf-8");
+  });
+
   it("serves PDFs inline", async () => {
     const token = generateToken("doc.pdf", 3600, TEST_SHARE_SECRET);
     const res = await request(app).get(`/share/${token}`);

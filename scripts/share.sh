@@ -39,8 +39,12 @@ fi
 
 # --- Sync the file to Pi ---
 
+# macOS openrsync ignores the /./ --relative marker and replicates the full
+# local path on the remote, so sync to the explicit destination path instead.
 echo "==> Syncing $REL_PATH to NAS..." >&2
-rsync -az --relative "$LOCAL_ROOT/./$REL_PATH" "$NAS:/home/magnus/mimir/"
+REL_DIR=$(dirname "$REL_PATH")
+[[ "$REL_DIR" != "." ]] && ssh "${NAS%%:*}" "mkdir -p '/home/magnus/mimir/$REL_DIR'"
+rsync -az "$FULL_LOCAL" "$NAS:/home/magnus/mimir/$REL_PATH"
 
 # --- Generate share URL on Pi ---
 

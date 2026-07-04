@@ -68,8 +68,6 @@ const INLINE_TYPES = new Set([
   "application/pdf",
   "text/plain",
   "text/html",
-  "text/csv",
-  "text/markdown",
   "image/png",
   "image/jpeg",
   "image/gif",
@@ -107,6 +105,7 @@ async function serveFile(
     }
 
     const mimeType = lookup(resolved) || "application/octet-stream";
+    const contentType = mimeType.startsWith("text/") ? `${mimeType}; charset=utf-8` : mimeType;
     const fileSize = stats.size;
 
     // Content-Disposition for share links
@@ -133,14 +132,14 @@ async function serveFile(
         res.setHeader("Content-Range", `bytes ${start}-${end}/${fileSize}`);
         res.setHeader("Accept-Ranges", "bytes");
         res.setHeader("Content-Length", end - start + 1);
-        res.setHeader("Content-Type", mimeType);
+        res.setHeader("Content-Type", contentType);
         res.setHeader("Last-Modified", stats.mtime.toUTCString());
         createReadStream(resolved, { start, end }).pipe(res);
         return;
       }
     }
 
-    res.setHeader("Content-Type", mimeType);
+    res.setHeader("Content-Type", contentType);
     res.setHeader("Content-Length", fileSize);
     res.setHeader("Accept-Ranges", "bytes");
     res.setHeader("Last-Modified", stats.mtime.toUTCString());
