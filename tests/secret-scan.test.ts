@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import {
   SECRET_RULES,
@@ -47,6 +47,11 @@ describe("scanText", () => {
   it("flags a GitHub personal access token", () => {
     const hits = scanText(`token: ghp_${"a".repeat(36)}\n`);
     expect(hits.some((h) => h.rule === "github-token")).toBe(true);
+  });
+
+  it("flags a GitHub fine-grained personal access token", () => {
+    const hits = scanText(`token: github_pat_${"a".repeat(22)}_${"b".repeat(59)}\n`);
+    expect(hits.some((h) => h.rule === "github-fine-grained-token")).toBe(true);
   });
 
   it("flags a Slack token", () => {
@@ -111,6 +116,30 @@ describe("scanFile", () => {
     const filePath = join(TEST_ROOT, "image.png");
     writeFileSync(filePath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02, 0x00, 0xff]));
     await expect(scanFile(filePath)).resolves.toEqual([]);
+  });
+
+  it("does not follow a symlink to read/scan a file outside the tree", async () => {
+    const outsidePath = join(import.meta.dirname, "__secret_scan_outside_target__.txt");
+    writeFileSync(outsidePath, "AKIAABCDEFGHIJKLMNOP\n");
+    const linkPath = join(TEST_ROOT, "link-to-outside.txt");
+    symlinkSync(outsidePath, linkPath);
+    try {
+      await expect(scanFile(linkPath)).resolves.toEqual([]);
+    } finally {
+      rmSync(outsidePath, { force: true });
+    }
+  });
+
+  it("logs a warning and treats an oversized file as unscanned (not scanned-clean)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const filePath = join(TEST_ROOT, "huge.bin");
+    writeFileSync(filePath, Buffer.alloc(10 * 1024 * 1024 + 1, "a"));
+
+    const hits = await scanFile(filePath);
+
+    expect(hits).toEqual([]);
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 });
 
@@ -186,6 +215,21 @@ describe("quarantineFile", () => {
 
   it("refuses to quarantine a path that escapes the root", async () => {
     await expect(quarantineFile(TEST_ROOT, QUARANTINE_ROOT, "../escape.txt")).rejects.toThrow();
+  });
+
+  it("refuses to quarantine into a directory nested inside the root (would stay servable)", async () => {
+    const src = join(TEST_ROOT, "secret.txt");
+    writeFileSync(src, "AKIAABCDEFGHIJKLMNOP\n");
+    const insideQuarantine = join(TEST_ROOT, "quarantine");
+
+    await expect(quarantineFile(TEST_ROOT, insideQuarantine, "secret.txt")).rejects.toThrow();
+    // Must not have moved the file — it should still be servable-tree-safe on failure.
+    expect(existsSync(src)).toBe(true);
+  });
+
+  it("refuses to quarantine into the root itself", async () => {
+    writeFileSync(join(TEST_ROOT, "secret.txt"), "AKIAABCDEFGHIJKLMNOP\n");
+    await expect(quarantineFile(TEST_ROOT, TEST_ROOT, "secret.txt")).rejects.toThrow();
   });
 });
 

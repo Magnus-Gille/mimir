@@ -1,4 +1,4 @@
-import { readFile, readdir, stat, rename, mkdir, copyFile, unlink } from "node:fs/promises";
+import { readFile, readdir, stat, lstat, rename, mkdir, copyFile, unlink } from "node:fs/promises";
 import { join, relative, dirname, resolve } from "node:path";
 import { pushPanel } from "./heimdall-report.js";
 
@@ -17,6 +17,7 @@ export const SECRET_RULES: SecretRule[] = [
   { name: "aws-access-key-id", pattern: /AKIA[0-9A-Z]{16}/ },
   { name: "aws-secret-access-key", pattern: /aws_secret_access_key\s*[:=]\s*['"]?[A-Za-z0-9/+=]{40}['"]?/i },
   { name: "github-token", pattern: /gh[pousr]_[A-Za-z0-9]{36,255}/ },
+  { name: "github-fine-grained-token", pattern: /github_pat_[A-Za-z0-9]{20,}_[A-Za-z0-9]{50,}/ },
   { name: "slack-token", pattern: /xox[baprs]-[0-9A-Za-z-]{10,72}/ },
   { name: "stripe-live-key", pattern: /sk_live_[0-9a-zA-Z]{16,}/ },
   { name: "google-api-key", pattern: /AIza[0-9A-Za-z_-]{35}/ },
@@ -64,8 +65,18 @@ export function scanText(text: string): RuleHit[] {
 }
 
 export async function scanFile(filePath: string): Promise<RuleHit[]> {
+  // Never follow symlinks: the root jail (resolveWithinRoot) only checks the
+  // lexical path, so a symlink inside the tree could otherwise point at an
+  // arbitrary file outside it and have its target read/scanned.
+  const linkStats = await lstat(filePath);
+  if (linkStats.isSymbolicLink()) return [];
+
   const stats = await stat(filePath);
-  if (!stats.isFile() || stats.size > MAX_SCAN_BYTES) return [];
+  if (!stats.isFile()) return [];
+  if (stats.size > MAX_SCAN_BYTES) {
+    console.warn(`[mimir] secret-scan: skipping oversized file (${stats.size} bytes): ${filePath}`);
+    return [];
+  }
   const buf = await readFile(filePath);
   if (looksBinary(buf)) return [];
   return scanText(buf.toString("utf8"));
@@ -121,6 +132,16 @@ export async function quarantineFile(
   quarantineDir: string,
   relativeFile: string,
 ): Promise<string> {
+  const resolvedRoot = resolve(rootDir);
+  const resolvedQuarantine = resolve(quarantineDir);
+  // A quarantine dir inside (or equal to) rootDir would leave the "quarantined"
+  // file just as Bearer-servable as before — defeats the whole point.
+  if (resolvedQuarantine === resolvedRoot || resolvedQuarantine.startsWith(resolvedRoot + "/")) {
+    throw new Error(
+      `refusing to quarantine into a directory inside root: quarantineDir=${quarantineDir} rootDir=${rootDir}`,
+    );
+  }
+
   const src = resolveWithinRoot(rootDir, relativeFile);
   const dest = join(quarantineDir, relativeFile);
   await mkdir(dirname(dest), { recursive: true });

@@ -12,7 +12,7 @@ INBOX="$NAS:/home/magnus/mimir-inbox/"
 
 # Step 1: Import new files from inbox
 echo "==> Importing from inbox..."
-IMPORTED=$(rsync -av --ignore-existing --remove-source-files --out-format='%n' "$INBOX" "$LOCAL" | grep -v '/$' || true)
+IMPORTED=$(rsync -a --ignore-existing --remove-source-files --out-format='%n' "$INBOX" "$LOCAL" | grep -v '/$' || true)
 
 # Step 1.5: Secret-scan newly imported files before they can reach the NAS's
 # Bearer-servable tree. Hits are quarantined out of $LOCAL and alerted —
