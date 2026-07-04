@@ -37,19 +37,30 @@ if [[ ! -f "$FULL_LOCAL" ]]; then
   exit 1
 fi
 
+# REL_PATH becomes a remote path under /home/magnus/mimir — refuse traversal
+if [[ "/$REL_PATH/" == *"/../"* ]]; then
+  echo "Error: path may not contain '..': $REL_PATH" >&2
+  exit 1
+fi
+
 # --- Sync the file to Pi ---
 
 # macOS openrsync ignores the /./ --relative marker and replicates the full
 # local path on the remote, so sync to the explicit destination path instead.
+# Remote-side arguments pass through the remote shell — quote with printf %q.
 echo "==> Syncing $REL_PATH to NAS..." >&2
-REL_DIR=$(dirname "$REL_PATH")
-[[ "$REL_DIR" != "." ]] && ssh "${NAS%%:*}" "mkdir -p '/home/magnus/mimir/$REL_DIR'"
-rsync -az "$FULL_LOCAL" "$NAS:/home/magnus/mimir/$REL_PATH"
+REMOTE_PATH="/home/magnus/mimir/$REL_PATH"
+Q_REMOTE_PATH=$(printf '%q' "$REMOTE_PATH")
+Q_REMOTE_DIR=$(printf '%q' "$(dirname "$REMOTE_PATH")")
+ssh "${NAS%%:*}" "mkdir -p $Q_REMOTE_DIR"
+rsync -az "$FULL_LOCAL" "$NAS:$Q_REMOTE_PATH"
 
 # --- Generate share URL on Pi ---
 
 echo "==> Generating share link (TTL: $TTL)..." >&2
-URL=$(ssh "${NAS%%:*}" "cd $REMOTE_DIR && set -a && source .env && set +a && node dist/cli/share.js '$REL_PATH' '$TTL'")
+Q_REL_PATH=$(printf '%q' "$REL_PATH")
+Q_TTL=$(printf '%q' "$TTL")
+URL=$(ssh "${NAS%%:*}" "cd $REMOTE_DIR && set -a && source .env && set +a && node dist/cli/share.js $Q_REL_PATH $Q_TTL")
 
 # --- Output and clipboard ---
 

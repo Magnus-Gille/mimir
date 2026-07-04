@@ -3,6 +3,7 @@ import { resolve, join, relative } from "node:path";
 import { stat, readdir } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { lookup } from "mime-types";
+import contentDisposition from "content-disposition";
 import { timingSafeEqual } from "node:crypto";
 import { validateToken } from "./share-token.js";
 import { startHeimdallReporter } from "./heimdall-report.js";
@@ -110,9 +111,8 @@ async function serveFile(
 
     // Content-Disposition for share links
     if (options?.disposition) {
-      const filename = resolved.split("/").pop() ?? "download";
       const useInline = options.disposition === "inline" && INLINE_TYPES.has(mimeType);
-      res.setHeader("Content-Disposition", useInline ? "inline" : `attachment; filename="${filename}"`);
+      res.setHeader("Content-Disposition", useInline ? "inline" : contentDisposition(resolved));
     }
 
     // Range request support
