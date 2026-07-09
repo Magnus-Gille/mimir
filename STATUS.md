@@ -1,18 +1,23 @@
 # Project Status
 
-**Last session:** 2026-07-04
+**Last session:** 2026-07-09
 **Branch:** main
-**Last commit:** bd8c238 fix: share links download text files with correct utf-8 charset (#17)
+**Last commit:** docs: refresh project instructions and readme
 
 ## Completed This Session
-- **Fixed /share serving bugs** (PR #17, squash-merged + deployed to NAS Pi)
-  - Markdown/CSV now served as `attachment` (download) instead of inline raw text
-  - `charset=utf-8` on all `text/*` responses (Swedish text was mojibake under browsers' Latin-1 guess)
-  - `Content-Disposition` filenames formatted via `content-disposition` pkg (RFC 6266/5987) — quotes, control chars and non-latin1 names no longer break the header or 500
-  - `scripts/share.sh`: macOS openrsync ignores the `/./` marker in `rsync --relative` (file landed at `/home/magnus/mimir/Users/magnus/mimir/...`) — now syncs to an explicit destination; also rejects `..` segments and `printf %q`-quotes all remote-side args
-  - Cross-model Codex review (gpt-5.5) before merge: 3 findings, all fixed red/green
-  - 108 tests passing
-- **Cleaned stale STATUS.md** — an uncommitted March-era edit had been sitting in the working tree since 2026-03-28; replaced with this entry
+- **Imported Claude project instructions for Codex**
+  - Added tracked `AGENTS.md` based on the project `CLAUDE.md`
+  - Checked project `.claude/settings.local.json`; applicable settings are permission/tooling allow-list entries, not runtime docs
+  - Checked Claude MCP inventory: `friction-mcp` connected; `munin-memory`, Playwright, arxiv, and M5 configured but failing Claude health checks at the time of this session
+  - No project-local Claude skills were present under `.claude`
+- **Rewrote `README.md`**
+  - Updated endpoint list with `/heimdall.json`
+  - Added current security model, Cloudflare Access/tunnel notes, NAS deployment details, artifact sync flow, ingest secret scan, share links, Heimdall reporting, and encrypted offsite backup overview
+  - Updated dev/test commands and project structure
+- Verification passed:
+  - `npm run build`
+  - `npm test` — 108 tests passing
+  - `npm run lint`
 
 ## In Progress
 - None
@@ -22,5 +27,5 @@
 
 ## Next Steps
 1. Delete stale branch `feat/offsite-cloud-backup` (local + origin) — already squash-merged as PR #10 (head 6311b75 == branch head); verified nothing unmerged. Deletion needs manual confirmation.
-2. **Hugin Phase 2** — email delivery for task results (morning briefing)
-3. 11 open tickets in `feedback/munin-memory`
+2. #12: decide Mímir bind/probe approach so it reports live health in Heimdall.
+3. #11: add regression guard for missing `HEIMDALL_*` in the deployed `.env` and consolidate the two `.env` locations.
