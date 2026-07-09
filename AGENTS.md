@@ -34,7 +34,7 @@ Agents don't talk to Mímir directly via MCP. Instead:
 
 ### Security (2-layer, same model as Munin)
 
-1. **Cloudflare Access** — Service Token (`munin-memory-mcp`) required at edge. CF Access app: `mimir.gille.ai`
+1. **Cloudflare Access** — Service Token required at edge. CF Access app: `mimir.gille.ai`
 2. **Bearer token** — `MIMIR_API_KEY` at origin, timing-safe comparison
 3. **App hardening:**
    - Path traversal prevention (resolve + startsWith jail to root dir)
@@ -104,7 +104,8 @@ MIMIR_API_KEY=dev-key MIMIR_ROOT_DIR=./tests/__test_fixtures__ npm run dev
 ./scripts/deploy-nas.sh [hostname-or-ip]
 ```
 
-Default host: `100.99.119.52` (NAS Pi via Tailscale).
+The target host is environment-specific; pass it explicitly when deploying outside
+the maintainer's machine. Do not commit private Tailscale IPs or hostnames.
 
 The NAS Pi needs a `.env` file at `/home/magnus/mimir-server/.env`:
 ```
@@ -114,11 +115,13 @@ MIMIR_ALLOWED_HOSTS=mimir.gille.ai
 
 ### Tunnel infrastructure
 
-- **Tunnel ID:** `9e8bc8af-dcf6-459d-90ed-f014c714b7d2`
-- **cloudflared:** v2026.3.0, systemd service (enabled), config at `/etc/cloudflared/config.yml`
-- **CF Access App:** `mimir.gille.ai` with Service Token Auth policy (reuses `munin-memory-mcp` token)
-- **DNS:** CNAME `mimir.gille.ai` → tunnel
 - **Public URL:** `https://mimir.gille.ai`
+- **CF Access App:** `mimir.gille.ai`
+- **Access policy:** Service Token Auth at the edge
+- **DNS:** CNAME `mimir.gille.ai` → Cloudflare Tunnel target
+
+Do not commit tunnel IDs, service-token names, Cloudflare secrets, or private
+network addresses.
 
 ## Syncing files from laptop
 

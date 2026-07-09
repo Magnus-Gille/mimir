@@ -2,7 +2,7 @@
 
 **Last session:** 2026-07-09
 **Branch:** main
-**Last commit:** docs: refresh project instructions and readme
+**Last commit:** docs: scrub public-facing operational identifiers
 
 ## Completed This Session
 - **Imported Claude project instructions for Codex**
@@ -18,6 +18,10 @@
   - `npm run build`
   - `npm test` — 108 tests passing
   - `npm run lint`
+- **Public-facing scrub follow-up**
+  - Removed exact private Tailscale IP, Cloudflare Tunnel ID, and Cloudflare service-token name from public docs
+  - Changed helper scripts to default to SSH alias `nas`, with `MIMIR_NAS_HOST` / `MIMIR_NAS` overrides instead of a committed private address
+  - Re-verified shell syntax with `bash -n` for scripts
 
 ## In Progress
 - None

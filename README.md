@@ -107,8 +107,9 @@ Mímir runs on the NAS Pi from `/home/magnus/mimir-server`, serving artifacts fr
 ./scripts/deploy-nas.sh [hostname-or-ip]
 ```
 
-The default target is the NAS Pi over Tailscale. The Pi needs
-`/home/magnus/mimir-server/.env` with at least:
+The target host is environment-specific; pass it explicitly when deploying outside
+the maintainer's machine. The Pi needs `/home/magnus/mimir-server/.env` with at
+least:
 
 ```bash
 MIMIR_API_KEY=<generate with: openssl rand -hex 32>
@@ -123,14 +124,14 @@ Optional production settings include `MIMIR_SHARE_SECRET`,
 
 ### Cloudflare Tunnel
 
-Current production tunnel notes:
+Production is expected to run behind a Cloudflare Tunnel and Cloudflare Access.
+Keep tunnel IDs, service-token names, and any provider-side identifiers out of the
+repository.
 
 - Public URL: `https://mimir.gille.ai`
-- Tunnel ID: `9e8bc8af-dcf6-459d-90ed-f014c714b7d2`
-- cloudflared config: `/etc/cloudflared/config.yml`
 - Access app: `mimir.gille.ai`
-- Access policy: service-token auth using `munin-memory-mcp`
-- DNS: CNAME `mimir.gille.ai` to the tunnel
+- Access policy: service-token auth at the edge
+- DNS: CNAME `mimir.gille.ai` to the tunnel target
 
 Share URLs require a Cloudflare Access bypass policy for `/share/*`; the HMAC token
 is the authentication layer for recipients.
@@ -157,6 +158,10 @@ cat ~/.local/share/mimir/logs/sync-stdout.log
 
 The sync flow imports files from the NAS inbox, scans newly imported files for
 secrets, then mirrors laptop `~/mimir/` to NAS `~/mimir/` with a delete safety gate.
+
+Local helper scripts use SSH host alias `nas` by default. Override with
+`MIMIR_NAS_HOST=<host>` for host-only commands or `MIMIR_NAS=<user@host>` for rsync
+and share helpers.
 
 ## Secret Scanning
 

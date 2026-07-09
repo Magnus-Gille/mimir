@@ -8,7 +8,7 @@
 # Hugin tasks write outputs to ~/mimir-inbox/ on the NAS.
 # The inbox is a staging area — files are removed after successful import.
 
-NAS="magnus@100.99.119.52"
+NAS="${MIMIR_NAS:-magnus@${MIMIR_NAS_HOST:-nas}}"
 LOCAL="$HOME/mimir/"
 REMOTE="$NAS:/home/magnus/mimir/"
 INBOX="$NAS:/home/magnus/mimir-inbox/"

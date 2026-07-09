@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Usage: ./scripts/sync-artifacts.sh [nas-host]
 
-NAS="${1:-magnus@100.99.119.52}"
+NAS="${1:-${MIMIR_NAS:-magnus@${MIMIR_NAS_HOST:-nas}}}"
 LOCAL="$HOME/mimir/"
 REMOTE="$NAS:/home/magnus/mimir/"
 INBOX="$NAS:/home/magnus/mimir-inbox/"

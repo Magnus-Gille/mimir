@@ -4,7 +4,7 @@ set -euo pipefail
 # Deploy Mímir to NAS Pi
 # Usage: ./scripts/deploy-nas.sh [hostname]
 
-NAS_HOST="${1:-100.99.119.52}"
+NAS_HOST="${1:-${MIMIR_NAS_HOST:-nas}}"
 DEPLOY_USER="${DEPLOY_USER:-magnus}"
 REMOTE="$DEPLOY_USER@$NAS_HOST"
 REMOTE_DIR="/home/$DEPLOY_USER/mimir-server"

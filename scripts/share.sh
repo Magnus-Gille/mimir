@@ -12,7 +12,7 @@ set -euo pipefail
 #
 # TTL formats: 1h, 6h, 12h, 24h (default), 3d, 7d
 
-NAS="${MIMIR_NAS:-magnus@100.99.119.52}"
+NAS="${MIMIR_NAS:-magnus@${MIMIR_NAS_HOST:-nas}}"
 LOCAL_ROOT="$HOME/mimir"
 REMOTE_DIR="/home/magnus/mimir-server"
 TTL="${2:-24h}"

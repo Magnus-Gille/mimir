@@ -46,7 +46,7 @@ so transient retention drift can't mask an otherwise-healthy backup.
 ### 1. Install rclone on the Pi
 
 ```bash
-ssh magnus@100.99.119.52
+ssh <nas-host>
 sudo -v ; curl https://rclone.org/install.sh | sudo bash
 rclone version   # confirm
 ```
