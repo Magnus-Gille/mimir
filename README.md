@@ -217,8 +217,8 @@ The job:
 - Requires an rclone `crypt` remote and fails closed if the remote is not crypt.
 - Encrypts file contents and filenames before pushing to OneDrive.
 - Mirrors current state to `<remote>:current`.
-- Moves overwritten or deleted files to `<remote>:archive/<utc-run>/`.
-- Prunes archive run directories older than the retention horizon by timestamped name.
+- Moves overwritten or deleted files to tagged seven-character run directories beside `current/`.
+- Prunes only tagged archive run directories older than the retention horizon by encoded timestamp.
 - Aborts implausible deletes with count and percentage gates.
 - Writes a heartbeat stamp and pushes a Heimdall pass/fail panel.
 

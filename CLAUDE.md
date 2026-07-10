@@ -172,6 +172,7 @@ additionally pushes a `fail`-state Heimdall panel when `HEIMDALL_HUB_URL`/
 | `MIMIR_OFFSITE_RETENTION_DAYS` | `30` | Archive (deleted/changed file) prune horizon |
 | `MIMIR_OFFSITE_MAX_DELETE` | `1000` | Abort a run that would delete more than this many files |
 | `MIMIR_OFFSITE_MAX_DELETE_PCT` | `25` | ...or more than this % of `current/` (whichever trips first) |
+| `MIMIR_OFFSITE_STATE_DIR` | `$XDG_STATE_HOME/mimir` or `~/.local/state/mimir` | Deployment-stable heartbeat/log directory |
 | `MIMIR_QUARANTINE_DIR` | `<target-dir>-quarantine` | Where ingest secret-scan hits are moved (see below) |
 | `HEIMDALL_HUB_URL` / `HEIMDALL_FLEET_TOKEN` | — | Heimdall panel push — periodic self-report and secret-scan `fail` alerts |
 
@@ -197,8 +198,8 @@ The third copy in a 3-2-1 strategy: `scripts/offsite-backup.sh` pushes `~/mimir/
 to OneDrive as a **client-side-encrypted** copy via an `rclone crypt` remote (contents
 *and* filenames encrypted — required because `mgc/` is client data; the script fails
 *closed* if the remote isn't a verified crypt). Runs on the Pi via `mimir-offsite.timer`
-(daily). Mirrors `current/` and keeps 30 days of deleted/changed versions in per-run
-`archive/<utc-timestamp>/` dirs, pruned **by name** (`--backup-dir`, never destructive).
+(daily). Mirrors `current/` and keeps 30 days of deleted/changed versions in tagged,
+seven-character per-run sibling dirs, pruned **by name** (`--backup-dir`, never destructive).
 Guards: a preflight delete-count gate (+ `--max-delete`) aborts an implausible wipe.
 Emits a heartbeat stamp and a `pass`/`fail` Heimdall panel. The mirror is fail-loud;
 archive pruning is best-effort (warns, still `pass`).
