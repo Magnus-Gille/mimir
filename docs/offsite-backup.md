@@ -27,10 +27,11 @@ encrypted** — the provider only ever stores opaque blobs (contents *and* filen
    archive (e.g. the source was wiped), it aborts *before* touching the remote.
 3. `rclone sync ~/mimir/ → mimir-crypt:current` — mirrors the current state (the
    destination is auto-created on first run).
-4. Overwritten/deleted files are **moved** to a per-run `mimir-crypt:archive/<utc-timestamp>/`
-   via `--backup-dir` (never destroyed), giving **30-day version history**. `--max-delete`
-   is a second-line guard behind the gate in step 2.
-5. Prunes whole archive run-dirs older than 30 days **by their timestamped name** — not
+4. Overwritten/deleted files are **moved** to a compact per-run sibling of `current/`
+   via `--backup-dir` (never destroyed), giving **30-day version history**. The
+   seven-character base-36 timestamp avoids adding encrypted path depth under
+   OneDrive's 400-character limit. `--max-delete` is a second-line guard.
+5. Prunes whole archive run-dirs older than 30 days **by their encoded timestamp** — not
    by object mtime (sync preserves source mtimes, so mtime-based pruning would wrongly
    delete a just-archived *old* file the moment it was archived).
 6. Writes a heartbeat stamp and pushes a `pass`/`fail` **Heimdall status panel**.
@@ -135,8 +136,9 @@ rclone config. Optional overrides (defaults shown):
 # MIMIR_OFFSITE_MAX_DELETE_PCT=25                  # ...or more than this % of current/
 # MIMIR_OFFSITE_SERVICE=mimir                      # Heimdall service id (sibling repos override)
 # MIMIR_OFFSITE_PANEL=offsite                      # Heimdall panel id
-# MIMIR_OFFSITE_STAMP=$HOME/mimir-server/offsite.stamp
-# MIMIR_OFFSITE_LOG=$HOME/mimir-server/offsite-backup.log
+# MIMIR_OFFSITE_STATE_DIR=$HOME/.local/state/mimir       # systemd uses /var/lib/mimir
+# MIMIR_OFFSITE_STAMP=$MIMIR_OFFSITE_STATE_DIR/offsite.stamp
+# MIMIR_OFFSITE_LOG=$MIMIR_OFFSITE_STATE_DIR/offsite-backup.log
 # MIMIR_OFFSITE_DRYRUN=1                            # same as passing --dry-run
 # RCLONE_BIN=rclone                                # rclone binary path
 ```
@@ -167,18 +169,18 @@ rclone ls onedrive:Grimnir/mimir | head        # filenames must be gibberish
 
 # b) Integrity: cryptcheck compares hashes THROUGH the crypt layer (plain `check`
 #    can silently degrade to size/modtime on a crypt remote).
-rclone cryptcheck /home/magnus/mimir/ mimir-crypt:current
+rclone cryptcheck /home/magnus/mimir/ mimir-crypt:current --exclude '**/.git/**'
 
 # c) RESTORE TEST — decrypt to a scratch dir, diff against source.
 rclone copy mimir-crypt:current /tmp/mimir-restore
-diff -r /home/magnus/mimir/ /tmp/mimir-restore && echo "RESTORE OK"; rm -rf /tmp/mimir-restore
+diff -r --exclude=.git /home/magnus/mimir/ /tmp/mimir-restore && echo "RESTORE OK"; rm -rf /tmp/mimir-restore
 
 # d) 30-day history: change a file across two runs, confirm the prior version is
 #    preserved in the most recent archive run-dir.
 echo old > /home/magnus/mimir/_probe.txt; ./scripts/offsite-backup.sh
 echo new > /home/magnus/mimir/_probe.txt;  ./scripts/offsite-backup.sh
-LATEST=$(rclone lsf --dirs-only mimir-crypt:archive | sort | tail -1)
-rclone lsf "mimir-crypt:archive/${LATEST}" | grep _probe   # prior version preserved
+LATEST=$(rclone lsf --dirs-only mimir-crypt: | grep -E '^[0-9a-z]{7}/$' | sort | tail -1)
+rclone lsf "mimir-crypt:${LATEST}" | grep _probe   # prior version preserved
 rm /home/magnus/mimir/_probe.txt
 
 # e) Fail-loud: point at a bad remote, confirm non-zero exit + a fail panel in Heimdall.
