@@ -29,7 +29,7 @@ encrypted** — the provider only ever stores opaque blobs (contents *and* filen
    destination is auto-created on first run).
 4. Overwritten/deleted files are **moved** to a compact per-run sibling of `current/`
    via `--backup-dir` (never destroyed), giving **30-day version history**. The
-   seven-character base-36 timestamp avoids adding encrypted path depth under
+   tagged seven-character base-62 timestamp avoids adding encrypted path depth under
    OneDrive's 400-character limit. `--max-delete` is a second-line guard.
 5. Prunes whole archive run-dirs older than 30 days **by their encoded timestamp** — not
    by object mtime (sync preserves source mtimes, so mtime-based pruning would wrongly
@@ -179,7 +179,7 @@ diff -r --exclude=.git /home/magnus/mimir/ /tmp/mimir-restore && echo "RESTORE O
 #    preserved in the most recent archive run-dir.
 echo old > /home/magnus/mimir/_probe.txt; ./scripts/offsite-backup.sh
 echo new > /home/magnus/mimir/_probe.txt;  ./scripts/offsite-backup.sh
-LATEST=$(rclone lsf --dirs-only mimir-crypt: | grep -E '^[0-9a-z]{7}/$' | sort | tail -1)
+LATEST=$(rclone lsf --dirs-only mimir-crypt: | grep -E '^a[0-9A-Za-z]{6}/$' | sort | tail -1)
 rclone lsf "mimir-crypt:${LATEST}" | grep _probe   # prior version preserved
 rm /home/magnus/mimir/_probe.txt
 

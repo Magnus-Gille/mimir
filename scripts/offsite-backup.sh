@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+export LC_ALL=C
 
 # Mímir offsite backup — encrypted push of the artifact archive to cloud (OneDrive)
 # through an rclone *crypt* remote. Runs on the NAS Pi via a systemd timer (daily).
@@ -8,7 +9,7 @@ set -euo pipefail
 # │ munin-memory#172 and brokkr#1 copy-adapt this script. The shared contract: │
 # │   • Encrypted: rclone crypt — file CONTENTS and NAMES never leave in clear, │
 # │     and the script fails closed if the remote is not a verified crypt.      │
-# │   • Mirror `current/` + N-day history via --backup-dir → `archive/<run>/`.  │
+# │   • Mirror `current/` + N-day history via --backup-dir → tagged run dirs.   │
 # │   • Non-destructive: deletions are MOVED to a per-run archive dir; whole    │
 # │     archive dirs older than N days are pruned by their NAME (not mtime).     │
 # │   • Preflight delete-count gate + --max-delete: abort an implausible wipe.   │
@@ -82,6 +83,11 @@ trap on_err ERR
 mkdir -p "$(dirname "$LOG")" "$(dirname "$STAMP")"
 
 # ---- Preflight ----
+case "$RETENTION_DAYS" in ''|*[!0-9]*) die "MIMIR_OFFSITE_RETENTION_DAYS must be a positive integer";; esac
+[ "$RETENTION_DAYS" -ge 1 ] || die "MIMIR_OFFSITE_RETENTION_DAYS must be at least 1"
+case "$MAX_DELETE" in ''|*[!0-9]*) die "MIMIR_OFFSITE_MAX_DELETE must be a non-negative integer";; esac
+case "$MAX_DELETE_PCT" in ''|*[!0-9]*) die "MIMIR_OFFSITE_MAX_DELETE_PCT must be an integer from 0 to 100";; esac
+[ "$MAX_DELETE_PCT" -le 100 ] || die "MIMIR_OFFSITE_MAX_DELETE_PCT must be at most 100"
 command -v "$RCLONE" >/dev/null 2>&1 || die "rclone not found (RCLONE_BIN=$RCLONE)"
 [ -d "$SOURCE" ] || die "source dir missing: $SOURCE"
 case "$REMOTE" in *:*|*/*) die "MIMIR_OFFSITE_REMOTE must be a remote NAME only, got '$REMOTE'";; esac
@@ -104,21 +110,24 @@ case "$FENC" in
   off) die "remote '$REMOTE' has filename_encryption=off — refusing (names would leak)";;
 esac
 
-base36_7() {
-  local n="$1" alphabet="0123456789abcdefghijklmnopqrstuvwxyz" out="" remainder
+archive_id() {
+  local n="$1" alphabet="0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" out="" remainder
+  # A leading tag distinguishes owned archive dirs from every other remote-root
+  # directory. Six base-62 epoch digits remain sortable and last for centuries.
   while [ "$n" -gt 0 ]; do
-    remainder=$((n % 36))
+    remainder=$((n % 62))
     out="${alphabet:remainder:1}${out}"
-    n=$((n / 36))
+    n=$((n / 62))
   done
-  while [ "${#out}" -lt 7 ]; do out="0${out}"; done
-  printf '%s' "$out"
+  [ "${#out}" -le 6 ] || die "cannot encode archive timestamp in six base-62 digits"
+  while [ "${#out}" -lt 6 ]; do out="0${out}"; done
+  printf 'a%s' "$out"
 }
 
 DEST="${REMOTE}:current"
 RUN_EPOCH=$(date -u +%s)
-ARCHIVE_ID=$(base36_7 "$RUN_EPOCH")
-# A single seven-character sibling keeps the encrypted archive path no longer
+ARCHIVE_ID=$(archive_id "$RUN_EPOCH")
+# A tagged seven-character sibling keeps the encrypted archive path no longer
 # than the existing `current` component. archive/<timestamp> pushed otherwise
 # valid OneDrive paths over its 400-character limit.
 ARCHIVE="${REMOTE}:${ARCHIVE_ID}"
@@ -136,8 +145,12 @@ fi
 # change set (e.g. the source got wiped) should STOP and alert, not silently mirror an
 # empty current/ and report success. Skipped on dry-run and on the first run (empty dest).
 if [ -z "$DRY_RUN" ]; then
-  DEST_LIST=$("$RCLONE" lsf -R --files-only "$DEST" "${RCLONE_FILTERS[@]}" 2>/dev/null | sort || true)
-  SRC_LIST=$("$RCLONE" lsf -R --files-only "$SOURCE" "${RCLONE_FILTERS[@]}" 2>/dev/null | sort || true)
+  if ! DEST_LIST=$("$RCLONE" lsf -R --files-only "$DEST" "${RCLONE_FILTERS[@]}" 2>>"$LOG" | sort); then
+    die "cannot list ${DEST} for delete-count preflight — refusing to sync"
+  fi
+  if ! SRC_LIST=$("$RCLONE" lsf -R --files-only "$SOURCE" "${RCLONE_FILTERS[@]}" 2>>"$LOG" | sort); then
+    die "cannot list ${SOURCE} for delete-count preflight — refusing to sync"
+  fi
   DEST_N=$(printf '%s\n' "$DEST_LIST" | grep -c . || true)
   DELETES=$(comm -23 <(printf '%s\n' "$DEST_LIST") <(printf '%s\n' "$SRC_LIST") | grep -c . || true)
   if [ "$DEST_N" -gt 0 ] && [ "$DELETES" -gt 0 ]; then
@@ -169,7 +182,7 @@ if [ -n "$DRY_RUN" ]; then
 fi
 
 # Prune whole archive run-dirs older than the retention horizon, BY NAME (the dir's
-# UTC timestamp), not by object mtime — sync preserves source mtimes, so an old file
+# encoded UTC epoch), not by object mtime — sync preserves source mtimes, so an old file
 # just moved into the archive must NOT be judged old by its own mtime. Best-effort:
 # a prune failure must not fail the backup (the mirror already succeeded).
 prune_archive() {
@@ -179,10 +192,10 @@ prune_archive() {
     log "WARN: cannot compute retention cutoff (non-GNU date?) — skipping prune"
     return 0
   fi
-  cutoff_id=$(base36_7 "$cutoff_epoch")
+  cutoff_id=$(archive_id "$cutoff_epoch")
   while IFS= read -r d; do
     d="${d%/}"; [ -n "$d" ] || continue
-    if [[ "$d" =~ ^[0-9a-z]{7}$ ]] && [[ "$d" < "$cutoff_id" ]]; then
+    if [[ "$d" =~ ^a[0-9A-Za-z]{6}$ ]] && [[ "$d" < "$cutoff_id" ]]; then
       if "$RCLONE" purge "${REMOTE}:${d}" 2>>"$LOG"; then
         log "pruned archive ${d} (older than ${RETENTION_DAYS}d)"
       else

@@ -30,6 +30,7 @@ describe("offsite backup script", () => {
     const state = join(root, "state");
     const calls = join(root, "rclone.calls");
     const fakeRclone = join(root, "rclone");
+    const fakeDate = join(root, "date");
     mkdirSync(source);
     writeFileSync(join(source, "artifact.txt"), "artifact\n");
     mkdirSync(join(source, "project", ".git", "refs"), { recursive: true });
@@ -39,6 +40,66 @@ describe("offsite backup script", () => {
       `printf '%s\\n' "$*" >> "$RCLONE_CALLS"
 case "\${1:-}" in
   config) printf 'type = crypt\\nfilename_encryption = standard\\n' ;;
+  lsf) [[ "$*" != *"--dirs-only mimir-crypt:"* ]] || printf 'current/\\n0000000/\\na000000/\\n' ;;
+  *) exit 0 ;;
+esac
+`,
+    );
+    executable(
+      fakeDate,
+      `case "$*" in
+  "-u +%s") printf '1780000000\\n' ;;
+  "-u -d 30 days ago +%s") printf '1700000000\\n' ;;
+  "-u -d @1700000000 +%Y-%m-%dT%H%M%SZ") printf '2023-11-14T221320Z\\n' ;;
+  "+%s") printf '1780000000\\n' ;;
+  *) printf '2026-07-10T10:00:00Z\\n' ;;
+esac
+`,
+    );
+
+    const result = spawnSync("bash", [join(REPO_ROOT, "scripts/offsite-backup.sh")], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: root,
+        PATH: `${root}:${process.env.PATH ?? ""}`,
+        MIMIR_OFFSITE_ROOT: source,
+        MIMIR_OFFSITE_STATE_DIR: state,
+        RCLONE_BIN: fakeRclone,
+        RCLONE_CALLS: calls,
+      },
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(join(state, "offsite.stamp"))).toBe(true);
+    expect(existsSync(join(state, "offsite-backup.log"))).toBe(true);
+    expect(readFileSync(join(state, "offsite-backup.log"), "utf8")).toContain(
+      "offsite backup complete: 1 files mirrored",
+    );
+    const invocations = readFileSync(calls, "utf8");
+    expect(invocations).toContain("--exclude **/.git/**");
+    expect(invocations).toMatch(/--backup-dir mimir-crypt:a[0-9A-Za-z]{6}(?:\s|$)/);
+    expect(invocations).not.toContain("--backup-dir mimir-crypt:archive/");
+    expect(invocations).toContain("purge mimir-crypt:a000000");
+    expect(invocations).not.toContain("purge mimir-crypt:0000000");
+    expect(invocations).not.toContain("purge mimir-crypt:current");
+  });
+
+  it("fails closed when the remote cannot be listed for the delete gate", () => {
+    const root = tempDir();
+    const source = join(root, "source");
+    const state = join(root, "state");
+    const calls = join(root, "rclone.calls");
+    const fakeRclone = join(root, "rclone");
+    mkdirSync(source);
+    writeFileSync(join(source, "artifact.txt"), "artifact\n");
+    executable(
+      fakeRclone,
+      `printf '%s\\n' "$*" >> "$RCLONE_CALLS"
+case "\${1:-}" in
+  config) printf 'type = crypt\\nfilename_encryption = standard\\n' ;;
+  lsf) [[ "$*" != *"mimir-crypt:current"* ]] || exit 17 ;;
   *) exit 0 ;;
 esac
 `,
@@ -57,16 +118,10 @@ esac
       },
     });
 
-    expect(result.status, result.stderr).toBe(0);
-    expect(existsSync(join(state, "offsite.stamp"))).toBe(true);
-    expect(existsSync(join(state, "offsite-backup.log"))).toBe(true);
-    expect(readFileSync(join(state, "offsite-backup.log"), "utf8")).toContain(
-      "offsite backup complete: 1 files mirrored",
-    );
-    const invocations = readFileSync(calls, "utf8");
-    expect(invocations).toContain("--exclude **/.git/**");
-    expect(invocations).toMatch(/--backup-dir mimir-crypt:[0-9a-z]{7}(?:\s|$)/);
-    expect(invocations).not.toContain("mimir-crypt:archive/");
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("cannot list mimir-crypt:current");
+    expect(readFileSync(calls, "utf8")).not.toMatch(/^sync /m);
+    expect(existsSync(join(state, "offsite.stamp"))).toBe(false);
   });
 });
 

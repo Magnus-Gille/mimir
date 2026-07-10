@@ -198,8 +198,8 @@ The third copy in a 3-2-1 strategy: `scripts/offsite-backup.sh` pushes `~/mimir/
 to OneDrive as a **client-side-encrypted** copy via an `rclone crypt` remote (contents
 *and* filenames encrypted — required because `mgc/` is client data; the script fails
 *closed* if the remote isn't a verified crypt). Runs on the Pi via `mimir-offsite.timer`
-(daily). Mirrors `current/` and keeps 30 days of deleted/changed versions in per-run
-`archive/<utc-timestamp>/` dirs, pruned **by name** (`--backup-dir`, never destructive).
+(daily). Mirrors `current/` and keeps 30 days of deleted/changed versions in tagged,
+seven-character per-run sibling dirs, pruned **by name** (`--backup-dir`, never destructive).
 Guards: a preflight delete-count gate (+ `--max-delete`) aborts an implausible wipe.
 Emits a heartbeat stamp and a `pass`/`fail` Heimdall panel. The mirror is fail-loud;
 archive pruning is best-effort (warns, still `pass`).
