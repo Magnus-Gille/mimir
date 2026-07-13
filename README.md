@@ -130,8 +130,10 @@ checks the service through its loopback-only listener, and atomically advances
 rollback target, then removes the marker before any remote code-tree mutation; a failed
 dependency, unit, restart, or health step therefore leaves the artifact explicitly
 unaccepted. Both source worktree `.git` files and checkout `.git` directories are excluded,
-and stale remote Git metadata is removed before transfer. The script prints the exact
-clean-worktree redeploy command and enforces mode `0600` on the remote `.env`.
+and stale remote Git metadata is removed before transfer. If the invalidation SSH command
+has an indeterminate outcome, the script stops before code-tree mutation and reports marker
+state as unknown for manual verification. It prints the exact clean-worktree redeploy
+command and enforces mode `0600` on the remote `.env`.
 
 `mimir.service` runs the HTTP server with `ProtectSystem=strict`,
 `ReadOnlyPaths=/home/magnus/mimir`, and write access only to the server directory.

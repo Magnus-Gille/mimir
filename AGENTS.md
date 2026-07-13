@@ -113,8 +113,10 @@ then atomically records the exact accepted commit in `.deployed-commit`. Before 
 remote code-tree mutation it captures the previous SHA for rollback, removes the acceptance
 marker, and removes stale remote `.git` metadata; interrupted or rejected deployments stay
 markerless. Source `.git` files and directories are excluded from transfer. The script
-prints a clean-worktree redeploy command using the captured rollback target when available.
-The remote `.env` is enforced as mode `0600` without displaying its values.
+stops before code-tree mutation and reports marker state as unknown if the invalidation SSH
+command itself has an indeterminate outcome. It prints a clean-worktree redeploy command
+using the captured rollback target when available. The remote `.env` is enforced as mode
+`0600` without displaying its values.
 
 The NAS Pi needs a `.env` file at `/home/magnus/mimir-server/.env`:
 ```

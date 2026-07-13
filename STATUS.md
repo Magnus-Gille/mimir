@@ -29,7 +29,8 @@ mode `0600`, excludes both `.git` checkout shapes, clears stale remote Git metad
 invalidates the prior acceptance marker before remote artifact mutation, verifies
 loopback health, and only then atomically recreates `.deployed-commit`. Failed remote
 mutations remain markerless while retaining the captured prior SHA for rollback. It
-has not been merged or deployed.
+reports marker state as unknown, rather than guessing, if the invalidation transport
+itself fails. It has not been merged or deployed.
 
 The first restore attempt had already proved decryption, but comparison with the live source correctly observed three files that changed after the backup. The immutable-snapshot acceptance above removed that race and is the authoritative release evidence.
 
@@ -52,7 +53,7 @@ Existing issue #12 (health/probe state) and issue #11 (deployed-environment cons
 
 The unreleased hardening candidate passed:
 
-- `npm test` — 142 tests
+- `npm test` — 143 tests
 - `npm run lint`
 - `npx tsc --noEmit`
 - `npm run build`

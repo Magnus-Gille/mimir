@@ -504,6 +504,32 @@ exit 0
     );
   });
 
+  it("reports unknown marker state and performs no code mutation when invalidation transport fails", () => {
+    const root = tempDir();
+    const { bin, calls } = mockCommands(root);
+    const result = spawnSync("bash", [join(REPO_ROOT, "scripts/deploy-nas.sh"), "test-nas"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        DEPLOY_CALLS: calls,
+        MOCK_MARKER_REMOVE_RC: "255",
+      },
+    });
+
+    expect(result.status).toBe(255);
+    expect(result.stderr).toContain("acceptance-marker state is unknown");
+    expect(result.stderr).toContain("Verify the remote marker before trusting provenance");
+    const invocations = readFileSync(calls, "utf8");
+    expect(invocations).toContain("rm -f '/home/magnus/mimir-server/.deployed-commit'");
+    expect(invocations).not.toContain("rm -rf '/home/magnus/mimir-server/.git'");
+    expect(invocations).not.toContain("rsync ");
+    expect(invocations).not.toContain("npm ci --omit=dev");
+    expect(invocations).not.toContain("sudo install -m 0644");
+    expect(invocations).not.toContain(".deployed-commit.tmp");
+  });
+
   it("leaves no accepted marker and prints an exact rollback after failed health", () => {
     const root = tempDir();
     const { bin, calls } = mockCommands(root);

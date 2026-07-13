@@ -40,15 +40,21 @@ esac
 
 deployment_failed() {
   local rc=$?
-  if [ "$MARKER_INVALIDATED" -eq 1 ]; then
-    echo "ERROR: Deployment of $DEPLOY_COMMIT did not complete; the remote acceptance marker was cleared and not recreated." >&2
-  else
-    echo "ERROR: Deployment of $DEPLOY_COMMIT did not complete before remote artifact mutation; the previous acceptance marker remains valid." >&2
-  fi
+  case "$MARKER_INVALIDATION_STATE" in
+    confirmed)
+      echo "ERROR: Deployment of $DEPLOY_COMMIT did not complete; the remote acceptance marker was cleared and not recreated." >&2
+      ;;
+    unknown)
+      echo "ERROR: Deployment of $DEPLOY_COMMIT did not complete; acceptance-marker state is unknown because the invalidation command did not complete. Verify the remote marker before trusting provenance." >&2
+      ;;
+    not-attempted)
+      echo "ERROR: Deployment of $DEPLOY_COMMIT did not complete before marker invalidation; this deploy attempted no remote code-tree mutation." >&2
+      ;;
+  esac
   echo "Rollback: check out $ROLLBACK_TARGET in a clean worktree and run ./scripts/deploy-nas.sh $NAS_HOST" >&2
   exit "$rc"
 }
-MARKER_INVALIDATED=0
+MARKER_INVALIDATION_STATE="not-attempted"
 trap deployment_failed ERR
 
 echo "==> Building locally..."
@@ -58,8 +64,9 @@ npm run build
 # recent successful deploy. Invalidate it before the first remote code-tree
 # mutation so any interrupted deploy is visibly unaccepted.
 echo "==> Invalidating previous deployment acceptance..."
+MARKER_INVALIDATION_STATE="unknown"
 ssh "$REMOTE" "rm -f '$REMOTE_DIR/.deployed-commit'"
-MARKER_INVALIDATED=1
+MARKER_INVALIDATION_STATE="confirmed"
 
 # Old deploys could accidentally copy a worktree's .git file. Remove either a
 # file or directory before transfer, and exclude the basename form below so
