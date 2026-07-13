@@ -37,7 +37,7 @@ Agents don't talk to Mímir directly via MCP. Instead:
 1. **Cloudflare Access** — Service Token required at edge. CF Access app: `mimir.gille.ai`
 2. **Bearer token** — `MIMIR_API_KEY` at origin, timing-safe comparison
 3. **App hardening:**
-   - Path traversal prevention (resolve + startsWith jail to root dir)
+   - Path traversal prevention (lexical + realpath jail; external symlinks rejected)
    - Rate limiting (60 req/min per IP)
    - DNS rebinding protection via allowed hosts
    - Security headers (X-Content-Type-Options, X-Frame-Options, CSP, X-Robots-Tag)
@@ -107,6 +107,17 @@ MIMIR_API_KEY=dev-key MIMIR_ROOT_DIR=./tests/__test_fixtures__ npm run dev
 The target host is environment-specific; pass it explicitly when deploying outside
 the maintainer's machine. Do not commit private Tailscale IPs or hostnames.
 
+Deployment requires a clean Git worktree. The script installs production dependencies
+with `npm ci`, refreshes all Mímir systemd units, verifies health over loopback, and only
+then atomically records the exact accepted commit in `.deployed-commit`. Before the first
+remote code-tree mutation it captures the previous SHA for rollback, removes the acceptance
+marker, and removes stale remote `.git` metadata; interrupted or rejected deployments stay
+markerless. Source `.git` files and directories are excluded from transfer. The script
+stops before code-tree mutation and reports marker state as unknown if the invalidation SSH
+command itself has an indeterminate outcome. It prints a clean-worktree redeploy command
+using the captured rollback target when available. The remote `.env` is enforced as mode
+`0600` without displaying its values.
+
 The NAS Pi needs a `.env` file at `/home/magnus/mimir-server/.env`:
 ```
 MIMIR_API_KEY=<generate with: openssl rand -hex 32>
@@ -143,10 +154,13 @@ Syncs `~/mimir/` to `~/mimir/` on the NAS Pi. Symmetric paths on both machines �
 
 ### Ingest secret scan
 
-Every inbox import (`sync-artifacts.sh` / `sync-artifacts-daemon.sh` Step 1) is followed by a
-secret scan of just the newly-transferred files (`src/cli/secret-scan.ts --stdin`, fed the
-`rsync --out-format='%n'` file list) — before Step 2 mirrors `~/mimir/` to the NAS's
-Bearer-servable tree. Same detector class Munin uses at write-time (known secret-format
+Every inbox import (`sync-artifacts.sh` / `sync-artifacts-daemon.sh` Step 1) first lands in
+durable staging at `MIMIR_SYNC_STATE_DIR/import-pending`, outside `~/mimir/`. Every staged
+file is passed to `src/cli/secret-scan.ts --stdin` on every invocation until scanning
+succeeds. Clean files are then promoted with no-overwrite semantics; a collision remains
+staged and blocks mirroring so neither copy is lost. Import, scan, or promotion failures
+also leave staging intact and block this and later mirrors. Same detector class Munin uses
+at write-time (known secret-format
 regexes: AWS/GitHub/Slack/Stripe/Google keys, private key blocks, JWTs, generic quoted
 `key=value` assignments), re-implemented locally in `src/secret-scan.ts` — not imported
 across repos. A hit is moved to `MIMIR_QUARANTINE_DIR` (default `<root>-quarantine`,
@@ -165,6 +179,9 @@ additionally pushes a `fail`-state Heimdall panel when `HEIMDALL_HUB_URL`/
 | `MIMIR_ROOT_DIR` | `/home/magnus/mimir` | Root directory to serve |
 | `MIMIR_ALLOWED_HOSTS` | — | Extra allowed Host headers (comma-separated) |
 | `MIMIR_RATE_LIMIT` | `60` | Max requests per minute per IP |
+| `MIMIR_SYNC_MAX_DELETE` | `1000` | Abort laptop→NAS mirror at or above this many deletions |
+| `MIMIR_SYNC_MAX_DELETE_PCT` | `20` | Abort mirror above this percentage of the actual remote population |
+| `MIMIR_SYNC_STATE_DIR` | `$XDG_STATE_HOME/mimir` or `~/.local/state/mimir` | Durable out-of-tree staging for unverified inbox imports |
 | `MIMIR_SHARE_SECRET` | — | HMAC secret for share links (optional, enables `/share`) |
 | `MIMIR_BASE_URL` | `https://mimir.gille.ai` | Base URL for generated share links (CLI only) |
 | `MIMIR_OFFSITE_REMOTE` | `mimir-crypt` | rclone crypt remote name (offsite backup) |

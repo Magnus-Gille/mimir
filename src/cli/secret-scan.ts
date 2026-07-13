@@ -1,16 +1,17 @@
 #!/usr/bin/env node
 /**
- * Ingest-time secret scan. Run after rsync imports new files into ~/mimir/
- * and before those files are mirrored to the NAS's Bearer-servable tree —
+ * Ingest-time secret scan. Run after rsync imports new files into durable
+ * staging and before those files are promoted into ~/mimir/ or mirrored to
+ * the NAS's Bearer-servable tree —
  * see scripts/sync-artifacts.sh / sync-artifacts-daemon.sh and mimir#13.
  *
  * Usage:
  *   node dist/cli/secret-scan.js <target-dir> [quarantine-dir]
  *   node dist/cli/secret-scan.js --stdin <target-dir> [quarantine-dir]
  *
- * --stdin reads newline-separated relative paths (as produced by
- * `rsync --out-format='%n'`) and scans only those files, rather than
- * walking the whole tree on every sync.
+ * --stdin reads newline-separated relative paths (the sync scripts enumerate
+ * every durable staged path) and scans only those files, rather than walking
+ * the whole tree on every sync.
  *
  * Quarantine dir defaults to MIMIR_QUARANTINE_DIR, or a `-quarantine`
  * sibling of the target dir.

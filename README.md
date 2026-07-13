@@ -70,6 +70,9 @@ Heimdall reporting helpers.
 | `MIMIR_ROOT_DIR` | `/home/magnus/mimir` | Root directory to serve |
 | `MIMIR_ALLOWED_HOSTS` | - | Extra allowed Host headers, comma-separated |
 | `MIMIR_RATE_LIMIT` | `60` | Requests per minute per IP |
+| `MIMIR_SYNC_MAX_DELETE` | `1000` | Abort laptop→NAS sync at this many deletions |
+| `MIMIR_SYNC_MAX_DELETE_PCT` | `20` | Abort sync above this share of the actual remote population |
+| `MIMIR_SYNC_STATE_DIR` | `$XDG_STATE_HOME/mimir` or `~/.local/state/mimir` | Durable out-of-tree staging for unverified inbox imports |
 | `MIMIR_SHARE_SECRET` | - | HMAC secret that enables `/share/:token` |
 | `MIMIR_BASE_URL` | `https://mimir.gille.ai` | Base URL used by the share CLI |
 | `MIMIR_QUARANTINE_DIR` | `<target-dir>-quarantine` | Secret-scan quarantine directory |
@@ -90,7 +93,8 @@ origin:
 - Bearer-token auth at the app for `/files/*` and `/list/*`.
 - HMAC-signed, expiring public share links for `/share/:token`.
 - Timing-safe Bearer token comparison.
-- Path traversal prevention with a resolved-path jail.
+- Path traversal prevention with lexical and realpath containment; symlinks may
+  target files inside the archive but never escape it.
 - DNS rebinding protection through `MIMIR_ALLOWED_HOSTS`.
 - In-memory per-IP rate limiting.
 - Security headers: `nosniff`, `DENY` frame policy, noindex, no-store, no-referrer.
@@ -118,6 +122,18 @@ MIMIR_ALLOWED_HOSTS=mimir.gille.ai
 
 Optional production settings include `MIMIR_SHARE_SECRET`,
 `HEIMDALL_HUB_URL`, and `HEIMDALL_FLEET_TOKEN`.
+
+Deployments must start from a clean Git worktree. The script uses deterministic
+production dependency installation, refreshes the HTTP and offsite systemd units,
+checks the service through its loopback-only listener, and atomically advances
+`.deployed-commit` only after health passes. It first captures the previous SHA as the
+rollback target, then removes the marker before any remote code-tree mutation; a failed
+dependency, unit, restart, or health step therefore leaves the artifact explicitly
+unaccepted. Both source worktree `.git` files and checkout `.git` directories are excluded,
+and stale remote Git metadata is removed before transfer. If the invalidation SSH command
+has an indeterminate outcome, the script stops before code-tree mutation and reports marker
+state as unknown for manual verification. It prints the exact clean-worktree redeploy
+command and enforces mode `0600` on the remote `.env`.
 
 `mimir.service` runs the HTTP server with `ProtectSystem=strict`,
 `ReadOnlyPaths=/home/magnus/mimir`, and write access only to the server directory.
@@ -158,6 +174,8 @@ cat ~/.local/share/mimir/logs/sync-stdout.log
 
 The sync flow imports files from the NAS inbox, scans newly imported files for
 secrets, then mirrors laptop `~/mimir/` to NAS `~/mimir/` with a delete safety gate.
+Import and scanner failures stop before any mirror. The gate compares deletions with
+the actual remote population and also passes an absolute maximum to the real rsync.
 
 Local helper scripts use SSH host alias `nas` by default. Override with
 `MIMIR_NAS_HOST=<host>` for host-only commands or `MIMIR_NAS=<user@host>` for rsync
@@ -165,8 +183,11 @@ and share helpers.
 
 ## Secret Scanning
 
-`scripts/sync-artifacts.sh` and `scripts/sync-artifacts-daemon.sh` scan newly
-imported inbox files before they can be served. The scanner detects known secret
+`scripts/sync-artifacts.sh` and `scripts/sync-artifacts-daemon.sh` first import
+inbox files into durable out-of-tree staging, then scan every staged file before
+collision-safe promotion into the served tree. Import, scan, or promotion failures
+leave staging intact and block this and later mirrors until the content is verified,
+quarantined, or the collision is resolved. The scanner detects known secret
 formats, including AWS, GitHub, Slack, Stripe, Google keys, private key blocks, JWTs,
 and generic quoted `key=value` assignments.
 

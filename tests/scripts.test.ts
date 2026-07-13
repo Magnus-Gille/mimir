@@ -23,6 +23,241 @@ afterEach(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
+const SYNC_SCRIPTS = ["sync-artifacts.sh", "sync-artifacts-daemon.sh"] as const;
+
+function mockSyncCommands(root: string): { bin: string; calls: string } {
+  const bin = join(root, "bin");
+  const calls = join(root, "sync.calls");
+  mkdirSync(bin);
+
+  executable(
+    join(bin, "ssh"),
+    `printf 'ssh %s\n' "$*" >> "$SYNC_CALLS"
+case "$*" in
+  *"find '/home/magnus/mimir'"*)
+    [ "\${MOCK_REMOTE_COUNT_RC:-0}" -eq 0 ] || exit "$MOCK_REMOTE_COUNT_RC"
+    i=0; while [ "$i" -lt "\${MOCK_REMOTE_TOTAL:-100}" ]; do printf .; i=$((i + 1)); done
+    ;;
+esac
+exit 0
+`,
+  );
+  executable(
+    join(bin, "rsync"),
+    `printf 'rsync %s\n' "$*" >> "$SYNC_CALLS"
+case "$*" in
+  *"mimir-inbox/"*)
+    destination="\${!#}"
+    if [ -n "\${MOCK_IMPORTED:-}" ]; then
+      while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        case "$path" in
+          */) mkdir -p "$destination$path" ;;
+          *)
+            mkdir -p "$(dirname "$destination$path")"
+            printf 'staged:%s\n' "$path" > "$destination$path"
+            ;;
+        esac
+      done <<< "$MOCK_IMPORTED"
+    fi
+    exit "\${MOCK_IMPORT_RC:-0}"
+    ;;
+  *"import-pending/"*)
+    previous=""
+    for argument in "$@"; do source="$previous"; previous="$argument"; done
+    destination="$previous"
+    while IFS= read -r staged; do
+      relative="\${staged#"$source"}"
+      target="$destination$relative"
+      if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+        mkdir -p "$(dirname "$target")"
+        mv "$staged" "$target"
+      fi
+    done < <(find "$source" ! -type d -print)
+    exit "\${MOCK_PROMOTE_RC:-0}"
+    ;;
+  *"-an --delete"*)
+    i=0; while [ "$i" -lt "\${MOCK_DELETES:-0}" ]; do printf 'deleting old-%s\n' "$i"; i=$((i + 1)); done
+    i=0; while [ "$i" -lt "\${MOCK_ADDITIONS:-0}" ]; do printf 'new-%s\n' "$i"; i=$((i + 1)); done
+    exit "\${MOCK_DRY_RC:-0}"
+    ;;
+  *"--delete --max-delete="*) exit "\${MOCK_MIRROR_RC:-0}" ;;
+esac
+exit 0
+`,
+  );
+  executable(
+    join(bin, "node"),
+    `printf 'node %s\n' "$*" >> "$SYNC_CALLS"
+while IFS= read -r _line; do :; done
+exit "\${MOCK_SCAN_RC:-0}"
+`,
+  );
+  return { bin, calls };
+}
+
+function createSyncHarness(script: (typeof SYNC_SCRIPTS)[number]) {
+  const root = tempDir();
+  const { bin, calls } = mockSyncCommands(root);
+  mkdirSync(join(root, "mimir"));
+  const args = script === "sync-artifacts.sh"
+    ? [join(REPO_ROOT, "scripts", script), "test-nas"]
+    : [join(REPO_ROOT, "scripts", script)];
+
+  return {
+    root,
+    run(overrides: Record<string, string> = {}) {
+      const result = spawnSync("bash", args, {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HOME: root,
+          PATH: `${bin}:${process.env.PATH ?? ""}`,
+          MIMIR_NAS: "test-nas",
+          SYNC_CALLS: calls,
+          ...overrides,
+        },
+      });
+      const invocations = existsSync(calls) ? readFileSync(calls, "utf8") : "";
+      return { result, invocations };
+    },
+  };
+}
+
+function runSyncScript(
+  script: (typeof SYNC_SCRIPTS)[number],
+  overrides: Record<string, string> = {},
+) {
+  return createSyncHarness(script).run(overrides);
+}
+
+describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
+  it("does not scan or mirror after an inbox import failure", () => {
+    const { result, invocations } = runSyncScript(script, {
+      MOCK_IMPORTED: "partial-secret.txt",
+      MOCK_IMPORT_RC: "23",
+    });
+    expect(result.status).not.toBe(0);
+    expect(invocations).not.toContain("node ");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
+  it("rescans a partial import on the next invocation before any mirror", () => {
+    const harness = createSyncHarness(script);
+    const first = harness.run({
+      MOCK_IMPORTED: "partial-secret.txt",
+      MOCK_IMPORT_RC: "23",
+    });
+    expect(first.result.status).not.toBe(0);
+    const pending = join(harness.root, ".local", "state", "mimir", "import-pending", "partial-secret.txt");
+    expect(readFileSync(pending, "utf8")).toContain("staged:partial-secret.txt");
+
+    const callsBeforeRetry = first.invocations.length;
+    const second = harness.run({ MOCK_SCAN_RC: "17" });
+    const retryInvocations = second.invocations.slice(callsBeforeRetry);
+    expect(second.result.status).not.toBe(0);
+    expect(retryInvocations).toContain("node ");
+    expect(retryInvocations).not.toContain("-an --delete");
+    expect(retryInvocations).not.toContain("--max-delete=");
+    expect(readFileSync(pending, "utf8")).toContain("staged:partial-secret.txt");
+  });
+
+  it("does not dry-run or mirror after the secret scanner fails", () => {
+    const { result, invocations } = runSyncScript(script, {
+      MOCK_IMPORTED: "secret.txt",
+      MOCK_SCAN_RC: "17",
+    });
+    expect(result.status).not.toBe(0);
+    expect(invocations).toContain("node ");
+    expect(invocations).not.toContain("-an --delete");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
+  it("retains scanner-failed content across invocations and clears it only after success", () => {
+    const harness = createSyncHarness(script);
+    const first = harness.run({
+      MOCK_IMPORTED: "retry-me.txt",
+      MOCK_SCAN_RC: "17",
+    });
+    expect(first.result.status).not.toBe(0);
+    const pendingRoot = join(harness.root, ".local", "state", "mimir", "import-pending");
+    expect(existsSync(join(pendingRoot, "retry-me.txt"))).toBe(true);
+
+    const callsBeforeRetry = first.invocations.length;
+    const second = harness.run();
+    const retryInvocations = second.invocations.slice(callsBeforeRetry);
+    expect(second.result.status, second.result.stderr).toBe(0);
+    expect(retryInvocations).toContain("node ");
+    expect(retryInvocations).toContain("import-pending/");
+    expect(retryInvocations).toContain("-an --delete");
+    expect(retryInvocations).toContain("--max-delete=");
+    const promotionIndex = retryInvocations.lastIndexOf("import-pending/");
+    expect(retryInvocations.indexOf("node ")).toBeLessThan(promotionIndex);
+    expect(promotionIndex).toBeLessThan(retryInvocations.indexOf("-an --delete"));
+    expect(existsSync(pendingRoot)).toBe(false);
+    expect(readFileSync(join(harness.root, "mimir", "retry-me.txt"), "utf8")).toContain("staged:retry-me.txt");
+  });
+
+  it("preserves both files and refuses to mirror when a pending path collides locally", () => {
+    const harness = createSyncHarness(script);
+    const local = join(harness.root, "mimir", "collision.txt");
+    writeFileSync(local, "existing-local\n");
+
+    const { result, invocations } = harness.run({ MOCK_IMPORTED: "collision.txt" });
+    expect(result.status).not.toBe(0);
+    expect(`${result.stdout}\n${result.stderr}`).toMatch(/collision|overwriting local paths/i);
+    expect(readFileSync(local, "utf8")).toBe("existing-local\n");
+    expect(readFileSync(
+      join(harness.root, ".local", "state", "mimir", "import-pending", "collision.txt"),
+      "utf8",
+    )).toContain("staged:collision.txt");
+    expect(invocations).not.toContain("-an --delete");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
+  it("uses remote population rather than additions to calculate delete percentage", () => {
+    const { result, invocations } = runSyncScript(script, {
+      MOCK_REMOTE_TOTAL: "100",
+      MOCK_DELETES: "21",
+      MOCK_ADDITIONS: "500",
+    });
+    expect(result.status).toBe(1);
+    expect(`${result.stdout}\n${result.stderr}`).toContain("21/100 remote entries");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
+  it("aborts at the absolute delete backstop", () => {
+    const { result, invocations } = runSyncScript(script, {
+      MOCK_REMOTE_TOTAL: "100",
+      MOCK_DELETES: "5",
+      MIMIR_SYNC_MAX_DELETE: "5",
+      MIMIR_SYNC_MAX_DELETE_PCT: "100",
+    });
+    expect(result.status).toBe(1);
+    expect(invocations).not.toContain("--max-delete=5");
+  });
+
+  it("allows the percentage boundary and carries the absolute backstop into rsync", () => {
+    const { result, invocations } = runSyncScript(script, {
+      MOCK_REMOTE_TOTAL: "100",
+      MOCK_DELETES: "20",
+      MIMIR_SYNC_MAX_DELETE: "50",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(invocations).toContain("--delete --max-delete=50");
+  });
+
+  it("fails closed when the remote population cannot be measured", () => {
+    const { result, invocations } = runSyncScript(script, {
+      MOCK_DELETES: "1",
+      MOCK_REMOTE_COUNT_RC: "9",
+    });
+    expect(result.status).not.toBe(0);
+    expect(invocations).not.toContain("--max-delete=");
+  });
+});
+
 describe("offsite backup script", () => {
   it("keeps runtime state outside the deploy tree and bounds encrypted archive depth", () => {
     const root = tempDir();
@@ -131,10 +366,24 @@ describe("NAS deploy script", () => {
     const calls = join(root, "calls");
     mkdirSync(bin);
     executable(
+      join(bin, "git"),
+      `printf 'git %s\\n' "$*" >> "$DEPLOY_CALLS"
+case "$*" in
+  "status --porcelain --untracked-files=normal") printf '%s' "\${MOCK_GIT_STATUS:-}" ;;
+  "rev-parse HEAD") printf '%s\\n' "\${MOCK_DEPLOY_COMMIT:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" ;;
+esac
+`,
+    );
+    executable(
       join(bin, "ssh"),
       `printf 'ssh %s\\n' "$*" >> "$DEPLOY_CALLS"
 case "$*" in
+  *"curl -fsS --max-time 3"*) exit "\${MOCK_HEALTH_RC:-0}" ;;
   *"test -f"*) exit "\${MOCK_ENV_FILE_RC:-0}" ;;
+  *"head -n 1"*) printf '%s\\n' "\${MOCK_PREVIOUS_COMMIT:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}" ;;
+  *"npm ci --omit=dev"*) exit "\${MOCK_DEPENDENCY_RC:-0}" ;;
+  *"sudo install -m 0644"*) exit "\${MOCK_UNIT_RC:-0}" ;;
+  *"rm -f '/home/magnus/mimir-server/.deployed-commit'"*) exit "\${MOCK_MARKER_REMOVE_RC:-0}" ;;
   *"set -a;"*) exit "\${MOCK_ENV_VALUES_RC:-0}" ;;
 esac
 exit 0
@@ -167,7 +416,28 @@ exit 0
     expect(invocations).not.toContain("rsync ");
   });
 
-  it("continues without displaying values when all required environment values exist", () => {
+  it("refuses a dirty source before contacting the NAS", () => {
+    const root = tempDir();
+    const { bin, calls } = mockCommands(root);
+    const result = spawnSync("bash", [join(REPO_ROOT, "scripts/deploy-nas.sh"), "test-nas"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        DEPLOY_CALLS: calls,
+        MOCK_GIT_STATUS: " M src/index.ts\\n",
+      },
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("dirty worktree");
+    const invocations = readFileSync(calls, "utf8");
+    expect(invocations).not.toContain("ssh ");
+    expect(invocations).not.toContain("rsync ");
+  });
+
+  it("deploys deterministically and stamps only after loopback health", () => {
     const root = tempDir();
     const { bin, calls } = mockCommands(root);
     const result = spawnSync("bash", [join(REPO_ROOT, "scripts/deploy-nas.sh"), "test-nas"], {
@@ -184,6 +454,130 @@ exit 0
     expect(result.stdout).toContain("values not displayed");
     const invocations = readFileSync(calls, "utf8");
     expect(invocations).toContain("npm run build");
-    expect(invocations).toContain("rsync ");
+    expect(invocations).toContain("--exclude=.git");
+    expect(invocations).not.toContain("--exclude=.git/");
+    expect(invocations).toContain("--exclude=.deployed-commit");
+    expect(invocations).toContain("chmod 600");
+    expect(invocations).toContain("npm ci --omit=dev");
+    expect(invocations).not.toContain("npm install --omit=dev");
+    expect(invocations).toContain("mimir-offsite.service");
+    expect(invocations).toContain("mimir-offsite.timer");
+    expect(invocations).toContain("http://127.0.0.1:");
+    expect(invocations).toContain(".deployed-commit.tmp");
+    const markerRemovalIndex = invocations.indexOf("rm -f '/home/magnus/mimir-server/.deployed-commit'");
+    const gitCleanupIndex = invocations.indexOf("rm -rf '/home/magnus/mimir-server/.git'");
+    const rsyncIndex = invocations.indexOf("rsync ");
+    expect(markerRemovalIndex).toBeGreaterThan(-1);
+    expect(markerRemovalIndex).toBeLessThan(gitCleanupIndex);
+    expect(gitCleanupIndex).toBeLessThan(rsyncIndex);
+    expect(invocations.indexOf(".deployed-commit.tmp")).toBeGreaterThan(
+      invocations.indexOf("http://127.0.0.1:"),
+    );
+    expect(result.stdout).toContain("Accepted commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    expect(result.stdout).toContain("Rollback: check out bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+  });
+
+  it("excludes a worktree .git file and removes stale remote Git metadata", () => {
+    const root = tempDir();
+    const source = join(root, "source");
+    mkdirSync(source);
+    writeFileSync(join(source, ".git"), "gitdir: /tmp/example-worktree-metadata\n");
+    const { bin, calls } = mockCommands(root);
+    const result = spawnSync("bash", [join(REPO_ROOT, "scripts/deploy-nas.sh"), "test-nas"], {
+      cwd: source,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        DEPLOY_CALLS: calls,
+      },
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    const invocations = readFileSync(calls, "utf8");
+    expect(readFileSync(join(source, ".git"), "utf8")).toContain("gitdir:");
+    expect(invocations).toContain("--exclude=.git");
+    expect(invocations).not.toContain("--exclude=.git/");
+    expect(invocations).toContain("rm -rf '/home/magnus/mimir-server/.git'");
+    expect(invocations.indexOf("rm -rf '/home/magnus/mimir-server/.git'")).toBeLessThan(
+      invocations.indexOf("rsync "),
+    );
+  });
+
+  it("reports unknown marker state and performs no code mutation when invalidation transport fails", () => {
+    const root = tempDir();
+    const { bin, calls } = mockCommands(root);
+    const result = spawnSync("bash", [join(REPO_ROOT, "scripts/deploy-nas.sh"), "test-nas"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        DEPLOY_CALLS: calls,
+        MOCK_MARKER_REMOVE_RC: "255",
+      },
+    });
+
+    expect(result.status).toBe(255);
+    expect(result.stderr).toContain("acceptance-marker state is unknown");
+    expect(result.stderr).toContain("Verify the remote marker before trusting provenance");
+    const invocations = readFileSync(calls, "utf8");
+    expect(invocations).toContain("rm -f '/home/magnus/mimir-server/.deployed-commit'");
+    expect(invocations).not.toContain("rm -rf '/home/magnus/mimir-server/.git'");
+    expect(invocations).not.toContain("rsync ");
+    expect(invocations).not.toContain("npm ci --omit=dev");
+    expect(invocations).not.toContain("sudo install -m 0644");
+    expect(invocations).not.toContain(".deployed-commit.tmp");
+  });
+
+  it("leaves no accepted marker and prints an exact rollback after failed health", () => {
+    const root = tempDir();
+    const { bin, calls } = mockCommands(root);
+    const result = spawnSync("bash", [join(REPO_ROOT, "scripts/deploy-nas.sh"), "test-nas"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        DEPLOY_CALLS: calls,
+        MOCK_HEALTH_RC: "1",
+      },
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("acceptance marker was cleared and not recreated");
+    expect(result.stderr).toContain("check out bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    const invocations = readFileSync(calls, "utf8");
+    expect(invocations.indexOf("rm -f '/home/magnus/mimir-server/.deployed-commit'")).toBeLessThan(
+      invocations.indexOf("rsync "),
+    );
+    const markerWrites = invocations
+      .split("\n")
+      .filter((line) => line.includes(".deployed-commit.tmp"));
+    expect(markerWrites).toHaveLength(0);
+  });
+
+  it.each([
+    ["dependency installation", "MOCK_DEPENDENCY_RC"],
+    ["unit refresh", "MOCK_UNIT_RC"],
+  ])("leaves no accepted marker when %s fails", (_step, failureVariable) => {
+    const root = tempDir();
+    const { bin, calls } = mockCommands(root);
+    const result = spawnSync("bash", [join(REPO_ROOT, "scripts/deploy-nas.sh"), "test-nas"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        DEPLOY_CALLS: calls,
+        [failureVariable]: "1",
+      },
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("acceptance marker was cleared and not recreated");
+    const invocations = readFileSync(calls, "utf8");
+    expect(invocations).toContain("rm -f '/home/magnus/mimir-server/.deployed-commit'");
+    expect(invocations).not.toContain(".deployed-commit.tmp");
   });
 });
