@@ -72,6 +72,7 @@ Heimdall reporting helpers.
 | `MIMIR_RATE_LIMIT` | `60` | Requests per minute per IP |
 | `MIMIR_SYNC_MAX_DELETE` | `1000` | Abort laptop→NAS sync at this many deletions |
 | `MIMIR_SYNC_MAX_DELETE_PCT` | `20` | Abort sync above this share of the actual remote population |
+| `MIMIR_SYNC_STATE_DIR` | `$XDG_STATE_HOME/mimir` or `~/.local/state/mimir` | Durable out-of-tree staging for unverified inbox imports |
 | `MIMIR_SHARE_SECRET` | - | HMAC secret that enables `/share/:token` |
 | `MIMIR_BASE_URL` | `https://mimir.gille.ai` | Base URL used by the share CLI |
 | `MIMIR_QUARANTINE_DIR` | `<target-dir>-quarantine` | Secret-scan quarantine directory |
@@ -177,8 +178,11 @@ and share helpers.
 
 ## Secret Scanning
 
-`scripts/sync-artifacts.sh` and `scripts/sync-artifacts-daemon.sh` scan newly
-imported inbox files before they can be served. The scanner detects known secret
+`scripts/sync-artifacts.sh` and `scripts/sync-artifacts-daemon.sh` first import
+inbox files into durable out-of-tree staging, then scan every staged file before
+collision-safe promotion into the served tree. Import, scan, or promotion failures
+leave staging intact and block this and later mirrors until the content is verified,
+quarantined, or the collision is resolved. The scanner detects known secret
 formats, including AWS, GitHub, Slack, Stripe, Google keys, private key blocks, JWTs,
 and generic quoted `key=value` assignments.
 

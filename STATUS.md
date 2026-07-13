@@ -18,9 +18,11 @@ accepted; the current branch is an unreleased hardening candidate.
 - The deployment-stable heartbeat at `/var/lib/mimir/offsite.stamp` was fresh, and Heimdall reported `pass`.
 - `mimir-offsite.timer` was enabled only after all acceptance checks passed and is active for daily runs.
 
-The hardening candidate closes external-symlink jail escapes, opens files before
-stat/streaming to survive sync races, makes inbox import and secret scanning fail
-closed, calculates delete safety against the real remote population with an absolute
+Draft PR [#20](https://github.com/Magnus-Gille/mimir/pull/20) closes external-symlink
+jail escapes, opens files before stat/streaming to survive sync races, canonicalizes
+relative configured roots, and makes inbox import and secret scanning durably fail
+closed across invocations through out-of-tree pending staging. It calculates delete
+safety against the real remote population with an absolute
 backstop, and makes deployment deterministic and attributable. Deployment now
 requires a clean commit, uses `npm ci`, refreshes all shipped units, enforces `.env`
 mode `0600`, verifies loopback health, and only then atomically advances
@@ -30,15 +32,14 @@ The first restore attempt had already proved decryption, but comparison with the
 
 ## Blockers
 
-None in the implementation or test suite. GitHub CLI authentication was invalid at
-the start of this session, so publication may require re-authentication. No merge or
-deployment has occurred.
+None in the implementation or test suite. Draft PR #20 is published for review. No
+merge or deployment has occurred.
 
 Existing issue #12 (health/probe state) and issue #11 (deployed-environment consolidation) remain separate follow-up work.
 
 ## Next Steps
 
-1. Publish the hardening branch as a draft PR and complete cross-model review.
+1. Complete review of draft PR #20 and resolve any remaining findings.
 2. After approval and green CI, merge and deploy from a clean canonical `main`.
 3. Accept production by verifying loopback health, exact `.deployed-commit`, `.env`
    mode `0600`, refreshed HTTP/offsite units, and the next automatic sync.
@@ -49,7 +50,7 @@ Existing issue #12 (health/probe state) and issue #11 (deployed-environment cons
 
 The unreleased hardening candidate passed:
 
-- `npm test` — 132 tests
+- `npm test` — 139 tests
 - `npm run lint`
 - `npx tsc --noEmit`
 - `npm run build`

@@ -46,9 +46,35 @@ exit 0
     join(bin, "rsync"),
     `printf 'rsync %s\n' "$*" >> "$SYNC_CALLS"
 case "$*" in
-  *"--out-format=%n"*)
-    [ -z "\${MOCK_IMPORTED:-}" ] || printf '%s\n' "$MOCK_IMPORTED"
+  *"mimir-inbox/"*)
+    destination="\${!#}"
+    if [ -n "\${MOCK_IMPORTED:-}" ]; then
+      while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        case "$path" in
+          */) mkdir -p "$destination$path" ;;
+          *)
+            mkdir -p "$(dirname "$destination$path")"
+            printf 'staged:%s\n' "$path" > "$destination$path"
+            ;;
+        esac
+      done <<< "$MOCK_IMPORTED"
+    fi
     exit "\${MOCK_IMPORT_RC:-0}"
+    ;;
+  *"import-pending/"*)
+    previous=""
+    for argument in "$@"; do source="$previous"; previous="$argument"; done
+    destination="$previous"
+    while IFS= read -r staged; do
+      relative="\${staged#"$source"}"
+      target="$destination$relative"
+      if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+        mkdir -p "$(dirname "$target")"
+        mv "$staged" "$target"
+      fi
+    done < <(find "$source" ! -type d -print)
+    exit "\${MOCK_PROMOTE_RC:-0}"
     ;;
   *"-an --delete"*)
     i=0; while [ "$i" -lt "\${MOCK_DELETES:-0}" ]; do printf 'deleting old-%s\n' "$i"; i=$((i + 1)); done
@@ -70,30 +96,40 @@ exit "\${MOCK_SCAN_RC:-0}"
   return { bin, calls };
 }
 
-function runSyncScript(
-  script: (typeof SYNC_SCRIPTS)[number],
-  overrides: Record<string, string> = {},
-) {
+function createSyncHarness(script: (typeof SYNC_SCRIPTS)[number]) {
   const root = tempDir();
   const { bin, calls } = mockSyncCommands(root);
   mkdirSync(join(root, "mimir"));
   const args = script === "sync-artifacts.sh"
     ? [join(REPO_ROOT, "scripts", script), "test-nas"]
     : [join(REPO_ROOT, "scripts", script)];
-  const result = spawnSync("bash", args, {
-    cwd: REPO_ROOT,
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      HOME: root,
-      PATH: `${bin}:${process.env.PATH ?? ""}`,
-      MIMIR_NAS: "test-nas",
-      SYNC_CALLS: calls,
-      ...overrides,
+
+  return {
+    root,
+    run(overrides: Record<string, string> = {}) {
+      const result = spawnSync("bash", args, {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HOME: root,
+          PATH: `${bin}:${process.env.PATH ?? ""}`,
+          MIMIR_NAS: "test-nas",
+          SYNC_CALLS: calls,
+          ...overrides,
+        },
+      });
+      const invocations = existsSync(calls) ? readFileSync(calls, "utf8") : "";
+      return { result, invocations };
     },
-  });
-  const invocations = existsSync(calls) ? readFileSync(calls, "utf8") : "";
-  return { result, invocations };
+  };
+}
+
+function runSyncScript(
+  script: (typeof SYNC_SCRIPTS)[number],
+  overrides: Record<string, string> = {},
+) {
+  return createSyncHarness(script).run(overrides);
 }
 
 describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
@@ -107,6 +143,26 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
     expect(invocations).not.toContain("--max-delete=");
   });
 
+  it("rescans a partial import on the next invocation before any mirror", () => {
+    const harness = createSyncHarness(script);
+    const first = harness.run({
+      MOCK_IMPORTED: "partial-secret.txt",
+      MOCK_IMPORT_RC: "23",
+    });
+    expect(first.result.status).not.toBe(0);
+    const pending = join(harness.root, ".local", "state", "mimir", "import-pending", "partial-secret.txt");
+    expect(readFileSync(pending, "utf8")).toContain("staged:partial-secret.txt");
+
+    const callsBeforeRetry = first.invocations.length;
+    const second = harness.run({ MOCK_SCAN_RC: "17" });
+    const retryInvocations = second.invocations.slice(callsBeforeRetry);
+    expect(second.result.status).not.toBe(0);
+    expect(retryInvocations).toContain("node ");
+    expect(retryInvocations).not.toContain("-an --delete");
+    expect(retryInvocations).not.toContain("--max-delete=");
+    expect(readFileSync(pending, "utf8")).toContain("staged:partial-secret.txt");
+  });
+
   it("does not dry-run or mirror after the secret scanner fails", () => {
     const { result, invocations } = runSyncScript(script, {
       MOCK_IMPORTED: "secret.txt",
@@ -114,6 +170,48 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
     });
     expect(result.status).not.toBe(0);
     expect(invocations).toContain("node ");
+    expect(invocations).not.toContain("-an --delete");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
+  it("retains scanner-failed content across invocations and clears it only after success", () => {
+    const harness = createSyncHarness(script);
+    const first = harness.run({
+      MOCK_IMPORTED: "retry-me.txt",
+      MOCK_SCAN_RC: "17",
+    });
+    expect(first.result.status).not.toBe(0);
+    const pendingRoot = join(harness.root, ".local", "state", "mimir", "import-pending");
+    expect(existsSync(join(pendingRoot, "retry-me.txt"))).toBe(true);
+
+    const callsBeforeRetry = first.invocations.length;
+    const second = harness.run();
+    const retryInvocations = second.invocations.slice(callsBeforeRetry);
+    expect(second.result.status, second.result.stderr).toBe(0);
+    expect(retryInvocations).toContain("node ");
+    expect(retryInvocations).toContain("import-pending/");
+    expect(retryInvocations).toContain("-an --delete");
+    expect(retryInvocations).toContain("--max-delete=");
+    const promotionIndex = retryInvocations.lastIndexOf("import-pending/");
+    expect(retryInvocations.indexOf("node ")).toBeLessThan(promotionIndex);
+    expect(promotionIndex).toBeLessThan(retryInvocations.indexOf("-an --delete"));
+    expect(existsSync(pendingRoot)).toBe(false);
+    expect(readFileSync(join(harness.root, "mimir", "retry-me.txt"), "utf8")).toContain("staged:retry-me.txt");
+  });
+
+  it("preserves both files and refuses to mirror when a pending path collides locally", () => {
+    const harness = createSyncHarness(script);
+    const local = join(harness.root, "mimir", "collision.txt");
+    writeFileSync(local, "existing-local\n");
+
+    const { result, invocations } = harness.run({ MOCK_IMPORTED: "collision.txt" });
+    expect(result.status).not.toBe(0);
+    expect(`${result.stdout}\n${result.stderr}`).toMatch(/collision|overwriting local paths/i);
+    expect(readFileSync(local, "utf8")).toBe("existing-local\n");
+    expect(readFileSync(
+      join(harness.root, ".local", "state", "mimir", "import-pending", "collision.txt"),
+      "utf8",
+    )).toContain("staged:collision.txt");
     expect(invocations).not.toContain("-an --delete");
     expect(invocations).not.toContain("--max-delete=");
   });

@@ -49,8 +49,12 @@ async function resolveFilePath(
   realRootDir: string,
   requestPath: string,
 ): Promise<string | null> {
-  const lexicalPath = resolve(rootDir, requestPath);
-  if (!isWithinRoot(rootDir, lexicalPath)) {
+  // Normalize even caller-supplied relative roots before lexical containment.
+  // createApp currently does this as well, but keeping the invariant local to
+  // the jail prevents a future call site from silently changing its meaning.
+  const lexicalRoot = resolve(rootDir);
+  const lexicalPath = resolve(lexicalRoot, requestPath);
+  if (!isWithinRoot(lexicalRoot, lexicalPath)) {
     return null;
   }
 
@@ -228,7 +232,7 @@ export const HEIMDALL_DESCRIPTOR = {
 
 export function createApp(config?: { apiKey?: string; rootDir?: string; shareSecret?: string }) {
   const apiKey = config?.apiKey ?? API_KEY;
-  const rootDir = resolve(config?.rootDir ?? ROOT_DIR);
+  const configuredRoot = resolve(config?.rootDir ?? ROOT_DIR);
   const shareSecret = config?.shareSecret ?? SHARE_SECRET;
 
   if (!apiKey) {
@@ -237,7 +241,8 @@ export function createApp(config?: { apiKey?: string; rootDir?: string; shareSec
 
   // Fail fast if the configured archive root itself is missing. Request paths
   // are compared against this canonical root to prevent symlink escapes.
-  const realRootDir = realpathSync(rootDir);
+  const rootDir = realpathSync(configuredRoot);
+  const realRootDir = rootDir;
 
   const app = express();
 

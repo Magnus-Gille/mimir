@@ -15,6 +15,9 @@ LOCAL="$HOME/mimir/"
 REMOTE="$NAS:/home/magnus/mimir/"
 INBOX="$NAS:/home/magnus/mimir-inbox/"
 REMOTE_ROOT="/home/magnus/mimir"
+STATE_DIR="${MIMIR_SYNC_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/mimir}"
+PENDING="$STATE_DIR/import-pending"
+QUARANTINE="${MIMIR_QUARANTINE_DIR:-${LOCAL%/}-quarantine}"
 MAX_DELETE="${MIMIR_SYNC_MAX_DELETE:-1000}"
 MAX_DELETE_PCT="${MIMIR_SYNC_MAX_DELETE_PCT:-20}"
 
@@ -31,24 +34,49 @@ if ! ssh -o ConnectTimeout=2 -o BatchMode=yes "$NAS" true 2>/dev/null; then
     exit 0
 fi
 
-# Step 1: Import new files from inbox (skip collisions, remove transferred originals)
+# Keep imports outside the mirrored/servable tree until the scanner has
+# accepted them. The pending tree itself is the durable recovery record: if
+# rsync or the scanner fails, a later invocation must process these paths
+# before it can mirror anything.
+mkdir -p "$PENDING"
+chmod 700 "$STATE_DIR" "$PENDING"
+
+# Step 1: Import new files from inbox into durable staging
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Importing from inbox..."
-if ! IMPORTED_RAW=$(rsync -a --ignore-existing --remove-source-files --out-format='%n' "$INBOX" "$LOCAL"); then
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Import FAILED; refusing to scan or mirror partial results."
+if ! rsync -a --ignore-existing --remove-source-files "$INBOX" "$PENDING/"; then
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Import FAILED; pending files remain staged at $PENDING; refusing to scan or mirror."
   exit 1
 fi
-IMPORTED=$(printf '%s\n' "$IMPORTED_RAW" | sed '/\/$/d')
 
-# Step 1.5: Secret-scan newly imported files before they can reach the NAS's
-# Bearer-servable tree. Hits are quarantined out of $LOCAL and alerted —
-# see src/secret-scan.ts and mimir#13.
-if [ -n "$IMPORTED" ]; then
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Scanning imported files for secrets..."
-  if ! printf '%s\n' "$IMPORTED" | node "$(dirname "$0")/../dist/cli/secret-scan.js" --stdin "$LOCAL"; then
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Secret scan FAILED; refusing to mirror unverified imports."
+PENDING_FILES=$(cd "$PENDING" && find . ! -type d -print | sed 's#^\./##')
+
+# Step 1.5: Secret-scan every pending file, including files left by an older
+# failed invocation. Hits are quarantined outside both staging and $LOCAL.
+if [ -n "$PENDING_FILES" ]; then
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Scanning pending imports for secrets..."
+  if ! printf '%s\n' "$PENDING_FILES" | node "$(dirname "$0")/../dist/cli/secret-scan.js" --stdin "$PENDING" "$QUARANTINE"; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Secret scan FAILED; pending files remain staged at $PENDING; refusing to mirror."
     exit 1
   fi
 fi
+
+# Step 1.6: Promote only verified content. --ignore-existing prevents an
+# inbox path from overwriting a local artifact; --remove-source-files makes
+# successful promotion durable. Any collision or partial promotion remains in
+# staging and blocks the mirror until an operator resolves it without data loss.
+if [ -n "$(find "$PENDING" -mindepth 1 -print -quit)" ]; then
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Promoting verified imports..."
+  if ! rsync -a --ignore-existing --remove-source-files "$PENDING/" "$LOCAL"; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Promotion FAILED; pending files remain staged at $PENDING; refusing to mirror."
+    exit 1
+  fi
+  find "$PENDING" -mindepth 1 -depth -type d -empty -delete
+  if [ -n "$(find "$PENDING" -mindepth 1 -print -quit)" ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Promotion BLOCKED by local path collisions; resolve $PENDING before syncing."
+    exit 1
+  fi
+fi
+rmdir "$PENDING"
 
 # Step 2: Mirror laptop → NAS (laptop is source of truth)
 # Safety: abort if --delete would remove >20% of remote files

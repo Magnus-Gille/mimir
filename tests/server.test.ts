@@ -3,7 +3,7 @@ import request from "supertest";
 import { createApp, HEIMDALL_DESCRIPTOR } from "../src/index.js";
 import { generateToken } from "../src/share-token.js";
 import { mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 
 const TEST_ROOT = join(import.meta.dirname, "__test_fixtures__");
 const TEST_OUTSIDE_ROOT = join(import.meta.dirname, "__test_fixtures_outside__");
@@ -223,6 +223,25 @@ describe("file serving: /files/*", () => {
 });
 
 describe("path traversal protection", () => {
+  it("canonicalizes a relative configured root before containment checks", async () => {
+    const relativeRoot = relative(process.cwd(), TEST_ROOT);
+    const relativeRootApp = createApp({
+      apiKey: TEST_API_KEY,
+      rootDir: relativeRoot,
+      shareSecret: TEST_SHARE_SECRET,
+    });
+
+    const health = await request(relativeRootApp).get("/health");
+    expect(health.status).toBe(200);
+    expect(health.body.root_dir).toBe(TEST_ROOT);
+
+    const file = await request(relativeRootApp)
+      .get("/files/hello.txt")
+      .set({ ...auth, "X-Forwarded-For": "198.51.100.78" });
+    expect(file.status).toBe(200);
+    expect(file.text).toBe("Hello, Mímir!");
+  });
+
   it("blocks ../ traversal in /files/", async () => {
     const res = await request(app)
       .get("/files/../../../etc/passwd")
