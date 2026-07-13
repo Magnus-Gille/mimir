@@ -23,6 +23,143 @@ afterEach(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
+const SYNC_SCRIPTS = ["sync-artifacts.sh", "sync-artifacts-daemon.sh"] as const;
+
+function mockSyncCommands(root: string): { bin: string; calls: string } {
+  const bin = join(root, "bin");
+  const calls = join(root, "sync.calls");
+  mkdirSync(bin);
+
+  executable(
+    join(bin, "ssh"),
+    `printf 'ssh %s\n' "$*" >> "$SYNC_CALLS"
+case "$*" in
+  *"find '/home/magnus/mimir'"*)
+    [ "\${MOCK_REMOTE_COUNT_RC:-0}" -eq 0 ] || exit "$MOCK_REMOTE_COUNT_RC"
+    i=0; while [ "$i" -lt "\${MOCK_REMOTE_TOTAL:-100}" ]; do printf .; i=$((i + 1)); done
+    ;;
+esac
+exit 0
+`,
+  );
+  executable(
+    join(bin, "rsync"),
+    `printf 'rsync %s\n' "$*" >> "$SYNC_CALLS"
+case "$*" in
+  *"--out-format=%n"*)
+    [ -z "\${MOCK_IMPORTED:-}" ] || printf '%s\n' "$MOCK_IMPORTED"
+    exit "\${MOCK_IMPORT_RC:-0}"
+    ;;
+  *"-an --delete"*)
+    i=0; while [ "$i" -lt "\${MOCK_DELETES:-0}" ]; do printf 'deleting old-%s\n' "$i"; i=$((i + 1)); done
+    i=0; while [ "$i" -lt "\${MOCK_ADDITIONS:-0}" ]; do printf 'new-%s\n' "$i"; i=$((i + 1)); done
+    exit "\${MOCK_DRY_RC:-0}"
+    ;;
+  *"--delete --max-delete="*) exit "\${MOCK_MIRROR_RC:-0}" ;;
+esac
+exit 0
+`,
+  );
+  executable(
+    join(bin, "node"),
+    `printf 'node %s\n' "$*" >> "$SYNC_CALLS"
+while IFS= read -r _line; do :; done
+exit "\${MOCK_SCAN_RC:-0}"
+`,
+  );
+  return { bin, calls };
+}
+
+function runSyncScript(
+  script: (typeof SYNC_SCRIPTS)[number],
+  overrides: Record<string, string> = {},
+) {
+  const root = tempDir();
+  const { bin, calls } = mockSyncCommands(root);
+  mkdirSync(join(root, "mimir"));
+  const args = script === "sync-artifacts.sh"
+    ? [join(REPO_ROOT, "scripts", script), "test-nas"]
+    : [join(REPO_ROOT, "scripts", script)];
+  const result = spawnSync("bash", args, {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      HOME: root,
+      PATH: `${bin}:${process.env.PATH ?? ""}`,
+      MIMIR_NAS: "test-nas",
+      SYNC_CALLS: calls,
+      ...overrides,
+    },
+  });
+  const invocations = existsSync(calls) ? readFileSync(calls, "utf8") : "";
+  return { result, invocations };
+}
+
+describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
+  it("does not scan or mirror after an inbox import failure", () => {
+    const { result, invocations } = runSyncScript(script, {
+      MOCK_IMPORTED: "partial-secret.txt",
+      MOCK_IMPORT_RC: "23",
+    });
+    expect(result.status).not.toBe(0);
+    expect(invocations).not.toContain("node ");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
+  it("does not dry-run or mirror after the secret scanner fails", () => {
+    const { result, invocations } = runSyncScript(script, {
+      MOCK_IMPORTED: "secret.txt",
+      MOCK_SCAN_RC: "17",
+    });
+    expect(result.status).not.toBe(0);
+    expect(invocations).toContain("node ");
+    expect(invocations).not.toContain("-an --delete");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
+  it("uses remote population rather than additions to calculate delete percentage", () => {
+    const { result, invocations } = runSyncScript(script, {
+      MOCK_REMOTE_TOTAL: "100",
+      MOCK_DELETES: "21",
+      MOCK_ADDITIONS: "500",
+    });
+    expect(result.status).toBe(1);
+    expect(`${result.stdout}\n${result.stderr}`).toContain("21/100 remote entries");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
+  it("aborts at the absolute delete backstop", () => {
+    const { result, invocations } = runSyncScript(script, {
+      MOCK_REMOTE_TOTAL: "100",
+      MOCK_DELETES: "5",
+      MIMIR_SYNC_MAX_DELETE: "5",
+      MIMIR_SYNC_MAX_DELETE_PCT: "100",
+    });
+    expect(result.status).toBe(1);
+    expect(invocations).not.toContain("--max-delete=5");
+  });
+
+  it("allows the percentage boundary and carries the absolute backstop into rsync", () => {
+    const { result, invocations } = runSyncScript(script, {
+      MOCK_REMOTE_TOTAL: "100",
+      MOCK_DELETES: "20",
+      MIMIR_SYNC_MAX_DELETE: "50",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(invocations).toContain("--delete --max-delete=50");
+  });
+
+  it("fails closed when the remote population cannot be measured", () => {
+    const { result, invocations } = runSyncScript(script, {
+      MOCK_DELETES: "1",
+      MOCK_REMOTE_COUNT_RC: "9",
+    });
+    expect(result.status).not.toBe(0);
+    expect(invocations).not.toContain("--max-delete=");
+  });
+});
+
 describe("offsite backup script", () => {
   it("keeps runtime state outside the deploy tree and bounds encrypted archive depth", () => {
     const root = tempDir();
@@ -131,10 +268,21 @@ describe("NAS deploy script", () => {
     const calls = join(root, "calls");
     mkdirSync(bin);
     executable(
+      join(bin, "git"),
+      `printf 'git %s\\n' "$*" >> "$DEPLOY_CALLS"
+case "$*" in
+  "status --porcelain --untracked-files=normal") printf '%s' "\${MOCK_GIT_STATUS:-}" ;;
+  "rev-parse HEAD") printf '%s\\n' "\${MOCK_DEPLOY_COMMIT:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" ;;
+esac
+`,
+    );
+    executable(
       join(bin, "ssh"),
       `printf 'ssh %s\\n' "$*" >> "$DEPLOY_CALLS"
 case "$*" in
+  *"curl -fsS --max-time 3"*) exit "\${MOCK_HEALTH_RC:-0}" ;;
   *"test -f"*) exit "\${MOCK_ENV_FILE_RC:-0}" ;;
+  *"head -n 1"*) printf '%s\\n' "\${MOCK_PREVIOUS_COMMIT:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}" ;;
   *"set -a;"*) exit "\${MOCK_ENV_VALUES_RC:-0}" ;;
 esac
 exit 0
@@ -167,7 +315,28 @@ exit 0
     expect(invocations).not.toContain("rsync ");
   });
 
-  it("continues without displaying values when all required environment values exist", () => {
+  it("refuses a dirty source before contacting the NAS", () => {
+    const root = tempDir();
+    const { bin, calls } = mockCommands(root);
+    const result = spawnSync("bash", [join(REPO_ROOT, "scripts/deploy-nas.sh"), "test-nas"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        DEPLOY_CALLS: calls,
+        MOCK_GIT_STATUS: " M src/index.ts\\n",
+      },
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("dirty worktree");
+    const invocations = readFileSync(calls, "utf8");
+    expect(invocations).not.toContain("ssh ");
+    expect(invocations).not.toContain("rsync ");
+  });
+
+  it("deploys deterministically and stamps only after loopback health", () => {
     const root = tempDir();
     const { bin, calls } = mockCommands(root);
     const result = spawnSync("bash", [join(REPO_ROOT, "scripts/deploy-nas.sh"), "test-nas"], {
@@ -184,6 +353,41 @@ exit 0
     expect(result.stdout).toContain("values not displayed");
     const invocations = readFileSync(calls, "utf8");
     expect(invocations).toContain("npm run build");
-    expect(invocations).toContain("rsync ");
+    expect(invocations).toContain("--exclude=.deployed-commit");
+    expect(invocations).toContain("chmod 600");
+    expect(invocations).toContain("npm ci --omit=dev");
+    expect(invocations).not.toContain("npm install --omit=dev");
+    expect(invocations).toContain("mimir-offsite.service");
+    expect(invocations).toContain("mimir-offsite.timer");
+    expect(invocations).toContain("http://127.0.0.1:");
+    expect(invocations).toContain(".deployed-commit.tmp");
+    expect(invocations.indexOf(".deployed-commit.tmp")).toBeGreaterThan(
+      invocations.indexOf("http://127.0.0.1:"),
+    );
+    expect(result.stdout).toContain("Accepted commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    expect(result.stdout).toContain("Rollback: check out bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+  });
+
+  it("does not advance the marker and prints an exact rollback after failed health", () => {
+    const root = tempDir();
+    const { bin, calls } = mockCommands(root);
+    const result = spawnSync("bash", [join(REPO_ROOT, "scripts/deploy-nas.sh"), "test-nas"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        DEPLOY_CALLS: calls,
+        MOCK_HEALTH_RC: "1",
+      },
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(".deployed-commit was not advanced");
+    expect(result.stderr).toContain("check out bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    const markerWrites = readFileSync(calls, "utf8")
+      .split("\n")
+      .filter((line) => line.includes(".deployed-commit.tmp"));
+    expect(markerWrites).toHaveLength(0);
   });
 });

@@ -1,7 +1,7 @@
 import express from "express";
 import { resolve, join, relative } from "node:path";
-import { stat, readdir } from "node:fs/promises";
-import { createReadStream } from "node:fs";
+import { open, realpath, readdir } from "node:fs/promises";
+import { constants, realpathSync } from "node:fs";
 import { lookup } from "mime-types";
 import contentDisposition from "content-disposition";
 import { timingSafeEqual } from "node:crypto";
@@ -31,13 +31,31 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(bufA, bufB);
 }
 
-function resolveFilePath(rootDir: string, requestPath: string): string | null {
-  const resolved = resolve(rootDir, requestPath);
-  // Prevent path traversal: resolved path must be within rootDir
-  if (!resolved.startsWith(rootDir + "/") && resolved !== rootDir) {
+function isWithinRoot(rootDir: string, candidate: string): boolean {
+  return candidate === rootDir || candidate.startsWith(rootDir + "/");
+}
+
+/**
+ * Resolve an existing request path and verify both its lexical path and real
+ * filesystem target stay inside the archive. The realpath check is essential:
+ * rsync preserves symlinks, so a lexical startsWith jail alone can follow an
+ * in-tree link to arbitrary files or directories outside Mimir's root.
+ *
+ * Missing paths deliberately throw ENOENT so callers can preserve the public
+ * 404 behavior. A containment violation returns null and is a 400.
+ */
+async function resolveFilePath(
+  rootDir: string,
+  realRootDir: string,
+  requestPath: string,
+): Promise<string | null> {
+  const lexicalPath = resolve(rootDir, requestPath);
+  if (!isWithinRoot(rootDir, lexicalPath)) {
     return null;
   }
-  return resolved;
+
+  const realPath = await realpath(lexicalPath);
+  return isWithinRoot(realRootDir, realPath) ? realPath : null;
 }
 
 // --- Rate limiter (in-memory, per-IP) ---
@@ -79,11 +97,13 @@ const INLINE_TYPES = new Set([
   "video/mp4",
   "video/webm",
 ]);
+const SAFE_OPEN_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW;
 
 async function serveFile(
   req: express.Request,
   res: express.Response,
   rootDir: string,
+  realRootDir: string,
   requestPath: string,
   options?: { disposition?: "inline" | "attachment" },
 ): Promise<void> {
@@ -92,61 +112,80 @@ async function serveFile(
     return;
   }
 
-  const resolved = resolveFilePath(rootDir, requestPath);
-  if (!resolved) {
-    res.status(400).json({ error: "Invalid path." });
-    return;
-  }
-
   try {
-    const stats = await stat(resolved);
-    if (stats.isDirectory()) {
-      res.status(400).json({ error: "Path is a directory. Use /list/ for directory listings, /files/ for individual files." });
+    const resolved = await resolveFilePath(rootDir, realRootDir, requestPath);
+    if (!resolved) {
+      res.status(400).json({ error: "Invalid path." });
       return;
     }
 
-    const mimeType = lookup(resolved) || "application/octet-stream";
-    const contentType = mimeType.startsWith("text/") ? `${mimeType}; charset=utf-8` : mimeType;
-    const fileSize = stats.size;
-
-    // Content-Disposition for share links
-    if (options?.disposition) {
-      const useInline = options.disposition === "inline" && INLINE_TYPES.has(mimeType);
-      res.setHeader("Content-Disposition", useInline ? "inline" : contentDisposition(resolved));
-    }
-
-    // Range request support
-    const range = req.headers.range;
-    if (range) {
-      const match = range.match(/bytes=(\d+)-(\d*)/);
-      if (match) {
-        const start = parseInt(match[1], 10);
-        const end = match[2] ? parseInt(match[2], 10) : fileSize - 1;
-
-        if (start >= fileSize || end >= fileSize || start > end) {
-          res.status(416).setHeader("Content-Range", `bytes */${fileSize}`).end();
-          return;
-        }
-
-        res.status(206);
-        res.setHeader("Content-Range", `bytes ${start}-${end}/${fileSize}`);
-        res.setHeader("Accept-Ranges", "bytes");
-        res.setHeader("Content-Length", end - start + 1);
-        res.setHeader("Content-Type", contentType);
-        res.setHeader("Last-Modified", stats.mtime.toUTCString());
-        createReadStream(resolved, { start, end }).pipe(res);
+    // Open first, then stat and stream through the same handle. This removes
+    // the stat -> createReadStream race where a concurrent rsync deletion could
+    // otherwise emit an unhandled ReadStream error and terminate the server.
+    const file = await open(resolved, SAFE_OPEN_FLAGS);
+    let streamOwnsFile = false;
+    try {
+      const stats = await file.stat();
+      if (stats.isDirectory()) {
+        res.status(400).json({ error: "Path is a directory. Use /list/ for directory listings, /files/ for individual files." });
         return;
       }
-    }
 
-    res.setHeader("Content-Type", contentType);
-    res.setHeader("Content-Length", fileSize);
-    res.setHeader("Accept-Ranges", "bytes");
-    res.setHeader("Last-Modified", stats.mtime.toUTCString());
-    createReadStream(resolved).pipe(res);
+      const mimeType = lookup(resolved) || "application/octet-stream";
+      const contentType = mimeType.startsWith("text/") ? `${mimeType}; charset=utf-8` : mimeType;
+      const fileSize = stats.size;
+
+      // Content-Disposition for share links
+      if (options?.disposition) {
+        const useInline = options.disposition === "inline" && INLINE_TYPES.has(mimeType);
+        res.setHeader("Content-Disposition", useInline ? "inline" : contentDisposition(resolved));
+      }
+
+      // Range request support
+      const range = req.headers.range;
+      if (range) {
+        const match = range.match(/bytes=(\d+)-(\d*)/);
+        if (match) {
+          const start = parseInt(match[1], 10);
+          const end = match[2] ? parseInt(match[2], 10) : fileSize - 1;
+
+          if (start >= fileSize || end >= fileSize || start > end) {
+            res.status(416).setHeader("Content-Range", `bytes */${fileSize}`).end();
+            return;
+          }
+
+          res.status(206);
+          res.setHeader("Content-Range", `bytes ${start}-${end}/${fileSize}`);
+          res.setHeader("Accept-Ranges", "bytes");
+          res.setHeader("Content-Length", end - start + 1);
+          res.setHeader("Content-Type", contentType);
+          res.setHeader("Last-Modified", stats.mtime.toUTCString());
+          const stream = file.createReadStream({ start, end, autoClose: true });
+          streamOwnsFile = true;
+          stream.on("error", (err) => res.destroy(err));
+          stream.pipe(res);
+          return;
+        }
+      }
+
+      res.setHeader("Content-Type", contentType);
+      res.setHeader("Content-Length", fileSize);
+      res.setHeader("Accept-Ranges", "bytes");
+      res.setHeader("Last-Modified", stats.mtime.toUTCString());
+      const stream = file.createReadStream({ autoClose: true });
+      streamOwnsFile = true;
+      stream.on("error", (err) => res.destroy(err));
+      stream.pipe(res);
+    } finally {
+      if (!streamOwnsFile) await file.close();
+    }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       res.status(404).json({ error: `File not found: /${requestPath}` });
+      return;
+    }
+    if ((err as NodeJS.ErrnoException).code === "ELOOP") {
+      res.status(400).json({ error: "Invalid path." });
       return;
     }
     throw err;
@@ -195,6 +234,10 @@ export function createApp(config?: { apiKey?: string; rootDir?: string; shareSec
   if (!apiKey) {
     throw new Error("MIMIR_API_KEY is required. Set it in .env or pass via config.");
   }
+
+  // Fail fast if the configured archive root itself is missing. Request paths
+  // are compared against this canonical root to prevent symlink escapes.
+  const realRootDir = realpathSync(rootDir);
 
   const app = express();
 
@@ -266,7 +309,7 @@ export function createApp(config?: { apiKey?: string; rootDir?: string; shareSec
 
     // ?dl=1 forces a download (attachment) instead of inline browser playback
     const forceDownload = req.query.dl === "1" || req.query.download === "1";
-    await serveFile(req, res, rootDir, result.path, {
+    await serveFile(req, res, rootDir, realRootDir, result.path, {
       disposition: forceDownload ? "attachment" : "inline",
     });
   });
@@ -290,14 +333,15 @@ export function createApp(config?: { apiKey?: string; rootDir?: string; shareSec
   const listHandler: express.RequestHandler = async (req, res) => {
     const rawPath = (req.params as Record<string, string | string[]>).path;
     const requestPath = Array.isArray(rawPath) ? rawPath.join("/") : (rawPath ?? "");
-    const resolved = resolveFilePath(rootDir, requestPath);
-    if (!resolved) {
-      res.status(400).json({ error: "Invalid path." });
-      return;
-    }
-
     try {
-      const stats = await stat(resolved);
+      const resolved = await resolveFilePath(rootDir, realRootDir, requestPath);
+      if (!resolved) {
+        res.status(400).json({ error: "Invalid path." });
+        return;
+      }
+
+      const directory = await open(resolved, SAFE_OPEN_FLAGS);
+      const stats = await directory.stat().finally(() => directory.close());
       if (!stats.isDirectory()) {
         res.status(400).json({ error: "Path is not a directory. Use /files/ to retrieve files." });
         return;
@@ -309,18 +353,28 @@ export function createApp(config?: { apiKey?: string; rootDir?: string; shareSec
           .filter((e) => !e.name.startsWith("."))
           .map(async (e) => {
             const entryPath = join(resolved, e.name);
-            const entryStat = await stat(entryPath).catch(() => null);
-            if (!entryStat) return null;
+            const realEntryPath = await resolveFilePath(
+              realRootDir,
+              realRootDir,
+              entryPath,
+            ).catch(() => null);
+            // Do not expose even the metadata/name of an external or dangling
+            // symlink through a directory listing.
+            if (!realEntryPath) return null;
+            const entry = await open(realEntryPath, SAFE_OPEN_FLAGS).catch(() => null);
+            if (!entry) return null;
+            const entryStat = await entry.stat().finally(() => entry.close());
+            const isDirectory = entryStat.isDirectory();
             return {
-              name: e.isDirectory() ? e.name + "/" : e.name,
-              type: e.isDirectory() ? "directory" as const : "file" as const,
-              size: e.isFile() ? entryStat.size : undefined,
+              name: isDirectory ? e.name + "/" : e.name,
+              type: isDirectory ? "directory" as const : "file" as const,
+              size: entryStat.isFile() ? entryStat.size : undefined,
               modified: entryStat.mtime.toISOString(),
             };
           })
       );
 
-      const path = "/" + relative(rootDir, resolved);
+      const path = "/" + relative(rootDir, resolve(rootDir, requestPath));
       res.json({
         path: path.endsWith("/") ? path : path + "/",
         entries: entries.filter(Boolean),
@@ -328,6 +382,10 @@ export function createApp(config?: { apiKey?: string; rootDir?: string; shareSec
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
         res.status(404).json({ error: `Directory not found: /${requestPath}` });
+        return;
+      }
+      if ((err as NodeJS.ErrnoException).code === "ELOOP") {
+        res.status(400).json({ error: "Invalid path." });
         return;
       }
       throw err;
@@ -340,7 +398,7 @@ export function createApp(config?: { apiKey?: string; rootDir?: string; shareSec
   app.get("/files/{*path}", async (req, res) => {
     const rawPath = (req.params as Record<string, string | string[]>).path;
     const requestPath = Array.isArray(rawPath) ? rawPath.join("/") : (rawPath ?? "");
-    await serveFile(req, res, rootDir, requestPath);
+    await serveFile(req, res, rootDir, realRootDir, requestPath);
   });
 
   return app;

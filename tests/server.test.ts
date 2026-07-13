@@ -2,10 +2,11 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import request from "supertest";
 import { createApp, HEIMDALL_DESCRIPTOR } from "../src/index.js";
 import { generateToken } from "../src/share-token.js";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 
 const TEST_ROOT = join(import.meta.dirname, "__test_fixtures__");
+const TEST_OUTSIDE_ROOT = join(import.meta.dirname, "__test_fixtures_outside__");
 const TEST_API_KEY = "test-key-for-mimir";
 const TEST_SHARE_SECRET = "test-share-secret-for-mimir-32bytes!";
 
@@ -20,10 +21,18 @@ function setup() {
   writeFileSync(join(TEST_ROOT, 'quo"te.md'), "quoted filename");
   writeFileSync(join(TEST_ROOT, "åäö.md"), "svenska tecken");
   writeFileSync(join(TEST_ROOT, "line\nbreak.md"), "control char filename");
+  mkdirSync(join(TEST_OUTSIDE_ROOT, "private-dir"), { recursive: true });
+  writeFileSync(join(TEST_OUTSIDE_ROOT, "private.txt"), "must stay outside");
+  writeFileSync(join(TEST_OUTSIDE_ROOT, "private-dir", "secret.txt"), "must stay outside");
+  symlinkSync(join(TEST_OUTSIDE_ROOT, "private.txt"), join(TEST_ROOT, "outside-file-link"));
+  symlinkSync(join(TEST_OUTSIDE_ROOT, "private-dir"), join(TEST_ROOT, "outside-dir-link"));
+  symlinkSync("hello.txt", join(TEST_ROOT, "inside-file-link"));
+  symlinkSync("subdir", join(TEST_ROOT, "inside-dir-link"));
 }
 
 function teardown() {
   rmSync(TEST_ROOT, { recursive: true, force: true });
+  rmSync(TEST_OUTSIDE_ROOT, { recursive: true, force: true });
 }
 
 let app: ReturnType<typeof createApp>;
@@ -38,6 +47,8 @@ afterAll(() => {
 });
 
 const auth = { Authorization: `Bearer ${TEST_API_KEY}` };
+const hardeningClient = { ...auth, "X-Forwarded-For": "198.51.100.77" };
+const hardeningPublicClient = { "X-Forwarded-For": "198.51.100.77" };
 
 describe("health", () => {
   it("returns ok without auth", async () => {
@@ -146,6 +157,19 @@ describe("file serving: /files/*", () => {
     expect(res.status).toBe(404);
   });
 
+  it("stays healthy when a sync removes a file as it is being opened", async () => {
+    const volatilePath = join(TEST_ROOT, "volatile.txt");
+    writeFileSync(volatilePath, "short-lived artifact");
+    const pending = request(app).get("/files/volatile.txt").set(hardeningClient);
+    setImmediate(() => rmSync(volatilePath, { force: true }));
+
+    const res = await pending;
+    // The stable open either wins (200) or realpath/open observes removal
+    // (404); neither path may crash the process with an unhandled stream error.
+    expect([200, 404]).toContain(res.status);
+    expect((await request(app).get("/health").set(hardeningPublicClient)).status).toBe(200);
+  });
+
   it("returns 400 for empty file path", async () => {
     const res = await request(app)
       .get("/files/")
@@ -219,6 +243,49 @@ describe("path traversal protection", () => {
       .get("/files/..%2F..%2Fetc%2Fpasswd")
       .set(auth);
     expect([400, 404]).toContain(res.status);
+  });
+
+  it("blocks a file symlink whose real target escapes the root", async () => {
+    const res = await request(app).get("/files/outside-file-link").set(hardeningClient);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/invalid path/i);
+  });
+
+  it("blocks an external file symlink through a signed share", async () => {
+    const token = generateToken("outside-file-link", 3600, TEST_SHARE_SECRET);
+    const res = await request(app).get(`/share/${token}`).set(hardeningPublicClient);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/invalid path/i);
+  });
+
+  it("blocks a directory symlink whose real target escapes the root", async () => {
+    const res = await request(app).get("/list/outside-dir-link").set(hardeningClient);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/invalid path/i);
+  });
+
+  it("still serves valid symlinks whose targets remain inside the root", async () => {
+    const file = await request(app).get("/files/inside-file-link").set(hardeningClient);
+    expect(file.status).toBe(200);
+    expect(file.text).toBe("Hello, Mímir!");
+
+    const dir = await request(app).get("/list/inside-dir-link").set(hardeningClient);
+    expect(dir.status).toBe(200);
+    expect(dir.body.entries.map((e: { name: string }) => e.name)).toContain("nested.md");
+
+    const token = generateToken("inside-file-link", 3600, TEST_SHARE_SECRET);
+    const share = await request(app).get(`/share/${token}`).set(hardeningPublicClient);
+    expect(share.status).toBe(200);
+    expect(share.text).toBe("Hello, Mímir!");
+  });
+
+  it("keeps external symlinks out of parent directory listings", async () => {
+    const res = await request(app).get("/list/").set(hardeningClient);
+    const names = res.body.entries.map((e: { name: string }) => e.name);
+    expect(names).not.toContain("outside-file-link");
+    expect(names).not.toContain("outside-dir-link/");
+    expect(names).toContain("inside-file-link");
+    expect(names).toContain("inside-dir-link/");
   });
 });
 

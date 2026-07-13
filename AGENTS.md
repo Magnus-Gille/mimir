@@ -37,7 +37,7 @@ Agents don't talk to Mímir directly via MCP. Instead:
 1. **Cloudflare Access** — Service Token required at edge. CF Access app: `mimir.gille.ai`
 2. **Bearer token** — `MIMIR_API_KEY` at origin, timing-safe comparison
 3. **App hardening:**
-   - Path traversal prevention (resolve + startsWith jail to root dir)
+   - Path traversal prevention (lexical + realpath jail; external symlinks rejected)
    - Rate limiting (60 req/min per IP)
    - DNS rebinding protection via allowed hosts
    - Security headers (X-Content-Type-Options, X-Frame-Options, CSP, X-Robots-Tag)
@@ -107,6 +107,13 @@ MIMIR_API_KEY=dev-key MIMIR_ROOT_DIR=./tests/__test_fixtures__ npm run dev
 The target host is environment-specific; pass it explicitly when deploying outside
 the maintainer's machine. Do not commit private Tailscale IPs or hostnames.
 
+Deployment requires a clean Git worktree. The script installs production dependencies
+with `npm ci`, refreshes all Mímir systemd units, verifies health over loopback, and only
+then atomically records the exact accepted commit in `.deployed-commit`. It preserves the
+previous marker until acceptance and prints a clean-worktree redeploy command using that
+rollback target when available. The remote `.env` is enforced as mode `0600` without
+displaying its values.
+
 The NAS Pi needs a `.env` file at `/home/magnus/mimir-server/.env`:
 ```
 MIMIR_API_KEY=<generate with: openssl rand -hex 32>
@@ -165,6 +172,8 @@ additionally pushes a `fail`-state Heimdall panel when `HEIMDALL_HUB_URL`/
 | `MIMIR_ROOT_DIR` | `/home/magnus/mimir` | Root directory to serve |
 | `MIMIR_ALLOWED_HOSTS` | — | Extra allowed Host headers (comma-separated) |
 | `MIMIR_RATE_LIMIT` | `60` | Max requests per minute per IP |
+| `MIMIR_SYNC_MAX_DELETE` | `1000` | Abort laptop→NAS mirror at or above this many deletions |
+| `MIMIR_SYNC_MAX_DELETE_PCT` | `20` | Abort mirror above this percentage of the actual remote population |
 | `MIMIR_SHARE_SECRET` | — | HMAC secret for share links (optional, enables `/share`) |
 | `MIMIR_BASE_URL` | `https://mimir.gille.ai` | Base URL for generated share links (CLI only) |
 | `MIMIR_OFFSITE_REMOTE` | `mimir-crypt` | rclone crypt remote name (offsite backup) |
