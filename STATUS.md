@@ -25,8 +25,11 @@ closed across invocations through out-of-tree pending staging. It calculates del
 safety against the real remote population with an absolute
 backstop, and makes deployment deterministic and attributable. Deployment now
 requires a clean commit, uses `npm ci`, refreshes all shipped units, enforces `.env`
-mode `0600`, verifies loopback health, and only then atomically advances
-`.deployed-commit`. It has not been merged or deployed.
+mode `0600`, excludes both `.git` checkout shapes, clears stale remote Git metadata,
+invalidates the prior acceptance marker before remote artifact mutation, verifies
+loopback health, and only then atomically recreates `.deployed-commit`. Failed remote
+mutations remain markerless while retaining the captured prior SHA for rollback. It
+has not been merged or deployed.
 
 The first restore attempt had already proved decryption, but comparison with the live source correctly observed three files that changed after the backup. The immutable-snapshot acceptance above removed that race and is the authoritative release evidence.
 
@@ -44,13 +47,12 @@ Existing issue #12 (health/probe state) and issue #11 (deployed-environment cons
 3. Accept production by verifying loopback health, exact `.deployed-commit`, `.env`
    mode `0600`, refreshed HTTP/offsite units, and the next automatic sync.
 4. Continue issue #12's Heimdall probe decision without widening Mímir's loopback bind.
-5. Define a documented cleanup policy for legacy remote `.git` debris; do not delete backup data ad hoc.
 
 ## Release Validation
 
 The unreleased hardening candidate passed:
 
-- `npm test` — 139 tests
+- `npm test` — 142 tests
 - `npm run lint`
 - `npx tsc --noEmit`
 - `npm run build`

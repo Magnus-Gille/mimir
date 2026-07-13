@@ -381,6 +381,9 @@ case "$*" in
   *"curl -fsS --max-time 3"*) exit "\${MOCK_HEALTH_RC:-0}" ;;
   *"test -f"*) exit "\${MOCK_ENV_FILE_RC:-0}" ;;
   *"head -n 1"*) printf '%s\\n' "\${MOCK_PREVIOUS_COMMIT:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}" ;;
+  *"npm ci --omit=dev"*) exit "\${MOCK_DEPENDENCY_RC:-0}" ;;
+  *"sudo install -m 0644"*) exit "\${MOCK_UNIT_RC:-0}" ;;
+  *"rm -f '/home/magnus/mimir-server/.deployed-commit'"*) exit "\${MOCK_MARKER_REMOVE_RC:-0}" ;;
   *"set -a;"*) exit "\${MOCK_ENV_VALUES_RC:-0}" ;;
 esac
 exit 0
@@ -451,6 +454,8 @@ exit 0
     expect(result.stdout).toContain("values not displayed");
     const invocations = readFileSync(calls, "utf8");
     expect(invocations).toContain("npm run build");
+    expect(invocations).toContain("--exclude=.git");
+    expect(invocations).not.toContain("--exclude=.git/");
     expect(invocations).toContain("--exclude=.deployed-commit");
     expect(invocations).toContain("chmod 600");
     expect(invocations).toContain("npm ci --omit=dev");
@@ -459,6 +464,12 @@ exit 0
     expect(invocations).toContain("mimir-offsite.timer");
     expect(invocations).toContain("http://127.0.0.1:");
     expect(invocations).toContain(".deployed-commit.tmp");
+    const markerRemovalIndex = invocations.indexOf("rm -f '/home/magnus/mimir-server/.deployed-commit'");
+    const gitCleanupIndex = invocations.indexOf("rm -rf '/home/magnus/mimir-server/.git'");
+    const rsyncIndex = invocations.indexOf("rsync ");
+    expect(markerRemovalIndex).toBeGreaterThan(-1);
+    expect(markerRemovalIndex).toBeLessThan(gitCleanupIndex);
+    expect(gitCleanupIndex).toBeLessThan(rsyncIndex);
     expect(invocations.indexOf(".deployed-commit.tmp")).toBeGreaterThan(
       invocations.indexOf("http://127.0.0.1:"),
     );
@@ -466,7 +477,34 @@ exit 0
     expect(result.stdout).toContain("Rollback: check out bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
   });
 
-  it("does not advance the marker and prints an exact rollback after failed health", () => {
+  it("excludes a worktree .git file and removes stale remote Git metadata", () => {
+    const root = tempDir();
+    const source = join(root, "source");
+    mkdirSync(source);
+    writeFileSync(join(source, ".git"), "gitdir: /tmp/example-worktree-metadata\n");
+    const { bin, calls } = mockCommands(root);
+    const result = spawnSync("bash", [join(REPO_ROOT, "scripts/deploy-nas.sh"), "test-nas"], {
+      cwd: source,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        DEPLOY_CALLS: calls,
+      },
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    const invocations = readFileSync(calls, "utf8");
+    expect(readFileSync(join(source, ".git"), "utf8")).toContain("gitdir:");
+    expect(invocations).toContain("--exclude=.git");
+    expect(invocations).not.toContain("--exclude=.git/");
+    expect(invocations).toContain("rm -rf '/home/magnus/mimir-server/.git'");
+    expect(invocations.indexOf("rm -rf '/home/magnus/mimir-server/.git'")).toBeLessThan(
+      invocations.indexOf("rsync "),
+    );
+  });
+
+  it("leaves no accepted marker and prints an exact rollback after failed health", () => {
     const root = tempDir();
     const { bin, calls } = mockCommands(root);
     const result = spawnSync("bash", [join(REPO_ROOT, "scripts/deploy-nas.sh"), "test-nas"], {
@@ -481,11 +519,39 @@ exit 0
     });
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain(".deployed-commit was not advanced");
+    expect(result.stderr).toContain("acceptance marker was cleared and not recreated");
     expect(result.stderr).toContain("check out bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-    const markerWrites = readFileSync(calls, "utf8")
+    const invocations = readFileSync(calls, "utf8");
+    expect(invocations.indexOf("rm -f '/home/magnus/mimir-server/.deployed-commit'")).toBeLessThan(
+      invocations.indexOf("rsync "),
+    );
+    const markerWrites = invocations
       .split("\n")
       .filter((line) => line.includes(".deployed-commit.tmp"));
     expect(markerWrites).toHaveLength(0);
+  });
+
+  it.each([
+    ["dependency installation", "MOCK_DEPENDENCY_RC"],
+    ["unit refresh", "MOCK_UNIT_RC"],
+  ])("leaves no accepted marker when %s fails", (_step, failureVariable) => {
+    const root = tempDir();
+    const { bin, calls } = mockCommands(root);
+    const result = spawnSync("bash", [join(REPO_ROOT, "scripts/deploy-nas.sh"), "test-nas"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        DEPLOY_CALLS: calls,
+        [failureVariable]: "1",
+      },
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("acceptance marker was cleared and not recreated");
+    const invocations = readFileSync(calls, "utf8");
+    expect(invocations).toContain("rm -f '/home/magnus/mimir-server/.deployed-commit'");
+    expect(invocations).not.toContain(".deployed-commit.tmp");
   });
 });

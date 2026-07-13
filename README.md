@@ -126,9 +126,12 @@ Optional production settings include `MIMIR_SHARE_SECRET`,
 Deployments must start from a clean Git worktree. The script uses deterministic
 production dependency installation, refreshes the HTTP and offsite systemd units,
 checks the service through its loopback-only listener, and atomically advances
-`.deployed-commit` only after health passes. The previous accepted commit remains the
-rollback target if deployment fails; the script prints the exact clean-worktree
-redeploy command. It also enforces mode `0600` on the remote `.env`.
+`.deployed-commit` only after health passes. It first captures the previous SHA as the
+rollback target, then removes the marker before any remote code-tree mutation; a failed
+dependency, unit, restart, or health step therefore leaves the artifact explicitly
+unaccepted. Both source worktree `.git` files and checkout `.git` directories are excluded,
+and stale remote Git metadata is removed before transfer. The script prints the exact
+clean-worktree redeploy command and enforces mode `0600` on the remote `.env`.
 
 `mimir.service` runs the HTTP server with `ProtectSystem=strict`,
 `ReadOnlyPaths=/home/magnus/mimir`, and write access only to the server directory.

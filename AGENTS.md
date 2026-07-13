@@ -109,10 +109,12 @@ the maintainer's machine. Do not commit private Tailscale IPs or hostnames.
 
 Deployment requires a clean Git worktree. The script installs production dependencies
 with `npm ci`, refreshes all Mímir systemd units, verifies health over loopback, and only
-then atomically records the exact accepted commit in `.deployed-commit`. It preserves the
-previous marker until acceptance and prints a clean-worktree redeploy command using that
-rollback target when available. The remote `.env` is enforced as mode `0600` without
-displaying its values.
+then atomically records the exact accepted commit in `.deployed-commit`. Before the first
+remote code-tree mutation it captures the previous SHA for rollback, removes the acceptance
+marker, and removes stale remote `.git` metadata; interrupted or rejected deployments stay
+markerless. Source `.git` files and directories are excluded from transfer. The script
+prints a clean-worktree redeploy command using the captured rollback target when available.
+The remote `.env` is enforced as mode `0600` without displaying its values.
 
 The NAS Pi needs a `.env` file at `/home/magnus/mimir-server/.env`:
 ```

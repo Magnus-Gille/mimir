@@ -40,19 +40,37 @@ esac
 
 deployment_failed() {
   local rc=$?
-  echo "ERROR: Deployment of $DEPLOY_COMMIT did not complete; .deployed-commit was not advanced." >&2
+  if [ "$MARKER_INVALIDATED" -eq 1 ]; then
+    echo "ERROR: Deployment of $DEPLOY_COMMIT did not complete; the remote acceptance marker was cleared and not recreated." >&2
+  else
+    echo "ERROR: Deployment of $DEPLOY_COMMIT did not complete before remote artifact mutation; the previous acceptance marker remains valid." >&2
+  fi
   echo "Rollback: check out $ROLLBACK_TARGET in a clean worktree and run ./scripts/deploy-nas.sh $NAS_HOST" >&2
   exit "$rc"
 }
+MARKER_INVALIDATED=0
 trap deployment_failed ERR
 
 echo "==> Building locally..."
 npm run build
 
+# The marker describes the currently accepted artifact, not merely the most
+# recent successful deploy. Invalidate it before the first remote code-tree
+# mutation so any interrupted deploy is visibly unaccepted.
+echo "==> Invalidating previous deployment acceptance..."
+ssh "$REMOTE" "rm -f '$REMOTE_DIR/.deployed-commit'"
+MARKER_INVALIDATED=1
+
+# Old deploys could accidentally copy a worktree's .git file. Remove either a
+# file or directory before transfer, and exclude the basename form below so
+# rsync protects both checkout shapes.
+echo "==> Removing remote Git metadata..."
+ssh "$REMOTE" "rm -rf '$REMOTE_DIR/.git'"
+
 echo "==> Syncing to $REMOTE:$REMOTE_DIR..."
 rsync -av --delete \
   --exclude='node_modules/' \
-  --exclude='.git/' \
+  --exclude='.git' \
   --exclude='.env' \
   --exclude='.deployed-commit' \
   --exclude='tests/' \
