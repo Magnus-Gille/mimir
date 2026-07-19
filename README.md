@@ -5,6 +5,8 @@ serves documents, presentations, PDFs, images, and other artifacts over HTTP wit
 Bearer-token auth, temporary HMAC share links, and a small operational surface that
 is easy to run on a NAS Pi.
 
+This Grimnir component is unrelated to Grafana Mimir.
+
 Mímir is the file archive in Grimnir:
 
 - **Munin** stores memory, summaries, and extracted document text.
