@@ -107,6 +107,28 @@ describe("heimdall.json", () => {
     expect(res.body.deploy).toMatchObject({ host: "localhost", systemd_unit: "mimir", platform: "bare-metal" });
   });
 
+  it("uses configured deployment identity instead of collapsing every instance", async () => {
+    const configuredApp = createApp({
+      apiKey: TEST_API_KEY,
+      rootDir: TEST_ROOT,
+      instanceId: "archive-primary",
+      deployHost: "files-01",
+      rateLimitMax: 1000,
+    });
+    const res = await request(configuredApp).get("/heimdall.json");
+
+    expect(res.body.service.instance_id).toBe("archive-primary");
+    expect(res.body.deploy.host).toBe("files-01");
+  });
+
+  it("rejects malformed deployment identity", () => {
+    expect(() => createApp({
+      apiKey: TEST_API_KEY,
+      rootDir: TEST_ROOT,
+      instanceId: "not valid",
+    })).toThrow(/instance id/i);
+  });
+
   it("links are root-relative or https (no protocol-relative)", async () => {
     const res = await request(app).get("/heimdall.json");
     const links: Record<string, string> = res.body.links;

@@ -210,33 +210,55 @@ async function serveFile(
 // Served at GET /heimdall.json for Tier-1 discovery by the Heimdall dashboard.
 // Shape must satisfy Heimdall's validateDescriptor (schema/service/v1).
 // Keep version in sync with package.json when bumping.
-export const HEIMDALL_DESCRIPTOR = {
-  _schema: 'https://grimnir.example/schema/service/v1',
-  service: {
-    name: 'mimir',
-    label: 'Mímir',
-    namespace: 'grimnir',
-    instance_id: 'default',
-    criticality: 'normal',
-  },
-  kind: 'http-service',
-  status: 'pass',
-  version: '0.1.0',
-  deploy: {
-    host: 'localhost',
-    systemd_unit: 'mimir',
-    platform: 'bare-metal',
-  },
-  metrics: [],
-  alerts: { rules: [], active_count: 0, firing: [] },
-  panels: [],
-  links: {
-    self: '/heimdall.json',
-    health: '/health',
-    repo: 'https://github.com/Magnus-Gille/mimir',
-  },
-  ui: { icon: 'book', category: 'infra' },
-} as const;
+const DESCRIPTOR_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+function descriptorId(value: string | undefined, fallback: string, label: string): string {
+  const configured = value?.trim() || fallback;
+  if (!DESCRIPTOR_ID.test(configured)) {
+    throw new Error(`Invalid Heimdall ${label}: use letters, numbers, dot, underscore, or hyphen.`);
+  }
+  return configured;
+}
+
+export function buildHeimdallDescriptor(config?: { instanceId?: string; deployHost?: string }) {
+  return {
+    _schema: 'https://grimnir.example/schema/service/v1',
+    service: {
+      name: 'mimir',
+      label: 'Mímir',
+      namespace: 'grimnir',
+      instance_id: descriptorId(
+        config?.instanceId ?? process.env.MIMIR_INSTANCE_ID,
+        'default',
+        'instance id',
+      ),
+      criticality: 'normal',
+    },
+    kind: 'http-service',
+    status: 'pass',
+    version: '0.1.0',
+    deploy: {
+      host: descriptorId(
+        config?.deployHost ?? process.env.MIMIR_DEPLOY_HOST,
+        'localhost',
+        'deploy host',
+      ),
+      systemd_unit: 'mimir',
+      platform: 'bare-metal',
+    },
+    metrics: [],
+    alerts: { rules: [], active_count: 0, firing: [] },
+    panels: [],
+    links: {
+      self: '/heimdall.json',
+      health: '/health',
+      repo: 'https://github.com/Magnus-Gille/mimir',
+    },
+    ui: { icon: 'book', category: 'infra' },
+  } as const;
+}
+
+export const HEIMDALL_DESCRIPTOR = buildHeimdallDescriptor();
 
 // --- Express app ---
 
@@ -246,11 +268,19 @@ export function createApp(config?: {
   shareSecret?: string;
   trustProxy?: boolean | string | number;
   rateLimitMax?: number;
+  instanceId?: string;
+  deployHost?: string;
 }) {
   const apiKey = config?.apiKey ?? API_KEY;
   const configuredRoot = resolve(config?.rootDir ?? ROOT_DIR);
   const shareSecret = config?.shareSecret ?? SHARE_SECRET;
   const rateLimitMax = config?.rateLimitMax ?? RATE_LIMIT_MAX;
+  const heimdallDescriptor = config?.instanceId || config?.deployHost
+    ? buildHeimdallDescriptor({
+        instanceId: config.instanceId,
+        deployHost: config.deployHost,
+      })
+    : HEIMDALL_DESCRIPTOR;
 
   if (!apiKey) {
     throw new Error("MIMIR_API_KEY is required. Set it in .env or pass via config.");
@@ -315,7 +345,7 @@ export function createApp(config?: {
 
   // Heimdall self-descriptor (no auth)
   app.get("/heimdall.json", (_req, res) => {
-    res.json(HEIMDALL_DESCRIPTOR);
+    res.json(heimdallDescriptor);
   });
 
   // Share endpoint (no Bearer auth — token in URL provides auth)

@@ -7,6 +7,10 @@ set -euo pipefail
 NAS_HOST="${1:-${MIMIR_NAS_HOST:-}}"
 [ -n "$NAS_HOST" ] || { echo "ERROR: pass a deployment host or set MIMIR_NAS_HOST." >&2; exit 1; }
 DEPLOY_USER="${MIMIR_DEPLOY_USER:-mimir}"
+[[ "$DEPLOY_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || {
+  echo "ERROR: MIMIR_DEPLOY_USER must be a Linux account name." >&2
+  exit 1
+}
 REMOTE="$DEPLOY_USER@$NAS_HOST"
 REMOTE_DIR="/home/$DEPLOY_USER/mimir-server"
 REMOTE_ROOT="/home/$DEPLOY_USER/mimir"
@@ -28,8 +32,8 @@ if ! ssh "$REMOTE" "test -f '$REMOTE_DIR/.env'"; then
   exit 1
 fi
 ssh "$REMOTE" "chmod 600 '$REMOTE_DIR/.env'"
-if ! ssh "$REMOTE" "set -a; . '$REMOTE_DIR/.env'; test -n \"\${MIMIR_API_KEY:-}\" && test -n \"\${HEIMDALL_HUB_URL:-}\" && test -n \"\${HEIMDALL_FLEET_TOKEN:-}\""; then
-  echo "ERROR: $REMOTE_DIR/.env must define non-empty MIMIR_API_KEY, HEIMDALL_HUB_URL, and HEIMDALL_FLEET_TOKEN" >&2
+if ! ssh "$REMOTE" "set -a; . '$REMOTE_DIR/.env'; test -n \"\${MIMIR_API_KEY:-}\""; then
+  echo "ERROR: $REMOTE_DIR/.env must define a non-empty MIMIR_API_KEY" >&2
   exit 1
 fi
 echo "  required variables present (values not displayed)"
@@ -90,7 +94,7 @@ echo "==> Installing dependencies on NAS Pi..."
 ssh "$REMOTE" "cd '$REMOTE_DIR' && npm ci --omit=dev"
 
 echo "==> Refreshing systemd units..."
-ssh "$REMOTE" "sudo install -m 0644 '$REMOTE_DIR/mimir.service' '$REMOTE_DIR/mimir-offsite.service' '$REMOTE_DIR/mimir-offsite.timer' /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable mimir && if sudo systemctl is-enabled --quiet mimir-offsite.timer; then sudo systemctl restart mimir-offsite.timer; fi"
+ssh "$REMOTE" "set -eu; unit_tmp=\$(mktemp -d /tmp/mimir-units.XXXXXX); trap 'rm -rf \"\$unit_tmp\"' EXIT; for unit in mimir.service mimir-offsite.service mimir-offsite.timer; do sed -e 's|^User=mimir$|User=$DEPLOY_USER|' -e 's|/home/mimir|/home/$DEPLOY_USER|g' '$REMOTE_DIR/'\"\$unit\" > \"\$unit_tmp/\$unit\"; done; sudo install -m 0644 \"\$unit_tmp/mimir.service\" \"\$unit_tmp/mimir-offsite.service\" \"\$unit_tmp/mimir-offsite.timer\" /etc/systemd/system/; sudo systemctl daemon-reload; sudo systemctl enable mimir; if sudo systemctl is-enabled --quiet mimir-offsite.timer; then sudo systemctl restart mimir-offsite.timer; fi"
 
 echo "==> Checking artifacts directory..."
 ssh "$REMOTE" "mkdir -p '$REMOTE_ROOT' && echo '  $REMOTE_ROOT exists'"

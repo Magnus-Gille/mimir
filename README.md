@@ -82,6 +82,8 @@ Heimdall reporting helpers.
 | `MIMIR_ALLOWED_HOSTS` | - | Extra allowed Host headers, comma-separated |
 | `MIMIR_TRUST_PROXY` | `false` | Express trusted-proxy value, such as `loopback` or a hop count |
 | `MIMIR_RATE_LIMIT` | `60` | Requests per minute per IP |
+| `MIMIR_INSTANCE_ID` | `default` | Stable instance identity reported to Heimdall |
+| `MIMIR_DEPLOY_HOST` | `localhost` | Deployment host label reported to Heimdall |
 | `MIMIR_SYNC_MAX_DELETE` | `1000` | Abort laptop→NAS sync at this many deletions |
 | `MIMIR_SYNC_MAX_DELETE_PCT` | `20` | Abort sync above this share of the actual remote population |
 | `MIMIR_SYNC_STATE_DIR` | `$XDG_STATE_HOME/mimir` or `~/.local/state/mimir` | Durable out-of-tree staging for unverified inbox imports |
@@ -140,6 +142,10 @@ MIMIR_TRUST_PROXY=loopback
 
 Optional production settings include `MIMIR_SHARE_SECRET`,
 `HEIMDALL_HUB_URL`, and `HEIMDALL_FLEET_TOKEN`.
+
+The deployment account defaults to `mimir`. Set `MIMIR_DEPLOY_USER` locally to
+use another Linux account; the deploy script renders all installed systemd paths
+and `User=` directives for that account.
 
 Deployments must start from a clean Git worktree. The script uses deterministic
 production dependency installation, refreshes the HTTP and offsite systemd units,

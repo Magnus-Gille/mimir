@@ -395,7 +395,7 @@ exit 0
     return { bin, calls };
   }
 
-  it("fails before build or sync when required environment values are absent", () => {
+  it("fails before build or sync when the required API key is absent", () => {
     const root = tempDir();
     const { bin, calls } = mockCommands(root);
     const result = spawnSync("bash", [join(REPO_ROOT, "scripts/deploy-nas.sh"), "test-nas"], {
@@ -410,10 +410,34 @@ exit 0
     });
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("HEIMDALL_HUB_URL");
+    expect(result.stderr).toContain("MIMIR_API_KEY");
     const invocations = readFileSync(calls, "utf8");
+    expect(invocations).not.toContain("HEIMDALL_HUB_URL");
+    expect(invocations).not.toContain("HEIMDALL_FLEET_TOKEN");
     expect(invocations).not.toContain("npm ");
     expect(invocations).not.toContain("rsync ");
+  });
+
+  it("renders systemd units for a configured deployment user", () => {
+    const root = tempDir();
+    const { bin, calls } = mockCommands(root);
+    const result = spawnSync("bash", [join(REPO_ROOT, "scripts/deploy-nas.sh"), "test-nas"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        DEPLOY_CALLS: calls,
+        MIMIR_DEPLOY_USER: "archive",
+      },
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    const invocations = readFileSync(calls, "utf8");
+    expect(invocations).toContain("archive@test-nas");
+    expect(invocations).toContain("/home/archive/mimir-server");
+    expect(invocations).toContain("User=archive");
+    expect(invocations).toContain("/home/archive/mimir");
   });
 
   it("refuses a dirty source before contacting the NAS", () => {

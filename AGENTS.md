@@ -177,6 +177,8 @@ additionally pushes a `fail`-state Heimdall panel when `HEIMDALL_HUB_URL`/
 | `MIMIR_ALLOWED_HOSTS` | — | Extra allowed Host headers (comma-separated) |
 | `MIMIR_TRUST_PROXY` | `false` | Explicit trusted-proxy value or hop count |
 | `MIMIR_RATE_LIMIT` | `60` | Max requests per minute per IP |
+| `MIMIR_INSTANCE_ID` | `default` | Stable instance identity reported to Heimdall |
+| `MIMIR_DEPLOY_HOST` | `localhost` | Deployment host label reported to Heimdall |
 | `MIMIR_SYNC_MAX_DELETE` | `1000` | Abort laptop→NAS mirror at or above this many deletions |
 | `MIMIR_SYNC_MAX_DELETE_PCT` | `20` | Abort mirror above this percentage of the actual remote population |
 | `MIMIR_SYNC_STATE_DIR` | `$XDG_STATE_HOME/mimir` or `~/.local/state/mimir` | Durable out-of-tree staging for unverified inbox imports |
