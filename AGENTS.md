@@ -11,9 +11,9 @@ Part of the Grimnir system: **Munin** (memory/brain), **Mímir** (file archive),
 - **Runtime:** Node.js 20+, TypeScript (strict mode)
 - **Framework:** Express (minimal — static file serving + auth + directory listing)
 - **Auth:** Bearer token (`MIMIR_API_KEY`), timing-safe comparison
-- **Deployment:** NAS Pi (Pi 2), Cloudflare Tunnel, systemd
-- **Storage:** `~/mimir/` on both laptop and Pi (symmetric), backed up to `/mnt/timemachine/backups/mimir/`. Mímir owns this rsync (`backup-artifacts.sh`); the **destination disk** — its mount, capacity, Samba/Time Machine share, and hardware health — is owned by **Brokkr**, the platform/substrate layer ([brokkr](https://github.com/Magnus-Gille/brokkr) repo). Boundary: Mímir guarantees *what* gets backed up; Brokkr guarantees the disk it lands on is mounted, healthy, and has headroom.
-- **Server code:** `~/mimir-server/` on Pi (separate from artifacts)
+- **Deployment:** Linux, an authenticated reverse proxy or private tunnel, and systemd
+- **Storage:** A configurable local archive with optional local and encrypted offsite copies. Mímir owns artifact replication; the **destination disk** — mount, capacity, shares, and hardware health — belongs to the platform layer ([Brokkr](https://github.com/Magnus-Gille/brokkr) in the full ecosystem).
+- **Server code:** Kept separate from the served artifact directory
 
 ### Endpoints
 
@@ -34,7 +34,7 @@ Agents don't talk to Mímir directly via MCP. Instead:
 
 ### Security (2-layer, same model as Munin)
 
-1. **Cloudflare Access** — Service Token required at edge. CF Access app: `mimir.gille.ai`
+1. **Edge authentication** — An identity-aware proxy is recommended for non-local access
 2. **Bearer token** — `MIMIR_API_KEY` at origin, timing-safe comparison
 3. **App hardening:**
    - Path traversal prevention (lexical + realpath jail; external symlinks rejected)
@@ -118,31 +118,28 @@ command itself has an indeterminate outcome. It prints a clean-worktree redeploy
 using the captured rollback target when available. The remote `.env` is enforced as mode
 `0600` without displaying its values.
 
-The NAS Pi needs a `.env` file at `/home/magnus/mimir-server/.env`:
+The generic Linux service expects `.env` at `/home/mimir/mimir-server/.env`:
 ```
 MIMIR_API_KEY=<generate with: openssl rand -hex 32>
-MIMIR_ALLOWED_HOSTS=mimir.gille.ai
+MIMIR_ALLOWED_HOSTS=files.example.com
+MIMIR_TRUST_PROXY=loopback
 ```
 
-### Tunnel infrastructure
+### Reverse proxy or tunnel
 
-- **Public URL:** `https://mimir.gille.ai`
-- **CF Access App:** `mimir.gille.ai`
-- **Access policy:** Service Token Auth at the edge
-- **DNS:** CNAME `mimir.gille.ai` → Cloudflare Tunnel target
+- **Public URL:** Choose an environment-specific hostname such as `https://files.example.com`
+- **Edge policy:** Require service or user authentication for protected routes
+- **Origin:** Keep the default loopback bind and prevent direct access
 
 Do not commit tunnel IDs, service-token names, Cloudflare secrets, or private
 network addresses.
 
 ## Syncing files from laptop
 
-**Automatic (launchd):** Runs every 30 minutes via `com.magnusgille.mimir-sync` launch agent. Checks NAS reachability before syncing — skips silently if offline.
+**Automatic:** Run `scripts/sync-artifacts-daemon.sh` from a scheduler. It checks target reachability before syncing and skips if offline.
 
 ```bash
-# Manage the agent
-launchctl list | grep mimir          # Check status
-launchctl start com.magnusgille.mimir-sync  # Trigger manual sync
-cat ~/.local/share/mimir/logs/sync-stdout.log  # View logs
+MIMIR_NAS=archive@files.internal ./scripts/sync-artifacts-daemon.sh
 ```
 
 **Manual:**
@@ -176,16 +173,17 @@ additionally pushes a `fail`-state Heimdall panel when `HEIMDALL_HUB_URL`/
 | `MIMIR_PORT` | `3031` | HTTP server port |
 | `MIMIR_HOST` | `127.0.0.1` | Bind address (localhost for tunnel) |
 | `MIMIR_API_KEY` | — | Bearer token (required) |
-| `MIMIR_ROOT_DIR` | `/home/magnus/mimir` | Root directory to serve |
+| `MIMIR_ROOT_DIR` | `./data` | Root directory to serve |
 | `MIMIR_ALLOWED_HOSTS` | — | Extra allowed Host headers (comma-separated) |
+| `MIMIR_TRUST_PROXY` | `false` | Explicit trusted-proxy value or hop count |
 | `MIMIR_RATE_LIMIT` | `60` | Max requests per minute per IP |
 | `MIMIR_SYNC_MAX_DELETE` | `1000` | Abort laptop→NAS mirror at or above this many deletions |
 | `MIMIR_SYNC_MAX_DELETE_PCT` | `20` | Abort mirror above this percentage of the actual remote population |
 | `MIMIR_SYNC_STATE_DIR` | `$XDG_STATE_HOME/mimir` or `~/.local/state/mimir` | Durable out-of-tree staging for unverified inbox imports |
 | `MIMIR_SHARE_SECRET` | — | HMAC secret for share links (optional, enables `/share`) |
-| `MIMIR_BASE_URL` | `https://mimir.gille.ai` | Base URL for generated share links (CLI only) |
+| `MIMIR_BASE_URL` | `http://127.0.0.1:3031` | Base URL for generated share links (CLI only) |
 | `MIMIR_OFFSITE_REMOTE` | `mimir-crypt` | rclone crypt remote name (offsite backup) |
-| `MIMIR_OFFSITE_ROOT` | `/home/magnus/mimir` | Directory pushed offsite |
+| `MIMIR_OFFSITE_ROOT` | `/home/mimir/mimir` | Directory pushed offsite |
 | `MIMIR_OFFSITE_RETENTION_DAYS` | `30` | Archive (deleted/changed file) prune horizon |
 | `MIMIR_OFFSITE_MAX_DELETE` | `1000` | Abort a run that would delete more than this many files |
 | `MIMIR_OFFSITE_MAX_DELETE_PCT` | `25` | ...or more than this % of `current/` (whichever trips first) |
@@ -207,13 +205,13 @@ The script: syncs the file to Pi, generates an HMAC-signed token on the Pi, prin
 
 **Requires:** `MIMIR_SHARE_SECRET` in the Pi's `.env` file. Generate with `openssl rand -hex 32`.
 
-**CF Access:** The `/share/*` path needs a Cloudflare Access bypass policy (Allow Everyone) since recipients don't have service tokens. The HMAC token provides authentication instead.
+**Edge policy:** If `/share/*` bypasses proxy authentication, the HMAC token is the only recipient credential. Tokens can leak through browser history and access logs, and are limited to seven days.
 
 ## Offsite backup (cloud)
 
 The third copy in a 3-2-1 strategy: `scripts/offsite-backup.sh` pushes `~/mimir/`
-to OneDrive as a **client-side-encrypted** copy via an `rclone crypt` remote (contents
-*and* filenames encrypted — required because `mgc/` is client data; the script fails
+to cloud object storage as a **client-side-encrypted** copy via an `rclone crypt` remote (contents
+*and* filenames encrypted — required for any sensitive archive; the script fails
 *closed* if the remote isn't a verified crypt). Runs on the Pi via `mimir-offsite.timer`
 (daily). Mirrors `current/` and keeps 30 days of deleted/changed versions in tagged,
 seven-character per-run sibling dirs, pruned **by name** (`--backup-dir`, never destructive).

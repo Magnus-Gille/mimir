@@ -10,11 +10,16 @@ set -euo pipefail
 # Hugin tasks write outputs to ~/mimir-inbox/ on the NAS.
 # The inbox is a staging area — files are removed after successful import.
 
-NAS="${MIMIR_NAS:-magnus@${MIMIR_NAS_HOST:-nas}}"
-LOCAL="$HOME/mimir/"
-REMOTE="$NAS:/home/magnus/mimir/"
-INBOX="$NAS:/home/magnus/mimir-inbox/"
-REMOTE_ROOT="/home/magnus/mimir"
+NAS_HOST="${MIMIR_NAS_HOST:-}"
+NAS="${MIMIR_NAS:-${NAS_HOST:+mimir@$NAS_HOST}}"
+[ -n "$NAS" ] || { echo "ERROR: set MIMIR_NAS_HOST or MIMIR_NAS=user@host." >&2; exit 1; }
+LOCAL_ROOT="${MIMIR_LOCAL_ROOT:-$HOME/mimir}"
+REMOTE_ROOT="${MIMIR_REMOTE_ROOT:-/home/mimir/mimir}"
+REMOTE_INBOX="${MIMIR_REMOTE_INBOX:-/home/mimir/mimir-inbox}"
+SYNC_STAMP="${MIMIR_REMOTE_SYNC_STAMP:-/home/mimir/mimir-sync.stamp}"
+LOCAL="$LOCAL_ROOT/"
+REMOTE="$NAS:$REMOTE_ROOT/"
+INBOX="$NAS:$REMOTE_INBOX/"
 STATE_DIR="${MIMIR_SYNC_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/mimir}"
 PENDING="$STATE_DIR/import-pending"
 QUARANTINE="${MIMIR_QUARANTINE_DIR:-${LOCAL%/}-quarantine}"
@@ -101,7 +106,7 @@ if rsync -a --delete --max-delete="$MAX_DELETE" "$LOCAL" "$REMOTE"; then
   # tree so the --delete above can't remove it. Records when the sync last ran
   # successfully (every 30 min) rather than newest-content age — which avoids
   # false "Backup stale" criticals when no new files have been created lately.
-  ssh -o ConnectTimeout=5 -o BatchMode=yes "$NAS" "date +%s > /home/magnus/mimir-sync.stamp" 2>/dev/null || true
+  ssh -o ConnectTimeout=5 -o BatchMode=yes "$NAS" "date +%s > '$SYNC_STAMP'" 2>/dev/null || true
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] Sync complete"
 else
   RC=$?

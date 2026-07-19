@@ -39,7 +39,12 @@ let app: ReturnType<typeof createApp>;
 
 beforeAll(() => {
   setup();
-  app = createApp({ apiKey: TEST_API_KEY, rootDir: TEST_ROOT, shareSecret: TEST_SHARE_SECRET });
+  app = createApp({
+    apiKey: TEST_API_KEY,
+    rootDir: TEST_ROOT,
+    shareSecret: TEST_SHARE_SECRET,
+    rateLimitMax: 1000,
+  });
 });
 
 afterAll(() => {
@@ -56,6 +61,23 @@ describe("health", () => {
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("ok");
     expect(res.body.service).toBe("mimir");
+    expect(res.body).not.toHaveProperty("root_dir");
+  });
+});
+
+describe("proxy trust", () => {
+  it("does not trust forwarded client addresses by default", () => {
+    const defaultApp = createApp({ apiKey: TEST_API_KEY, rootDir: TEST_ROOT });
+    expect(defaultApp.get("trust proxy")).toBe(false);
+  });
+
+  it("accepts an explicit trusted-proxy configuration", () => {
+    const proxyApp = createApp({
+      apiKey: TEST_API_KEY,
+      rootDir: TEST_ROOT,
+      trustProxy: "loopback",
+    });
+    expect(proxyApp.get("trust proxy")).toBe("loopback");
   });
 });
 
@@ -68,8 +90,8 @@ describe("heimdall.json", () => {
   it("returns the descriptor object", async () => {
     const res = await request(app).get("/heimdall.json");
     expect(res.body).toMatchObject({
-      _schema: "https://heimdall.gille.ai/schema/service/v1",
-      service: { name: "mimir", label: "Mímir", namespace: "grimnir", instance_id: "nas" },
+      _schema: "https://grimnir.example/schema/service/v1",
+      service: { name: "mimir", label: "Mímir", namespace: "grimnir", instance_id: "default" },
       kind: "http-service",
       status: "pass",
     });
@@ -80,9 +102,9 @@ describe("heimdall.json", () => {
     expect(res.body).toMatchObject(HEIMDALL_DESCRIPTOR as unknown as Record<string, unknown>);
   });
 
-  it("deploy block has host=nas and systemd_unit=mimir", async () => {
+  it("deploy block uses generic public defaults", async () => {
     const res = await request(app).get("/heimdall.json");
-    expect(res.body.deploy).toMatchObject({ host: "nas", systemd_unit: "mimir", platform: "bare-metal" });
+    expect(res.body.deploy).toMatchObject({ host: "localhost", systemd_unit: "mimir", platform: "bare-metal" });
   });
 
   it("links are root-relative or https (no protocol-relative)", async () => {
@@ -233,7 +255,7 @@ describe("path traversal protection", () => {
 
     const health = await request(relativeRootApp).get("/health");
     expect(health.status).toBe(200);
-    expect(health.body.root_dir).toBe(TEST_ROOT);
+    expect(health.body).not.toHaveProperty("root_dir");
 
     const file = await request(relativeRootApp)
       .get("/files/hello.txt")

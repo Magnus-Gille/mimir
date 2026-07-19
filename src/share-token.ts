@@ -1,4 +1,6 @@
-import { createHmac } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+export const MAX_SHARE_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 /**
  * Stateless HMAC-signed share tokens.
@@ -62,6 +64,9 @@ export function validateToken(
   if (now > exp) {
     return { valid: false, error: "Share link has expired." };
   }
+  if (exp - now > MAX_SHARE_TTL_SECONDS) {
+    return { valid: false, error: "Share link expiry exceeds the maximum TTL." };
+  }
 
   let path: string;
   try {
@@ -71,7 +76,9 @@ export function validateToken(
   }
 
   const expectedSig = sign(path, exp, secret);
-  if (sig !== expectedSig) {
+  const provided = Buffer.from(sig);
+  const expected = Buffer.from(expectedSig);
+  if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
     return { valid: false, error: "Invalid share link." };
   }
 
@@ -84,7 +91,7 @@ export function parseTTL(ttl: string): number | null {
   if (!match) return null;
   const value = parseInt(match[1], 10);
   const unit = match[2];
-  if (unit === "h") return value * 3600;
-  if (unit === "d") return value * 86400;
-  return null;
+  if (value < 1) return null;
+  const seconds = unit === "h" ? value * 3600 : value * 86400;
+  return seconds <= MAX_SHARE_TTL_SECONDS ? seconds : null;
 }

@@ -34,7 +34,7 @@ function mockSyncCommands(root: string): { bin: string; calls: string } {
     join(bin, "ssh"),
     `printf 'ssh %s\n' "$*" >> "$SYNC_CALLS"
 case "$*" in
-  *"find '/home/magnus/mimir'"*)
+  *"find '/home/mimir/mimir'"*)
     [ "\${MOCK_REMOTE_COUNT_RC:-0}" -eq 0 ] || exit "$MOCK_REMOTE_COUNT_RC"
     i=0; while [ "$i" -lt "\${MOCK_REMOTE_TOTAL:-100}" ]; do printf .; i=$((i + 1)); done
     ;;
@@ -383,7 +383,7 @@ case "$*" in
   *"head -n 1"*) printf '%s\\n' "\${MOCK_PREVIOUS_COMMIT:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}" ;;
   *"npm ci --omit=dev"*) exit "\${MOCK_DEPENDENCY_RC:-0}" ;;
   *"sudo install -m 0644"*) exit "\${MOCK_UNIT_RC:-0}" ;;
-  *"rm -f '/home/magnus/mimir-server/.deployed-commit'"*) exit "\${MOCK_MARKER_REMOVE_RC:-0}" ;;
+  *"rm -f '/home/mimir/mimir-server/.deployed-commit'"*) exit "\${MOCK_MARKER_REMOVE_RC:-0}" ;;
   *"set -a;"*) exit "\${MOCK_ENV_VALUES_RC:-0}" ;;
 esac
 exit 0
@@ -464,8 +464,8 @@ exit 0
     expect(invocations).toContain("mimir-offsite.timer");
     expect(invocations).toContain("http://127.0.0.1:");
     expect(invocations).toContain(".deployed-commit.tmp");
-    const markerRemovalIndex = invocations.indexOf("rm -f '/home/magnus/mimir-server/.deployed-commit'");
-    const gitCleanupIndex = invocations.indexOf("rm -rf '/home/magnus/mimir-server/.git'");
+    const markerRemovalIndex = invocations.indexOf("rm -f '/home/mimir/mimir-server/.deployed-commit'");
+    const gitCleanupIndex = invocations.indexOf("rm -rf '/home/mimir/mimir-server/.git'");
     const rsyncIndex = invocations.indexOf("rsync ");
     expect(markerRemovalIndex).toBeGreaterThan(-1);
     expect(markerRemovalIndex).toBeLessThan(gitCleanupIndex);
@@ -498,8 +498,8 @@ exit 0
     expect(readFileSync(join(source, ".git"), "utf8")).toContain("gitdir:");
     expect(invocations).toContain("--exclude=.git");
     expect(invocations).not.toContain("--exclude=.git/");
-    expect(invocations).toContain("rm -rf '/home/magnus/mimir-server/.git'");
-    expect(invocations.indexOf("rm -rf '/home/magnus/mimir-server/.git'")).toBeLessThan(
+    expect(invocations).toContain("rm -rf '/home/mimir/mimir-server/.git'");
+    expect(invocations.indexOf("rm -rf '/home/mimir/mimir-server/.git'")).toBeLessThan(
       invocations.indexOf("rsync "),
     );
   });
@@ -522,8 +522,8 @@ exit 0
     expect(result.stderr).toContain("acceptance-marker state is unknown");
     expect(result.stderr).toContain("Verify the remote marker before trusting provenance");
     const invocations = readFileSync(calls, "utf8");
-    expect(invocations).toContain("rm -f '/home/magnus/mimir-server/.deployed-commit'");
-    expect(invocations).not.toContain("rm -rf '/home/magnus/mimir-server/.git'");
+    expect(invocations).toContain("rm -f '/home/mimir/mimir-server/.deployed-commit'");
+    expect(invocations).not.toContain("rm -rf '/home/mimir/mimir-server/.git'");
     expect(invocations).not.toContain("rsync ");
     expect(invocations).not.toContain("npm ci --omit=dev");
     expect(invocations).not.toContain("sudo install -m 0644");
@@ -548,7 +548,7 @@ exit 0
     expect(result.stderr).toContain("acceptance marker was cleared and not recreated");
     expect(result.stderr).toContain("check out bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
     const invocations = readFileSync(calls, "utf8");
-    expect(invocations.indexOf("rm -f '/home/magnus/mimir-server/.deployed-commit'")).toBeLessThan(
+    expect(invocations.indexOf("rm -f '/home/mimir/mimir-server/.deployed-commit'")).toBeLessThan(
       invocations.indexOf("rsync "),
     );
     const markerWrites = invocations
@@ -577,7 +577,7 @@ exit 0
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("acceptance marker was cleared and not recreated");
     const invocations = readFileSync(calls, "utf8");
-    expect(invocations).toContain("rm -f '/home/magnus/mimir-server/.deployed-commit'");
+    expect(invocations).toContain("rm -f '/home/mimir/mimir-server/.deployed-commit'");
     expect(invocations).not.toContain(".deployed-commit.tmp");
   });
 });

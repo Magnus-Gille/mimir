@@ -5,11 +5,15 @@ set -euo pipefail
 #
 # Usage: ./scripts/sync-artifacts.sh [nas-host]
 
-NAS="${1:-${MIMIR_NAS:-magnus@${MIMIR_NAS_HOST:-nas}}}"
-LOCAL="$HOME/mimir/"
-REMOTE="$NAS:/home/magnus/mimir/"
-INBOX="$NAS:/home/magnus/mimir-inbox/"
-REMOTE_ROOT="/home/magnus/mimir"
+NAS_HOST="${1:-${MIMIR_NAS_HOST:-}}"
+NAS="${MIMIR_NAS:-${NAS_HOST:+mimir@$NAS_HOST}}"
+[ -n "$NAS" ] || { echo "ERROR: pass a sync host, set MIMIR_NAS_HOST, or set MIMIR_NAS=user@host." >&2; exit 1; }
+LOCAL_ROOT="${MIMIR_LOCAL_ROOT:-$HOME/mimir}"
+REMOTE_ROOT="${MIMIR_REMOTE_ROOT:-/home/mimir/mimir}"
+REMOTE_INBOX="${MIMIR_REMOTE_INBOX:-/home/mimir/mimir-inbox}"
+LOCAL="$LOCAL_ROOT/"
+REMOTE="$NAS:$REMOTE_ROOT/"
+INBOX="$NAS:$REMOTE_INBOX/"
 STATE_DIR="${MIMIR_SYNC_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/mimir}"
 PENDING="$STATE_DIR/import-pending"
 QUARANTINE="${MIMIR_QUARANTINE_DIR:-${LOCAL%/}-quarantine}"

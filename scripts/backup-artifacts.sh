@@ -8,13 +8,14 @@ set -euo pipefail
 # Policy: HD is append-only retention — no --delete.
 # Files removed from SD are preserved on HD indefinitely.
 
-SOURCE="/home/magnus/mimir/"
-DEST="/mnt/timemachine/backups/mimir/"
-LOG="/home/magnus/mimir-server/backup.log"
+SOURCE="${MIMIR_BACKUP_SOURCE:-/home/mimir/mimir/}"
+DEST="${MIMIR_BACKUP_DEST:-/mnt/backup/mimir/}"
+BACKUP_MOUNT="${MIMIR_BACKUP_MOUNT:-/mnt/backup}"
+LOG="${MIMIR_BACKUP_LOG:-/home/mimir/mimir-server/backup.log}"
 
 # Verify HD is mounted before writing
-if ! mountpoint -q /mnt/timemachine; then
-  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) ERROR: /mnt/timemachine not mounted — skipping backup" >> "$LOG"
+if ! mountpoint -q "$BACKUP_MOUNT"; then
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) ERROR: $BACKUP_MOUNT not mounted — skipping backup" >> "$LOG"
   exit 1
 fi
 

@@ -2,7 +2,7 @@
 set -euo pipefail
 export LC_ALL=C
 
-# Mímir offsite backup — encrypted push of the artifact archive to cloud (OneDrive)
+# Mímir offsite backup — encrypted push of the artifact archive to cloud storage
 # through an rclone *crypt* remote. Runs on the NAS Pi via a systemd timer (daily).
 #
 # ┌─ REFERENCE IMPLEMENTATION of the Grimnir offsite-backup pattern (mimir#9) ─┐
@@ -26,7 +26,7 @@ export LC_ALL=C
 # ---- Config (override via environment / EnvironmentFile) ----
 SERVICE="${MIMIR_OFFSITE_SERVICE:-mimir}"                 # Heimdall service id
 PANEL="${MIMIR_OFFSITE_PANEL:-offsite}"                   # Heimdall panel id
-SOURCE="${MIMIR_OFFSITE_ROOT:-/home/magnus/mimir}"        # directory to back up
+SOURCE="${MIMIR_OFFSITE_ROOT:-/home/mimir/mimir}"        # directory to back up
 REMOTE="${MIMIR_OFFSITE_REMOTE:-mimir-crypt}"             # rclone crypt remote NAME (no ':' / path)
 RETENTION_DAYS="${MIMIR_OFFSITE_RETENTION_DAYS:-30}"      # archive prune horizon (days)
 MAX_DELETE="${MIMIR_OFFSITE_MAX_DELETE:-1000}"            # abort if a run would remove ≥ this many files
@@ -37,7 +37,7 @@ LOG="${MIMIR_OFFSITE_LOG:-$STATE_DIR/offsite-backup.log}"
 RCLONE="${RCLONE_BIN:-rclone}"
 
 # Git internals are transient workspace state, not Mimir artifacts. Deep Codex
-# checkpoint refs can exceed OneDrive's 400-character encrypted path limit.
+# checkpoint refs can exceed provider-specific encrypted path limits.
 RCLONE_FILTERS=(--exclude '**/.git/**')
 
 DRY_RUN=""
@@ -129,7 +129,7 @@ RUN_EPOCH=$(date -u +%s)
 ARCHIVE_ID=$(archive_id "$RUN_EPOCH")
 # A tagged seven-character sibling keeps the encrypted archive path no longer
 # than the existing `current` component. archive/<timestamp> pushed otherwise
-# valid OneDrive paths over its 400-character limit.
+# otherwise-valid provider paths over common encrypted-path limits.
 ARCHIVE="${REMOTE}:${ARCHIVE_ID}"
 
 # Connectivity + ensure destination exists (mkdir is idempotent and proves auth/write).

@@ -14,13 +14,23 @@ const PORT = parseInt(process.env.MIMIR_PORT ?? "3031", 10);
 const HOST = process.env.MIMIR_HOST ?? "127.0.0.1";
 const API_KEY = process.env.MIMIR_API_KEY;
 const SHARE_SECRET = process.env.MIMIR_SHARE_SECRET;
-const ROOT_DIR = resolve(process.env.MIMIR_ROOT_DIR ?? "/home/magnus/mimir");
+const ROOT_DIR = resolve(process.env.MIMIR_ROOT_DIR ?? "./data");
 const ALLOWED_HOSTS = (process.env.MIMIR_ALLOWED_HOSTS ?? "")
   .split(",")
   .map((h) => h.trim())
   .filter(Boolean);
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = parseInt(process.env.MIMIR_RATE_LIMIT ?? "60", 10);
+
+function parseTrustProxy(value: string | undefined): boolean | string | number {
+  const configured = value?.trim();
+  if (!configured || configured === "false") return false;
+  if (configured === "true") return true;
+  if (/^[1-9]\d*$/.test(configured)) return Number(configured);
+  return configured;
+}
+
+const TRUST_PROXY = parseTrustProxy(process.env.MIMIR_TRUST_PROXY);
 
 // --- Helpers ---
 
@@ -66,7 +76,7 @@ async function resolveFilePath(
 
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
 
-function checkRateLimit(ip: string): boolean {
+function checkRateLimit(ip: string, max: number): boolean {
   const now = Date.now();
   const entry = rateLimitMap.get(ip);
   if (!entry || now > entry.resetAt) {
@@ -74,7 +84,7 @@ function checkRateLimit(ip: string): boolean {
     return true;
   }
   entry.count++;
-  return entry.count <= RATE_LIMIT_MAX;
+  return entry.count <= max;
 }
 
 // Sweep expired entries periodically
@@ -201,19 +211,19 @@ async function serveFile(
 // Shape must satisfy Heimdall's validateDescriptor (schema/service/v1).
 // Keep version in sync with package.json when bumping.
 export const HEIMDALL_DESCRIPTOR = {
-  _schema: 'https://heimdall.gille.ai/schema/service/v1',
+  _schema: 'https://grimnir.example/schema/service/v1',
   service: {
     name: 'mimir',
     label: 'Mímir',
     namespace: 'grimnir',
-    instance_id: 'nas',
+    instance_id: 'default',
     criticality: 'normal',
   },
   kind: 'http-service',
   status: 'pass',
   version: '0.1.0',
   deploy: {
-    host: 'nas',
+    host: 'localhost',
     systemd_unit: 'mimir',
     platform: 'bare-metal',
   },
@@ -230,10 +240,17 @@ export const HEIMDALL_DESCRIPTOR = {
 
 // --- Express app ---
 
-export function createApp(config?: { apiKey?: string; rootDir?: string; shareSecret?: string }) {
+export function createApp(config?: {
+  apiKey?: string;
+  rootDir?: string;
+  shareSecret?: string;
+  trustProxy?: boolean | string | number;
+  rateLimitMax?: number;
+}) {
   const apiKey = config?.apiKey ?? API_KEY;
   const configuredRoot = resolve(config?.rootDir ?? ROOT_DIR);
   const shareSecret = config?.shareSecret ?? SHARE_SECRET;
+  const rateLimitMax = config?.rateLimitMax ?? RATE_LIMIT_MAX;
 
   if (!apiKey) {
     throw new Error("MIMIR_API_KEY is required. Set it in .env or pass via config.");
@@ -246,8 +263,10 @@ export function createApp(config?: { apiKey?: string; rootDir?: string; shareSec
 
   const app = express();
 
-  // Trust proxy (behind Cloudflare Tunnel)
-  app.set("trust proxy", true);
+  // Forwarded client addresses are untrusted unless an operator explicitly
+  // identifies the reverse proxy or hop count. This keeps rate limiting tied
+  // to the TCP peer in the safe default deployment.
+  app.set("trust proxy", config?.trustProxy ?? TRUST_PROXY);
 
   // Security headers
   app.use((_req, res, next) => {
@@ -282,8 +301,8 @@ export function createApp(config?: { apiKey?: string; rootDir?: string; shareSec
   // Rate limiting (standalone — applies to all routes)
   app.use((req, res, next) => {
     const ip = req.ip ?? req.socket.remoteAddress ?? "unknown";
-    if (!checkRateLimit(ip)) {
-      res.status(429).json({ error: "Rate limit exceeded. Max 60 requests per minute." });
+    if (!checkRateLimit(ip, rateLimitMax)) {
+      res.status(429).json({ error: `Rate limit exceeded. Max ${rateLimitMax} requests per minute.` });
       return;
     }
     next();
@@ -291,7 +310,7 @@ export function createApp(config?: { apiKey?: string; rootDir?: string; shareSec
 
   // Health endpoint (no auth)
   app.get("/health", (_req, res) => {
-    res.json({ status: "ok", service: "mimir", root_dir: rootDir });
+    res.json({ status: "ok", service: "mimir" });
   });
 
   // Heimdall self-descriptor (no auth)

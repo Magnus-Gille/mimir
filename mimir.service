@@ -5,19 +5,19 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=magnus
-WorkingDirectory=/home/magnus/mimir-server
+User=mimir
+WorkingDirectory=/home/mimir/mimir-server
 ExecStart=/usr/bin/node dist/index.js
 Restart=always
 RestartSec=5
-EnvironmentFile=/home/magnus/mimir-server/.env
+EnvironmentFile=/home/mimir/mimir-server/.env
 # Required: MIMIR_API_KEY
 # Optional: MIMIR_SHARE_SECRET (enables /share/:token endpoint)
 
 # Sandboxing
 ProtectSystem=strict
-ReadWritePaths=/home/magnus/mimir-server
-ReadOnlyPaths=/home/magnus/mimir
+ReadWritePaths=/home/mimir/mimir-server
+ReadOnlyPaths=/home/mimir/mimir
 NoNewPrivileges=true
 PrivateTmp=true
 
