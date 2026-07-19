@@ -1,9 +1,0 @@
-[extend]
-useDefault = true
-
-[[allowlists]]
-description = "Intentional synthetic credentials used to test Mimir's secret scanner"
-paths = [
-  '''^tests/secret-scan\.test\.ts$''',
-  '''^tests/share-token\.test\.ts$'''
-]
