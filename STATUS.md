@@ -1,8 +1,8 @@
 # Project Status
 
 **Last reconciled:** 2026-07-22
-**Branch:** `codex/reconcile-ops-2026-07-22`
-**Production release:** PR [#20](https://github.com/Magnus-Gille/mimir/pull/20), merged as `8c4a0d7`
+**Branch:** `main`
+**Production code release:** PR [#20](https://github.com/Magnus-Gille/mimir/pull/20), merged as `8c4a0d7`
 
 ## Phase
 
@@ -11,8 +11,8 @@ reconciliation are deployed and accepted.
 
 ## Current State
 
-- PR #20 is live on the NAS at exact commit
-  `8c4a0d73a3fbb30d827e49f631e3493b562ef219`.
+- PR #20 remains the production code release. Deploying later documentation-only
+  commits advances the accepted repository marker without changing runtime code.
 - Loopback health at `127.0.0.1:3031/health` passes.
 - `mimir.service` and `mimir-offsite.timer` are active and enabled.
 - The deployed `.env` has mode `0600`, remote Git metadata is absent, and the
@@ -30,10 +30,13 @@ reconciliation are deployed and accepted.
   panels, while explicitly reporting that no probe endpoint is used.
 - Issue [#12](https://github.com/Magnus-Gille/mimir/issues/12)'s acceptance
   criterion is therefore met without widening the loopback-only listener. The
-  issue remains open pending an explicit comment/closure decision.
+  verified resolution was recorded on the issue and it was closed as completed
+  on 2026-07-22.
 - Local `main` was fast-forwarded through PR
   [#21](https://github.com/Magnus-Gille/mimir/pull/21), which made `AGENTS.md`
-  canonical and reduced `CLAUDE.md` to its adapter.
+  canonical and reduced `CLAUDE.md` to its adapter. PR
+  [#23](https://github.com/Magnus-Gille/mimir/pull/23) records this operational
+  reconciliation without changing application behavior.
 
 PR #20 closes external-symlink jail escapes, opens files before stat/streaming to
 survive sync races, canonicalizes configured roots, and keeps inbox import and
@@ -48,10 +51,8 @@ None. Mímir remains intentionally loopback-only behind the tunnel.
 
 ## Next Steps
 
-1. Comment on and close issue #12 once explicitly approved; no listener or probe
-   change is needed.
-2. Keep scheduled-run and Heimdall freshness evidence current.
-3. Refresh the full restore evidence periodically.
+1. Keep scheduled-run and Heimdall freshness evidence current.
+2. Refresh the full restore evidence periodically.
 
 ## Release Validation
 
