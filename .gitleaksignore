@@ -1,0 +1,16 @@
+# Exact historical synthetic credential fixtures used to test Mimir's scanner.
+# Fingerprint scoping ensures any new finding in these files still fails scans.
+8f3f04689370edeeab2ce48b0414b50cc3383e1e:tests/share-token.test.ts:generic-api-key:4
+f05381ca4f6a37f74de287c76e4a4c88eeae11a1:tests/secret-scan.test.ts:private-key:43
+f05381ca4f6a37f74de287c76e4a4c88eeae11a1:tests/secret-scan.test.ts:aws-access-token:38
+f05381ca4f6a37f74de287c76e4a4c88eeae11a1:tests/secret-scan.test.ts:aws-access-token:103
+f05381ca4f6a37f74de287c76e4a4c88eeae11a1:tests/secret-scan.test.ts:aws-access-token:123
+f05381ca4f6a37f74de287c76e4a4c88eeae11a1:tests/secret-scan.test.ts:aws-access-token:152
+f05381ca4f6a37f74de287c76e4a4c88eeae11a1:tests/secret-scan.test.ts:aws-access-token:193
+f05381ca4f6a37f74de287c76e4a4c88eeae11a1:tests/secret-scan.test.ts:aws-access-token:207
+f05381ca4f6a37f74de287c76e4a4c88eeae11a1:tests/secret-scan.test.ts:aws-access-token:222
+f05381ca4f6a37f74de287c76e4a4c88eeae11a1:tests/secret-scan.test.ts:aws-access-token:231
+f05381ca4f6a37f74de287c76e4a4c88eeae11a1:tests/secret-scan.test.ts:aws-access-token:243
+f05381ca4f6a37f74de287c76e4a4c88eeae11a1:tests/secret-scan.test.ts:aws-access-token:254
+f05381ca4f6a37f74de287c76e4a4c88eeae11a1:tests/secret-scan.test.ts:aws-access-token:300
+f05381ca4f6a37f74de287c76e4a4c88eeae11a1:tests/secret-scan.test.ts:stripe-access-token:68

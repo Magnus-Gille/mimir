@@ -1,20 +1,20 @@
 # Offsite backup — encrypted cloud copy (mimir#9)
 
 The **reference implementation** of the Grimnir offsite-backup pattern. Ships the
-Mímir artifact archive to cloud (OneDrive) as an encrypted third copy, and defines
+Mímir artifact archive to cloud storage as an encrypted third copy, and defines
 the mechanism that munin-memory#172 and brokkr#1 (Photos) copy-adapt.
 
 ## Where this fits
 
 Grimnir backups follow **3-2-1**, split by data class:
 
-- **Copy 1** — live `~/mimir/` (laptop + Pi).
-- **Copy 2** — NAS disk `/mnt/timemachine/backups/mimir/` (`backup-artifacts.sh`).
-- **Copy 3 (this)** — encrypted push to OneDrive. Geographically offsite, automatic,
+- **Copy 1** — live `/home/mimir/mimir/` (or another configured root).
+- **Copy 2** — a separately mounted disk such as `/mnt/backup/mimir/` (`backup-artifacts.sh`).
+- **Copy 3 (this)** — encrypted push to a cloud provider. Geographically offsite, automatic,
   survives loss of the whole property.
 
-Client data (`mgc/`) is ~85% of the archive, so the cloud copy is **client-side
-encrypted** — the provider only ever stores opaque blobs (contents *and* filenames).
+Assume an archive may contain sensitive data. The cloud copy is therefore
+**client-side encrypted**: the provider only stores opaque blobs, including filenames.
 
 ## What the job does
 
@@ -25,12 +25,12 @@ encrypted** — the provider only ever stores opaque blobs (contents *and* filen
    can never upload plaintext.
 2. Delete-count gate: if the sync would move an implausible share of `current/` to the
    archive (e.g. the source was wiped), it aborts *before* touching the remote.
-3. `rclone sync ~/mimir/ → mimir-crypt:current` — mirrors the current state (the
+3. `rclone sync /home/mimir/mimir/ → mimir-crypt:current` — mirrors the current state (the
    destination is auto-created on first run).
 4. Overwritten/deleted files are **moved** to a compact per-run sibling of `current/`
    via `--backup-dir` (never destroyed), giving **30-day version history**. The
    tagged seven-character base-62 timestamp avoids adding encrypted path depth under
-   OneDrive's 400-character limit. `--max-delete` is a second-line guard.
+   common provider path limits. `--max-delete` is a second-line guard.
 5. Prunes whole archive run-dirs older than 30 days **by their encoded timestamp** — not
    by object mtime (sync preserves source mtimes, so mtime-based pruning would wrongly
    delete a just-archived *old* file the moment it was archived).
@@ -52,15 +52,17 @@ sudo -v ; curl https://rclone.org/install.sh | sudo bash
 rclone version   # confirm
 ```
 
-### 2. Authorize OneDrive (headless — token minted on the laptop)
+### 2. Authorize a storage provider
 
-The Pi has no browser, so mint the OAuth token on the **laptop** and paste it over.
+For an OAuth-backed provider on a headless host, mint the token on a machine with a
+browser and transfer it using a secure channel. The example below uses OneDrive;
+rclone also supports S3-compatible storage, WebDAV, and other providers.
 
 On the **laptop** (install rclone first: `brew install rclone`):
 
 ```bash
 rclone authorize "onedrive"
-# → opens a browser, log in as magnus.gille@outlook.com, grant access
+# → opens a browser, authenticate to the intended backup account
 # → prints a JSON token blob. Copy the whole {...}.
 ```
 
@@ -68,7 +70,7 @@ On the **Pi**, `rclone config`:
 
 ```
 n) New remote
-name> onedrive
+name> storage
 Storage> onedrive
 client_id>            (blank)
 client_secret>        (blank)
@@ -76,11 +78,11 @@ region> global
 Edit advanced config? n
 Use auto config? n                     ← headless
 config_token> <paste the JSON from the laptop>
-Choose a number ... Type of connection> 1  (OneDrive Personal)
+Choose the connection type appropriate for the account
 Yes this is OK> y
 ```
 
-Verify: `rclone lsd onedrive:` lists your OneDrive top-level folders.
+Verify: `rclone lsd storage:` lists the provider's top-level folders.
 
 ### 3. Create the crypt remote (client-side encryption)
 
@@ -89,7 +91,7 @@ rclone config
 n) New remote
 name> mimir-crypt
 Storage> crypt
-remote> onedrive:Grimnir/mimir          ← where encrypted blobs land in OneDrive
+remote> storage:encrypted/mimir         ← where encrypted blobs land
 filename_encryption> standard           ← encrypt filenames too
 directory_name_encryption> true
 Password or pass phrase for encryption:
@@ -107,7 +109,7 @@ Yes this is OK> y
 
 The crypt **password + salt** are the only way to decrypt the offsite copy. They
 live (obscured) inside `~/.config/rclone/rclone.conf` on the Pi. **If the Pi dies
-and you don't have them elsewhere, every byte in OneDrive is permanently unreadable.**
+and you don't have them elsewhere, every byte in cloud storage is permanently unreadable.**
 
 - Reveal them once: `rclone config show mimir-crypt` (shows `password` / `password2`
   in obscured form) — or better, note the *plaintext* password + salt you set in step 3.
@@ -124,13 +126,13 @@ chmod 600 ~/.config/rclone/rclone.conf
 
 ### 5. Environment
 
-The job reads shared Heimdall vars from `/home/magnus/mimir-server/.env` (already
+The job reads optional Heimdall vars from `/home/mimir/mimir-server/.env` (already
 present for the server). No secrets are added there — the crypt key stays in the
 rclone config. Optional overrides (defaults shown):
 
 ```
 # MIMIR_OFFSITE_REMOTE=mimir-crypt                 # crypt remote NAME (no ':' / path)
-# MIMIR_OFFSITE_ROOT=/home/magnus/mimir            # directory pushed offsite
+# MIMIR_OFFSITE_ROOT=$HOME/mimir                    # directory pushed offsite
 # MIMIR_OFFSITE_RETENTION_DAYS=30                  # archive prune horizon
 # MIMIR_OFFSITE_MAX_DELETE=1000                    # abort if a run removes ≥ this many files
 # MIMIR_OFFSITE_MAX_DELETE_PCT=25                  # ...or more than this % of current/
@@ -148,8 +150,8 @@ rclone config. Optional overrides (defaults shown):
 `deploy-nas.sh` ships the script with the rest of `scripts/`. Install the units:
 
 ```bash
-sudo cp /home/magnus/mimir-server/mimir-offsite.service /etc/systemd/system/
-sudo cp /home/magnus/mimir-server/mimir-offsite.timer   /etc/systemd/system/
+sudo cp /home/mimir/mimir-server/mimir-offsite.service /etc/systemd/system/
+sudo cp /home/mimir/mimir-server/mimir-offsite.timer   /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now mimir-offsite.timer
 systemctl list-timers mimir-offsite.timer   # confirm next run
@@ -162,26 +164,26 @@ systemctl list-timers mimir-offsite.timer   # confirm next run
 Run these once after setup. **A backup you haven't restored from is not a backup.**
 
 ```bash
-# a) First push, then confirm ONLY encrypted blobs are in OneDrive.
-/home/magnus/mimir-server/scripts/offsite-backup.sh
-rclone ls onedrive:Grimnir/mimir | head        # filenames must be gibberish
-#   ↳ open OneDrive web UI too: names unreadable, no plaintext content.
+# a) First push, then confirm ONLY encrypted blobs are in cloud storage.
+/home/mimir/mimir-server/scripts/offsite-backup.sh
+rclone ls storage:encrypted/mimir | head       # filenames must be opaque
+#   ↳ inspect the provider UI too: names unreadable, no plaintext content.
 
 # b) Integrity: cryptcheck compares hashes THROUGH the crypt layer (plain `check`
 #    can silently degrade to size/modtime on a crypt remote).
-rclone cryptcheck /home/magnus/mimir/ mimir-crypt:current --exclude '**/.git/**'
+rclone cryptcheck /home/mimir/mimir/ mimir-crypt:current --exclude '**/.git/**'
 
 # c) RESTORE TEST — decrypt to a scratch dir, diff against source.
 rclone copy mimir-crypt:current /tmp/mimir-restore
-diff -r --exclude=.git /home/magnus/mimir/ /tmp/mimir-restore && echo "RESTORE OK"; rm -rf /tmp/mimir-restore
+diff -r --exclude=.git /home/mimir/mimir/ /tmp/mimir-restore && echo "RESTORE OK"; rm -rf /tmp/mimir-restore
 
 # d) 30-day history: change a file across two runs, confirm the prior version is
 #    preserved in the most recent archive run-dir.
-echo old > /home/magnus/mimir/_probe.txt; ./scripts/offsite-backup.sh
-echo new > /home/magnus/mimir/_probe.txt;  ./scripts/offsite-backup.sh
+echo old > /home/mimir/mimir/_probe.txt; ./scripts/offsite-backup.sh
+echo new > /home/mimir/mimir/_probe.txt;  ./scripts/offsite-backup.sh
 LATEST=$(rclone lsf --dirs-only mimir-crypt: | grep -E '^a[0-9A-Za-z]{6}/$' | sort | tail -1)
 rclone lsf "mimir-crypt:${LATEST}" | grep _probe   # prior version preserved
-rm /home/magnus/mimir/_probe.txt
+rm /home/mimir/mimir/_probe.txt
 
 # e) Fail-loud: point at a bad remote, confirm non-zero exit + a fail panel in Heimdall.
 MIMIR_OFFSITE_REMOTE=does-not-exist ./scripts/offsite-backup.sh; echo "exit=$? (want non-zero)"
@@ -192,9 +194,9 @@ Dry-run any time without touching the remote: `./scripts/offsite-backup.sh --dry
 ## Disaster recovery (Pi is gone)
 
 1. On any machine: `brew install rclone` (or the install script).
-2. `rclone config` → recreate the `onedrive` remote (re-authorize) **and** the
+2. `rclone config` → recreate the `storage` remote (re-authorize) **and** the
    `mimir-crypt` remote using the **password + salt from your password manager**
-   (step 4). The remote path must match: `onedrive:Grimnir/mimir`.
+   (step 4). The remote path must match: `storage:encrypted/mimir`.
 3. `rclone copy mimir-crypt:current ~/mimir-restored` → plaintext archive back.
 
 ## Reuse (munin-memory#172, brokkr#1)

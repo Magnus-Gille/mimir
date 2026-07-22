@@ -5,6 +5,8 @@ serves documents, presentations, PDFs, images, and other artifacts over HTTP wit
 Bearer-token auth, temporary HMAC share links, and a small operational surface that
 is easy to run on a NAS Pi.
 
+This Grimnir component is unrelated to Grafana Mimir.
+
 Mímir is the file archive in Grimnir:
 
 - **Munin** stores memory, summaries, and extracted document text.
@@ -14,6 +16,14 @@ Mímir is the file archive in Grimnir:
 Agents normally discover documents through Munin first. If the full file is needed,
 they follow the Mímir URL from the Munin entry. There is intentionally no Mímir MCP
 server; plain HTTP works across agents and environments.
+
+## Standalone or with Grimnir
+
+Mímir has no runtime dependency on the rest of Grimnir. Standalone deployments can
+use the HTTP API directly as a small authenticated archive. In a Grimnir deployment,
+Munin records summaries and Mímir URLs, Hugin produces artifacts into an inbox, and
+Heimdall can consume the optional service descriptor and status panels. Those
+integrations are opt-in; missing integration variables do not prevent startup.
 
 ## Endpoints
 
@@ -34,8 +44,9 @@ attachments; `?dl=1` or `?download=1` forces attachment mode.
 ```bash
 npm install
 npm run build
+mkdir -p data
 
-MIMIR_API_KEY=dev-key MIMIR_ROOT_DIR=./tests/__test_fixtures__ npm run dev
+MIMIR_API_KEY=dev-key MIMIR_ROOT_DIR=./data npm run dev
 ```
 
 Fetch a file or list a directory:
@@ -67,29 +78,32 @@ Heimdall reporting helpers.
 | `MIMIR_PORT` | `3031` | HTTP server port |
 | `MIMIR_HOST` | `127.0.0.1` | Bind address |
 | `MIMIR_API_KEY` | - | Bearer token, required |
-| `MIMIR_ROOT_DIR` | `/home/magnus/mimir` | Root directory to serve |
+| `MIMIR_ROOT_DIR` | `./data` | Root directory to serve; it must already exist |
 | `MIMIR_ALLOWED_HOSTS` | - | Extra allowed Host headers, comma-separated |
+| `MIMIR_TRUST_PROXY` | `false` | Express trusted-proxy value, such as `loopback` or a hop count |
 | `MIMIR_RATE_LIMIT` | `60` | Requests per minute per IP |
+| `MIMIR_INSTANCE_ID` | `default` | Stable instance identity reported to Heimdall |
+| `MIMIR_DEPLOY_HOST` | `localhost` | Deployment host label reported to Heimdall |
 | `MIMIR_SYNC_MAX_DELETE` | `1000` | Abort laptop→NAS sync at this many deletions |
 | `MIMIR_SYNC_MAX_DELETE_PCT` | `20` | Abort sync above this share of the actual remote population |
 | `MIMIR_SYNC_STATE_DIR` | `$XDG_STATE_HOME/mimir` or `~/.local/state/mimir` | Durable out-of-tree staging for unverified inbox imports |
 | `MIMIR_SHARE_SECRET` | - | HMAC secret that enables `/share/:token` |
-| `MIMIR_BASE_URL` | `https://mimir.gille.ai` | Base URL used by the share CLI |
+| `MIMIR_BASE_URL` | `http://127.0.0.1:3031` | Base URL used by the share CLI |
 | `MIMIR_QUARANTINE_DIR` | `<target-dir>-quarantine` | Secret-scan quarantine directory |
 | `HEIMDALL_HUB_URL` | - | Heimdall panel push endpoint |
 | `HEIMDALL_FLEET_TOKEN` | - | Heimdall panel push token |
 | `MIMIR_OFFSITE_REMOTE` | `mimir-crypt` | rclone crypt remote name for offsite backup |
-| `MIMIR_OFFSITE_ROOT` | `/home/magnus/mimir` | Directory pushed offsite |
+| `MIMIR_OFFSITE_ROOT` | `$HOME/mimir` | Directory pushed offsite |
 | `MIMIR_OFFSITE_RETENTION_DAYS` | `30` | Offsite archive retention |
 | `MIMIR_OFFSITE_MAX_DELETE` | `1000` | Abort offsite run above this delete count |
 | `MIMIR_OFFSITE_MAX_DELETE_PCT` | `25` | Abort offsite run above this delete percentage |
 
 ## Security Model
 
-Mímir is designed to sit behind Cloudflare Access and still defend itself at the
-origin:
+Mímir is designed to sit behind an authenticated reverse proxy and still defend
+itself at the origin:
 
-- Cloudflare Access service-token policy at `mimir.gille.ai`.
+- An optional identity-aware proxy provides an outer authentication layer.
 - Bearer-token auth at the app for `/files/*` and `/list/*`.
 - HMAC-signed, expiring public share links for `/share/:token`.
 - Timing-safe Bearer token comparison.
@@ -102,26 +116,38 @@ origin:
 - systemd sandboxing on the NAS Pi.
 - Ingest-time secret scanning before imported files can reach the servable tree.
 
+Forwarded client addresses are ignored by default. Set `MIMIR_TRUST_PROXY` only
+when direct origin access is blocked and the configured value precisely identifies
+your proxy. A broad value such as `true` can let direct clients spoof the address
+used by rate limiting.
+
 ## Deployment
 
-Mímir runs on the NAS Pi from `/home/magnus/mimir-server`, serving artifacts from
-`/home/magnus/mimir`. Deploy from this repo:
+The included Linux service template runs as a dedicated `mimir` user from
+`/home/mimir/mimir-server`, serving `/home/mimir/mimir`. Deploy from this repo:
 
 ```bash
 ./scripts/deploy-nas.sh [hostname-or-ip]
 ```
 
-The target host is environment-specific; pass it explicitly when deploying outside
-the maintainer's machine. The Pi needs `/home/magnus/mimir-server/.env` with at
+The target host is required; pass it explicitly or set `MIMIR_NAS_HOST`. The host
+needs `/home/mimir/mimir-server/.env` with at
 least:
 
 ```bash
 MIMIR_API_KEY=<generate with: openssl rand -hex 32>
-MIMIR_ALLOWED_HOSTS=mimir.gille.ai
+MIMIR_ROOT_DIR=/home/mimir/mimir
+MIMIR_ALLOWED_HOSTS=files.example.com
+MIMIR_TRUST_PROXY=loopback
 ```
 
-Optional production settings include `MIMIR_SHARE_SECRET`,
+Optional production settings include `MIMIR_SHARE_SECRET` together with its
+required public `MIMIR_BASE_URL`,
 `HEIMDALL_HUB_URL`, and `HEIMDALL_FLEET_TOKEN`.
+
+The deployment account defaults to `mimir`. Set `MIMIR_DEPLOY_USER` locally to
+use another Linux account; the deploy script renders all installed systemd paths
+and `User=` directives for that account.
 
 Deployments must start from a clean Git worktree. The script uses deterministic
 production dependency installation, refreshes the HTTP and offsite systemd units,
@@ -136,21 +162,15 @@ state as unknown for manual verification. It prints the exact clean-worktree red
 command and enforces mode `0600` on the remote `.env`.
 
 `mimir.service` runs the HTTP server with `ProtectSystem=strict`,
-`ReadOnlyPaths=/home/magnus/mimir`, and write access only to the server directory.
+`ReadOnlyPaths=/home/mimir/mimir`, and write access only to the server directory.
 
-### Cloudflare Tunnel
+### Reverse proxy or tunnel
 
-Production is expected to run behind a Cloudflare Tunnel and Cloudflare Access.
-Keep tunnel IDs, service-token names, and any provider-side identifiers out of the
-repository.
-
-- Public URL: `https://mimir.gille.ai`
-- Access app: `mimir.gille.ai`
-- Access policy: service-token auth at the edge
-- DNS: CNAME `mimir.gille.ai` to the tunnel target
-
-Share URLs require a Cloudflare Access bypass policy for `/share/*`; the HMAC token
-is the authentication layer for recipients.
+Production should keep the default loopback bind and publish it through a reverse
+proxy or private tunnel. Configure the proxy to authenticate `/files/*` and
+`/list/*`, preserve the application Bearer check, and avoid exposing the origin.
+If `/share/*` bypasses proxy authentication, the expiring HMAC token is its only
+credential; tokens can appear in browser history and access logs.
 
 ## Syncing Artifacts
 
@@ -163,13 +183,11 @@ Manual sync:
 ./scripts/sync-artifacts.sh [hostname-or-ip]
 ```
 
-Automatic sync is handled by the launchd agent `com.magnusgille.mimir-sync`, which
-runs every 30 minutes and skips silently when the NAS is unreachable.
+Automatic sync can invoke `scripts/sync-artifacts-daemon.sh` from a scheduler. The
+script skips safely when its target is unreachable.
 
 ```bash
-launchctl list | grep mimir
-launchctl start com.magnusgille.mimir-sync
-cat ~/.local/share/mimir/logs/sync-stdout.log
+MIMIR_NAS=archive@files.internal ./scripts/sync-artifacts-daemon.sh
 ```
 
 The sync flow imports files from the NAS inbox, scans newly imported files for
@@ -177,9 +195,9 @@ secrets, then mirrors laptop `~/mimir/` to NAS `~/mimir/` with a delete safety g
 Import and scanner failures stop before any mirror. The gate compares deletions with
 the actual remote population and also passes an absolute maximum to the real rsync.
 
-Local helper scripts use SSH host alias `nas` by default. Override with
-`MIMIR_NAS_HOST=<host>` for host-only commands or `MIMIR_NAS=<user@host>` for rsync
-and share helpers.
+Local helper scripts require either `MIMIR_NAS_HOST=<host>` or
+`MIMIR_NAS=<user@host>`. Paths can be overridden with `MIMIR_LOCAL_ROOT`,
+`MIMIR_REMOTE_ROOT`, and `MIMIR_REMOTE_INBOX`.
 
 ## Secret Scanning
 
@@ -224,8 +242,9 @@ capacity, Samba, and Time Machine concerns belong to the Brokkr platform layer.
 
 ### NAS Disk Copy
 
-`scripts/backup-artifacts.sh` backs up `/home/magnus/mimir` to
-`/mnt/timemachine/backups/mimir/` on the NAS disk.
+`scripts/backup-artifacts.sh` makes an append-only local copy. Its generic defaults
+are `/home/mimir/mimir/` and `/mnt/backup/mimir/`; override the source, destination,
+mount point, and log path for your host.
 
 ### Encrypted Offsite Copy
 
@@ -236,7 +255,7 @@ jitter of up to 15 minutes.
 The job:
 
 - Requires an rclone `crypt` remote and fails closed if the remote is not crypt.
-- Encrypts file contents and filenames before pushing to OneDrive.
+- Encrypts file contents and filenames before pushing to the configured provider.
 - Mirrors current state to `<remote>:current`.
 - Moves overwritten or deleted files to tagged seven-character run directories beside `current/`.
 - Prunes only tagged archive run directories older than the retention horizon by encoded timestamp.
@@ -300,6 +319,12 @@ mimir/
 - Share links are stateless HMAC tokens rather than database rows.
 - Backups are split by responsibility: Mímir owns artifact replication, Brokkr owns
   the destination disk and platform substrate.
+
+## Project policy
+
+- [Security policy](SECURITY.md)
+- [Contributing guide](CONTRIBUTING.md)
+- [Public project status](PROJECT_STATUS.md)
 
 ## License
 

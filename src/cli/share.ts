@@ -13,8 +13,8 @@ import { statSync } from "node:fs";
 import { generateToken, parseTTL } from "../share-token.js";
 
 const SHARE_SECRET = process.env.MIMIR_SHARE_SECRET;
-const ROOT_DIR = resolve(process.env.MIMIR_ROOT_DIR ?? "/home/magnus/mimir");
-const BASE_URL = process.env.MIMIR_BASE_URL ?? "https://mimir.gille.ai";
+const ROOT_DIR = resolve(process.env.MIMIR_ROOT_DIR ?? "./data");
+const BASE_URL = process.env.MIMIR_BASE_URL ?? "http://127.0.0.1:3031";
 
 function die(msg: string): never {
   process.stderr.write(`Error: ${msg}\n`);

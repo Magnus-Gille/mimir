@@ -12,9 +12,12 @@ set -euo pipefail
 #
 # TTL formats: 1h, 6h, 12h, 24h (default), 3d, 7d
 
-NAS="${MIMIR_NAS:-magnus@${MIMIR_NAS_HOST:-nas}}"
-LOCAL_ROOT="$HOME/mimir"
-REMOTE_DIR="/home/magnus/mimir-server"
+NAS_HOST="${MIMIR_NAS_HOST:-}"
+NAS="${MIMIR_NAS:-${NAS_HOST:+mimir@$NAS_HOST}}"
+[ -n "$NAS" ] || { echo "ERROR: set MIMIR_NAS_HOST or MIMIR_NAS=user@host." >&2; exit 1; }
+LOCAL_ROOT="${MIMIR_LOCAL_ROOT:-$HOME/mimir}"
+REMOTE_ROOT="${MIMIR_REMOTE_ROOT:-/home/mimir/mimir}"
+REMOTE_DIR="${MIMIR_REMOTE_APP_DIR:-/home/mimir/mimir-server}"
 TTL="${2:-24h}"
 
 # --- Resolve file path ---
@@ -37,7 +40,7 @@ if [[ ! -f "$FULL_LOCAL" ]]; then
   exit 1
 fi
 
-# REL_PATH becomes a remote path under /home/magnus/mimir — refuse traversal
+# REL_PATH becomes a remote path under MIMIR_REMOTE_ROOT — refuse traversal
 if [[ "/$REL_PATH/" == *"/../"* ]]; then
   echo "Error: path may not contain '..': $REL_PATH" >&2
   exit 1
@@ -49,7 +52,7 @@ fi
 # local path on the remote, so sync to the explicit destination path instead.
 # Remote-side arguments pass through the remote shell — quote with printf %q.
 echo "==> Syncing $REL_PATH to NAS..." >&2
-REMOTE_PATH="/home/magnus/mimir/$REL_PATH"
+REMOTE_PATH="$REMOTE_ROOT/$REL_PATH"
 Q_REMOTE_PATH=$(printf '%q' "$REMOTE_PATH")
 Q_REMOTE_DIR=$(printf '%q' "$(dirname "$REMOTE_PATH")")
 ssh "${NAS%%:*}" "mkdir -p $Q_REMOTE_DIR"

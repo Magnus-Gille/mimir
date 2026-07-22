@@ -21,6 +21,13 @@ describe("generateToken / validateToken", () => {
     if (!result.valid) expect(result.error).toMatch(/expired/i);
   });
 
+  it("rejects otherwise valid tokens beyond the seven-day maximum", () => {
+    const token = generateToken("file.txt", 8 * 86400, SECRET);
+    const result = validateToken(token, SECRET);
+    expect(result.valid).toBe(false);
+    if (!result.valid) expect(result.error).toMatch(/maximum ttl/i);
+  });
+
   it("rejects tokens with wrong secret", () => {
     const token = generateToken("file.txt", 3600, SECRET);
     const result = validateToken(token, "wrong-secret");
@@ -78,5 +85,8 @@ describe("parseTTL", () => {
     expect(parseTTL("abc")).toBeNull();
     expect(parseTTL("1m")).toBeNull();
     expect(parseTTL("-1h")).toBeNull();
+    expect(parseTTL("0h")).toBeNull();
+    expect(parseTTL("8d")).toBeNull();
+    expect(parseTTL("169h")).toBeNull();
   });
 });
