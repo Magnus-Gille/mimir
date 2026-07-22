@@ -87,6 +87,7 @@ rsync -av --delete \
   --exclude='.env' \
   --exclude='.deployed-commit' \
   --exclude='STATUS.md' \
+  --exclude='backup.log' \
   --exclude='tests/' \
   --exclude='.DS_Store' \
   ./ "$REMOTE:$REMOTE_DIR/"

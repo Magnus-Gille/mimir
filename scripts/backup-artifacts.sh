@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+umask 077
 
 # Backup artifacts from SD card to NAS disk on the same Pi
 # Run via cron on the NAS Pi itself
@@ -11,7 +12,11 @@ set -euo pipefail
 SOURCE="${MIMIR_BACKUP_SOURCE:-$HOME/mimir/}"
 DEST="${MIMIR_BACKUP_DEST:-/mnt/backup/mimir/}"
 BACKUP_MOUNT="${MIMIR_BACKUP_MOUNT:-/mnt/backup}"
-LOG="${MIMIR_BACKUP_LOG:-$HOME/mimir-server/backup.log}"
+STATE_DIR="${MIMIR_BACKUP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/mimir}"
+LOG="${MIMIR_BACKUP_LOG:-$STATE_DIR/backup.log}"
+
+# Runtime logs must survive code deployments and remain private.
+mkdir -p "$(dirname "$LOG")"
 
 # Verify HD is mounted before writing
 if ! mountpoint -q "$BACKUP_MOUNT"; then

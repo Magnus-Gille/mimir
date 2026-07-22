@@ -259,16 +259,14 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
 });
 
 describe("local backup script", () => {
-  it("defaults the source and log to the executing user's home", () => {
+  it("keeps the default log outside the deployed code tree", () => {
     const root = tempDir();
     const source = join(root, "mimir");
-    const appDir = join(root, "mimir-server");
     const destination = join(root, "backup");
     const mount = join(root, "mount");
     const bin = join(root, "bin");
     const calls = join(root, "backup.calls");
     mkdirSync(source);
-    mkdirSync(appDir);
     mkdirSync(mount);
     mkdirSync(bin);
     executable(join(bin, "mountpoint"), "exit 0\n");
@@ -289,7 +287,9 @@ describe("local backup script", () => {
 
     expect(result.status, result.stderr).toBe(0);
     expect(readFileSync(calls, "utf8")).toContain(`${source}/ ${destination}`);
-    expect(readFileSync(join(appDir, "backup.log"), "utf8")).toContain("Backup complete");
+    expect(readFileSync(join(root, ".local/state/mimir/backup.log"), "utf8")).toContain(
+      "Backup complete",
+    );
   });
 });
 
@@ -520,6 +520,7 @@ exit 0
     expect(invocations).not.toContain("--exclude=.git/");
     expect(invocations).toContain("--exclude=.deployed-commit");
     expect(invocations).toContain("--exclude=STATUS.md");
+    expect(invocations).toContain("--exclude=backup.log");
     expect(invocations).toContain("chmod 600");
     expect(invocations).toContain("npm ci --omit=dev");
     expect(invocations).not.toContain("npm install --omit=dev");
