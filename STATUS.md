@@ -1,7 +1,7 @@
 # Project Status
 
-**Last reconciled:** 2026-07-14
-**Branch:** `main`
+**Last reconciled:** 2026-07-22
+**Branch:** `codex/reconcile-ops-2026-07-22`
 **Production release:** PR [#20](https://github.com/Magnus-Gille/mimir/pull/20), merged as `8c4a0d7`
 
 ## Phase
@@ -22,6 +22,18 @@ reconciliation are deployed and accepted.
 - The encrypted off-site backup remains accepted end to end: `cryptcheck` found
   zero differences, and a full scratch restore matched an immutable 1,643-file
   source snapshot exactly.
+- The scheduled off-site run on 2026-07-22 completed successfully at 03:39 CEST:
+  1,712 files were mirrored, the heartbeat timestamp agrees with the service
+  result, and the next timer run is scheduled for 2026-07-23 at 03:37 CEST.
+- Heimdall's authoritative `mimir/offsite` panel records that run as `pass` with
+  the same file count. The Mimir service page now renders `Healthy` from pushed
+  panels, while explicitly reporting that no probe endpoint is used.
+- Issue [#12](https://github.com/Magnus-Gille/mimir/issues/12)'s acceptance
+  criterion is therefore met without widening the loopback-only listener. The
+  issue remains open pending an explicit comment/closure decision.
+- Local `main` was fast-forwarded through PR
+  [#21](https://github.com/Magnus-Gille/mimir/pull/21), which made `AGENTS.md`
+  canonical and reduced `CLAUDE.md` to its adapter.
 
 PR #20 closes external-symlink jail escapes, opens files before stat/streaming to
 survive sync races, canonicalizes configured roots, and keeps inbox import and
@@ -36,9 +48,10 @@ None. Mímir remains intentionally loopback-only behind the tunnel.
 
 ## Next Steps
 
-1. Verify the next scheduled off-site run and Heimdall freshness.
-2. Continue issue #12's health/probe decision without widening the loopback bind.
-3. Keep backup restore evidence current.
+1. Comment on and close issue #12 once explicitly approved; no listener or probe
+   change is needed.
+2. Keep scheduled-run and Heimdall freshness evidence current.
+3. Refresh the full restore evidence periodically.
 
 ## Release Validation
 
@@ -55,5 +68,6 @@ PR #20 passed before merge:
 
 Production acceptance verified the exact deployed commit, loopback health, unit
 state, `.env` permissions, absence of remote Git metadata, and zero deployment
-drift. This status reconciliation uses that recorded acceptance evidence and did
-not redeploy or rerun the backup.
+drift. The 2026-07-22 reconciliation rechecked the deployed marker, loopback
+health, service/timer state, scheduled backup result, heartbeat, and authoritative
+Heimdall panel/service-page state. It did not redeploy or rerun the backup.
