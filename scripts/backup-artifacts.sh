@@ -8,10 +8,10 @@ set -euo pipefail
 # Policy: HD is append-only retention — no --delete.
 # Files removed from SD are preserved on HD indefinitely.
 
-SOURCE="${MIMIR_BACKUP_SOURCE:-/home/mimir/mimir/}"
+SOURCE="${MIMIR_BACKUP_SOURCE:-$HOME/mimir/}"
 DEST="${MIMIR_BACKUP_DEST:-/mnt/backup/mimir/}"
 BACKUP_MOUNT="${MIMIR_BACKUP_MOUNT:-/mnt/backup}"
-LOG="${MIMIR_BACKUP_LOG:-/home/mimir/mimir-server/backup.log}"
+LOG="${MIMIR_BACKUP_LOG:-$HOME/mimir-server/backup.log}"
 
 # Verify HD is mounted before writing
 if ! mountpoint -q "$BACKUP_MOUNT"; then

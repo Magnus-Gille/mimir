@@ -90,7 +90,7 @@ describe("heimdall.json", () => {
   it("returns the descriptor object", async () => {
     const res = await request(app).get("/heimdall.json");
     expect(res.body).toMatchObject({
-      _schema: "https://grimnir.example/schema/service/v1",
+      _schema: "https://heimdall.gille.ai/schema/service/v1",
       service: { name: "mimir", label: "Mímir", namespace: "grimnir", instance_id: "default" },
       kind: "http-service",
       status: "pass",

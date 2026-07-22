@@ -132,7 +132,7 @@ rclone config. Optional overrides (defaults shown):
 
 ```
 # MIMIR_OFFSITE_REMOTE=mimir-crypt                 # crypt remote NAME (no ':' / path)
-# MIMIR_OFFSITE_ROOT=/home/mimir/mimir              # directory pushed offsite
+# MIMIR_OFFSITE_ROOT=$HOME/mimir                    # directory pushed offsite
 # MIMIR_OFFSITE_RETENTION_DAYS=30                  # archive prune horizon
 # MIMIR_OFFSITE_MAX_DELETE=1000                    # abort if a run removes ≥ this many files
 # MIMIR_OFFSITE_MAX_DELETE_PCT=25                  # ...or more than this % of current/

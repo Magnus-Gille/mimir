@@ -26,7 +26,7 @@ export LC_ALL=C
 # ---- Config (override via environment / EnvironmentFile) ----
 SERVICE="${MIMIR_OFFSITE_SERVICE:-mimir}"                 # Heimdall service id
 PANEL="${MIMIR_OFFSITE_PANEL:-offsite}"                   # Heimdall panel id
-SOURCE="${MIMIR_OFFSITE_ROOT:-/home/mimir/mimir}"        # directory to back up
+SOURCE="${MIMIR_OFFSITE_ROOT:-$HOME/mimir}"              # directory to back up
 REMOTE="${MIMIR_OFFSITE_REMOTE:-mimir-crypt}"             # rclone crypt remote NAME (no ':' / path)
 RETENTION_DAYS="${MIMIR_OFFSITE_RETENTION_DAYS:-30}"      # archive prune horizon (days)
 MAX_DELETE="${MIMIR_OFFSITE_MAX_DELETE:-1000}"            # abort if a run would remove ≥ this many files

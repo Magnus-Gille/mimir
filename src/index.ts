@@ -222,7 +222,7 @@ function descriptorId(value: string | undefined, fallback: string, label: string
 
 export function buildHeimdallDescriptor(config?: { instanceId?: string; deployHost?: string }) {
   return {
-    _schema: 'https://grimnir.example/schema/service/v1',
+    _schema: 'https://heimdall.gille.ai/schema/service/v1',
     service: {
       name: 'mimir',
       label: 'Mímir',

@@ -258,10 +258,45 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
   });
 });
 
+describe("local backup script", () => {
+  it("defaults the source and log to the executing user's home", () => {
+    const root = tempDir();
+    const source = join(root, "mimir");
+    const appDir = join(root, "mimir-server");
+    const destination = join(root, "backup");
+    const mount = join(root, "mount");
+    const bin = join(root, "bin");
+    const calls = join(root, "backup.calls");
+    mkdirSync(source);
+    mkdirSync(appDir);
+    mkdirSync(mount);
+    mkdirSync(bin);
+    executable(join(bin, "mountpoint"), "exit 0\n");
+    executable(join(bin, "rsync"), `printf '%s\\n' "$*" >> "$BACKUP_CALLS"\n`);
+
+    const result = spawnSync("bash", [join(REPO_ROOT, "scripts/backup-artifacts.sh")], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: root,
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        BACKUP_CALLS: calls,
+        MIMIR_BACKUP_DEST: destination,
+        MIMIR_BACKUP_MOUNT: mount,
+      },
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(readFileSync(calls, "utf8")).toContain(`${source}/ ${destination}`);
+    expect(readFileSync(join(appDir, "backup.log"), "utf8")).toContain("Backup complete");
+  });
+});
+
 describe("offsite backup script", () => {
   it("keeps runtime state outside the deploy tree and bounds encrypted archive depth", () => {
     const root = tempDir();
-    const source = join(root, "source");
+    const source = join(root, "mimir");
     const state = join(root, "state");
     const calls = join(root, "rclone.calls");
     const fakeRclone = join(root, "rclone");
@@ -299,7 +334,6 @@ esac
         ...process.env,
         HOME: root,
         PATH: `${root}:${process.env.PATH ?? ""}`,
-        MIMIR_OFFSITE_ROOT: source,
         MIMIR_OFFSITE_STATE_DIR: state,
         RCLONE_BIN: fakeRclone,
         RCLONE_CALLS: calls,
@@ -395,7 +429,7 @@ exit 0
     return { bin, calls };
   }
 
-  it("fails before build or sync when the required API key is absent", () => {
+  it("fails before build or sync when required deployment values are absent", () => {
     const root = tempDir();
     const { bin, calls } = mockCommands(root);
     const result = spawnSync("bash", [join(REPO_ROOT, "scripts/deploy-nas.sh"), "test-nas"], {
@@ -411,7 +445,10 @@ exit 0
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("MIMIR_API_KEY");
+    expect(result.stderr).toContain("MIMIR_ROOT_DIR");
     const invocations = readFileSync(calls, "utf8");
+    expect(invocations).toContain("MIMIR_ROOT_DIR");
+    expect(invocations).toContain("MIMIR_BASE_URL");
     expect(invocations).not.toContain("HEIMDALL_HUB_URL");
     expect(invocations).not.toContain("HEIMDALL_FLEET_TOKEN");
     expect(invocations).not.toContain("npm ");
@@ -438,6 +475,7 @@ exit 0
     expect(invocations).toContain("/home/archive/mimir-server");
     expect(invocations).toContain("User=archive");
     expect(invocations).toContain("/home/archive/mimir");
+    expect(result.stdout).toContain("MIMIR_DEPLOY_USER=archive");
   });
 
   it("refuses a dirty source before contacting the NAS", () => {
@@ -481,6 +519,7 @@ exit 0
     expect(invocations).toContain("--exclude=.git");
     expect(invocations).not.toContain("--exclude=.git/");
     expect(invocations).toContain("--exclude=.deployed-commit");
+    expect(invocations).toContain("--exclude=STATUS.md");
     expect(invocations).toContain("chmod 600");
     expect(invocations).toContain("npm ci --omit=dev");
     expect(invocations).not.toContain("npm install --omit=dev");
@@ -499,6 +538,7 @@ exit 0
     );
     expect(result.stdout).toContain("Accepted commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     expect(result.stdout).toContain("Rollback: check out bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    expect(result.stdout).toContain("MIMIR_DEPLOY_USER=mimir");
   });
 
   it("excludes a worktree .git file and removes stale remote Git metadata", () => {

@@ -93,7 +93,7 @@ Heimdall reporting helpers.
 | `HEIMDALL_HUB_URL` | - | Heimdall panel push endpoint |
 | `HEIMDALL_FLEET_TOKEN` | - | Heimdall panel push token |
 | `MIMIR_OFFSITE_REMOTE` | `mimir-crypt` | rclone crypt remote name for offsite backup |
-| `MIMIR_OFFSITE_ROOT` | `/home/mimir/mimir` | Directory pushed offsite |
+| `MIMIR_OFFSITE_ROOT` | `$HOME/mimir` | Directory pushed offsite |
 | `MIMIR_OFFSITE_RETENTION_DAYS` | `30` | Offsite archive retention |
 | `MIMIR_OFFSITE_MAX_DELETE` | `1000` | Abort offsite run above this delete count |
 | `MIMIR_OFFSITE_MAX_DELETE_PCT` | `25` | Abort offsite run above this delete percentage |
@@ -136,11 +136,13 @@ least:
 
 ```bash
 MIMIR_API_KEY=<generate with: openssl rand -hex 32>
+MIMIR_ROOT_DIR=/home/mimir/mimir
 MIMIR_ALLOWED_HOSTS=files.example.com
 MIMIR_TRUST_PROXY=loopback
 ```
 
-Optional production settings include `MIMIR_SHARE_SECRET`,
+Optional production settings include `MIMIR_SHARE_SECRET` together with its
+required public `MIMIR_BASE_URL`,
 `HEIMDALL_HUB_URL`, and `HEIMDALL_FLEET_TOKEN`.
 
 The deployment account defaults to `mimir`. Set `MIMIR_DEPLOY_USER` locally to

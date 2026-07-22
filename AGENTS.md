@@ -121,6 +121,7 @@ using the captured rollback target when available. The remote `.env` is enforced
 The generic Linux service expects `.env` at `/home/mimir/mimir-server/.env`:
 ```
 MIMIR_API_KEY=<generate with: openssl rand -hex 32>
+MIMIR_ROOT_DIR=/home/mimir/mimir
 MIMIR_ALLOWED_HOSTS=files.example.com
 MIMIR_TRUST_PROXY=loopback
 ```
@@ -185,7 +186,7 @@ additionally pushes a `fail`-state Heimdall panel when `HEIMDALL_HUB_URL`/
 | `MIMIR_SHARE_SECRET` | — | HMAC secret for share links (optional, enables `/share`) |
 | `MIMIR_BASE_URL` | `http://127.0.0.1:3031` | Base URL for generated share links (CLI only) |
 | `MIMIR_OFFSITE_REMOTE` | `mimir-crypt` | rclone crypt remote name (offsite backup) |
-| `MIMIR_OFFSITE_ROOT` | `/home/mimir/mimir` | Directory pushed offsite |
+| `MIMIR_OFFSITE_ROOT` | `$HOME/mimir` | Directory pushed offsite |
 | `MIMIR_OFFSITE_RETENTION_DAYS` | `30` | Archive (deleted/changed file) prune horizon |
 | `MIMIR_OFFSITE_MAX_DELETE` | `1000` | Abort a run that would delete more than this many files |
 | `MIMIR_OFFSITE_MAX_DELETE_PCT` | `25` | ...or more than this % of `current/` (whichever trips first) |

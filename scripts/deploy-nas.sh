@@ -32,8 +32,8 @@ if ! ssh "$REMOTE" "test -f '$REMOTE_DIR/.env'"; then
   exit 1
 fi
 ssh "$REMOTE" "chmod 600 '$REMOTE_DIR/.env'"
-if ! ssh "$REMOTE" "set -a; . '$REMOTE_DIR/.env'; test -n \"\${MIMIR_API_KEY:-}\""; then
-  echo "ERROR: $REMOTE_DIR/.env must define a non-empty MIMIR_API_KEY" >&2
+if ! ssh "$REMOTE" "set -a; . '$REMOTE_DIR/.env'; test -n \"\${MIMIR_API_KEY:-}\" && test -n \"\${MIMIR_ROOT_DIR:-}\" && { test -z \"\${MIMIR_SHARE_SECRET:-}\" || test -n \"\${MIMIR_BASE_URL:-}\"; }"; then
+  echo "ERROR: $REMOTE_DIR/.env must define non-empty MIMIR_API_KEY and MIMIR_ROOT_DIR; MIMIR_BASE_URL is also required when MIMIR_SHARE_SECRET is set" >&2
   exit 1
 fi
 echo "  required variables present (values not displayed)"
@@ -57,7 +57,7 @@ deployment_failed() {
       echo "ERROR: Deployment of $DEPLOY_COMMIT did not complete before marker invalidation; this deploy attempted no remote code-tree mutation." >&2
       ;;
   esac
-  echo "Rollback: check out $ROLLBACK_TARGET in a clean worktree and run ./scripts/deploy-nas.sh $NAS_HOST" >&2
+  echo "Rollback: check out $ROLLBACK_TARGET in a clean worktree and run MIMIR_DEPLOY_USER=$DEPLOY_USER ./scripts/deploy-nas.sh $NAS_HOST" >&2
   exit "$rc"
 }
 MARKER_INVALIDATION_STATE="not-attempted"
@@ -86,6 +86,7 @@ rsync -av --delete \
   --exclude='.git' \
   --exclude='.env' \
   --exclude='.deployed-commit' \
+  --exclude='STATUS.md' \
   --exclude='tests/' \
   --exclude='.DS_Store' \
   ./ "$REMOTE:$REMOTE_DIR/"
@@ -111,4 +112,4 @@ echo ""
 echo "Deploy complete!"
 echo "Accepted commit: $DEPLOY_COMMIT"
 echo "Health check: ssh $REMOTE curl http://127.0.0.1:3031/health"
-echo "Rollback: check out $ROLLBACK_TARGET in a clean worktree and run ./scripts/deploy-nas.sh $NAS_HOST"
+echo "Rollback: check out $ROLLBACK_TARGET in a clean worktree and run MIMIR_DEPLOY_USER=$DEPLOY_USER ./scripts/deploy-nas.sh $NAS_HOST"
