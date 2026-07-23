@@ -31,12 +31,33 @@ if ! ssh "$REMOTE" "test -f '$REMOTE_DIR/.env'"; then
   echo "ERROR: No .env file found at $REMOTE_DIR/.env" >&2
   exit 1
 fi
-ssh "$REMOTE" "chmod 600 '$REMOTE_DIR/.env'"
 if ! ssh "$REMOTE" "set -a; . '$REMOTE_DIR/.env'; test -n \"\${MIMIR_API_KEY:-}\" && test -n \"\${MIMIR_ROOT_DIR:-}\" && { test -z \"\${MIMIR_SHARE_SECRET:-}\" || test -n \"\${MIMIR_BASE_URL:-}\"; }"; then
   echo "ERROR: $REMOTE_DIR/.env must define non-empty MIMIR_API_KEY and MIMIR_ROOT_DIR; MIMIR_BASE_URL is also required when MIMIR_SHARE_SECRET is set" >&2
   exit 1
 fi
 echo "  required variables present (values not displayed)"
+
+# Reporter configuration is optional, but a half-configured pair can never
+# authenticate and is therefore a deployment error. Inspect only presence and
+# return a bounded state word so neither secret can reach local output.
+HEIMDALL_STATE=$(ssh "$REMOTE" "set -a; . '$REMOTE_DIR/.env'; if [ -n \"\${HEIMDALL_HUB_URL:-}\" ] && [ -n \"\${HEIMDALL_FLEET_TOKEN:-}\" ]; then printf configured; elif [ -z \"\${HEIMDALL_HUB_URL:-}\" ] && [ -z \"\${HEIMDALL_FLEET_TOKEN:-}\" ]; then printf disabled; else printf partial; fi")
+case "$HEIMDALL_STATE" in
+  configured)
+    echo "  Heimdall reporting configured (values not displayed)"
+    ;;
+  disabled)
+    echo "WARNING: Heimdall reporting is disabled; add both HEIMDALL_HUB_URL and HEIMDALL_FLEET_TOKEN to $REMOTE_DIR/.env to enable it." >&2
+    ;;
+  partial)
+    echo "ERROR: $REMOTE_DIR/.env must define both HEIMDALL_HUB_URL and HEIMDALL_FLEET_TOKEN, or neither." >&2
+    exit 1
+    ;;
+  *)
+    echo "ERROR: Could not determine Heimdall reporter configuration state on $REMOTE." >&2
+    exit 1
+    ;;
+esac
+ssh "$REMOTE" "chmod 600 '$REMOTE_DIR/.env'"
 
 PREVIOUS_COMMIT=$(ssh "$REMOTE" "if [ -f '$REMOTE_DIR/.deployed-commit' ]; then head -n 1 '$REMOTE_DIR/.deployed-commit'; else printf unknown; fi")
 case "$PREVIOUS_COMMIT" in

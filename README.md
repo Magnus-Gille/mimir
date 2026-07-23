@@ -143,8 +143,18 @@ MIMIR_TRUST_PROXY=loopback
 ```
 
 Optional production settings include `MIMIR_SHARE_SECRET` together with its
-required public `MIMIR_BASE_URL`,
-`HEIMDALL_HUB_URL`, and `HEIMDALL_FLEET_TOKEN`.
+required public `MIMIR_BASE_URL`. Heimdall reporting is also optional, but
+`HEIMDALL_HUB_URL` and `HEIMDALL_FLEET_TOKEN` are a pair: configure both or
+neither:
+
+```bash
+HEIMDALL_HUB_URL=https://monitoring.example.com/api/panels
+HEIMDALL_FLEET_TOKEN=<provision out of band>
+```
+
+The authoritative runtime file is the deployed
+`/home/<deployment-user>/mimir-server/.env`, not a development checkout's
+`.env`.
 
 The deployment account defaults to `mimir`. Set `MIMIR_DEPLOY_USER` locally to
 use another Linux account; the deploy script renders all installed systemd paths
@@ -161,6 +171,8 @@ and stale remote Git metadata is removed before transfer. If the invalidation SS
 has an indeterminate outcome, the script stops before code-tree mutation and reports marker
 state as unknown for manual verification. It prints the exact clean-worktree redeploy
 command and enforces mode `0600` on the remote `.env`.
+The remote preflight warns when Heimdall reporting is intentionally disabled
+and rejects a partial Heimdall pair before the build or any remote mutation.
 
 `mimir.service` runs the HTTP server with `ProtectSystem=strict`,
 `ReadOnlyPaths=/home/mimir/mimir`, and write access only to the server directory.
@@ -276,7 +288,9 @@ set:
 - `uptime`: current process uptime in hours.
 
 Secret-scan and offsite-backup failures also push fail-state panels when Heimdall is
-configured. Missing Heimdall env vars are non-fatal.
+configured. Missing Heimdall env vars are non-fatal. A temporary push failure is
+logged with the affected panel and retried by the next 60-second report cycle;
+successful pushes are intentionally silent.
 
 ## Project Structure
 
