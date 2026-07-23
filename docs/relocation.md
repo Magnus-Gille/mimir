@@ -4,8 +4,18 @@ This public-safe contract implements the workload-owner boundary in Grimnir
 ADR-007. The machine, network realization, and physical relocation are Brokkr
 concerns. Mimir owns its archive semantics, service verification, and recovery.
 The versioned requirement record is [workload-requirement-v1.json](workload-requirement-v1.json).
-It pins the exact shared schema and fixture-set revision/digests used by every
-consumer; Mimir does not extend or reinterpret decision-driving shared fields.
+
+## Normative schema and provenance
+
+The exact Grimnir node/substrate v1 schema and the shared consumer fixture
+manifest are vendored byte-for-byte under
+[`docs/vendor/grimnir/`](vendor/grimnir/) from the immutable source revision in
+[workload-requirement-v1.provenance.json](workload-requirement-v1.provenance.json).
+`src/node-substrate.ts` refuses to load a vendored artifact whose SHA-256
+digest drifts from those pins, and the test suite validates the Mimir
+workload manifest against the vendored normative schema rather than
+hand-asserting fields. Mimir does not extend or reinterpret decision-driving
+shared fields.
 
 ## Stable requirements
 
@@ -21,41 +31,93 @@ and artifact archive are separate identities. A relocation must retain the old
 archive and previous accepted deployment marker until the new baseline is
 verified; path existence is never copy, integrity, or restore proof.
 
-## Evidence and read-only hook
+## Read-only hooks and the invocation binding
 
 Run `scripts/relocation-verify.sh preflight` before any mutation and `verify`
-after a substrate step. It is allowlisted and read-only: it reads systemd state
-and private-overlay evidence files only. Each invocation has a bounded timeout
-(default 60 seconds), produces no deployment, sync, backup, service, or tunnel
-change, and is idempotent. The private overlay supplies evidence locations using
-the `MIMIR_RELOCATION_*_EVIDENCE` variables; no default path is assumed.
+after a substrate step. Both are allowlisted and read-only: they read systemd
+state and private-overlay evidence receipts only, and produce no deployment,
+sync, backup, service, or tunnel change. Machine-readable JSON is emitted on
+stdout; concise human diagnostics go to stderr.
+
+Per ADR-007, every invocation is bound to one lifecycle attempt. The private
+overlay supplies the binding via environment variables, all mandatory:
+
+| Variable | Field | Format |
+| --- | --- | --- |
+| `MIMIR_RELOCATION_ATTEMPT_ID` | `attempt_id` | contract id |
+| `MIMIR_RELOCATION_PLAN_ID` | `plan_id` | contract id |
+| `MIMIR_RELOCATION_PLAN_DIGEST` | `plan_digest` | `sha256:<64 hex>` |
+| `MIMIR_RELOCATION_DESIRED_REVISION` | `desired_revision` | `sha256:<64 hex>` |
+| `MIMIR_RELOCATION_OBSERVATION_EVIDENCE_ID` | `observation_evidence_id` | contract id |
+| `MIMIR_RELOCATION_ACTION` | `action` | `preflight` or `relocate` |
+| `MIMIR_RELOCATION_DEADLINE` | `deadline` | exact UTC `YYYY-MM-DDTHH:MM:SSZ` |
+| `MIMIR_RELOCATION_IDEMPOTENCY_KEY` | `idempotency_key` | contract id |
+
+The stdout result embeds a `hook_result` that echoes every binding field and is
+validated against the vendored normative schema before it is emitted. An
+invocation whose deadline has already passed (or that passes while checks run)
+records `timed_out` without treating partial reads as success. Results are
+recorded under `MIMIR_RELOCATION_RESULT_DIR/<hook>-<idempotency_key>.json`
+(mode 0600): retrying the same idempotency key replays the recorded result
+verbatim, and the same key presented with different bindings is refused as a
+conflict. `MIMIR_RELOCATION_TIMEOUT_SECONDS` (default 60) bounds each systemd
+status read.
+
+## Evidence receipts
+
+Evidence is consumed as closed typed JSON receipts written by the component
+that owns each fact. The private overlay supplies their locations through the
+`MIMIR_RELOCATION_*_EVIDENCE` variables; no default path is assumed. A receipt
+must be a regular non-symlink file (FIFOs and directories are rejected), owned
+by the invoking user, mode `0600`/`0400` (no group/other access), at most 4096
+bytes, and exactly this shape:
+
+```json
+{
+  "kind": "mimir-relocation-evidence",
+  "schema_version": "v1",
+  "check": "tunnel",
+  "status": "tunnel-v1:connected",
+  "observed_at": "2026-07-23T10:00:00Z",
+  "valid_until": "2026-07-23T11:00:00Z"
+}
+```
+
+Freshness is explicit: both timestamps must be exact second-resolution UTC,
+`observed_at` must not be in the future, and `valid_until` must still be ahead
+of the invocation clock. Stale, future, malformed, oversize, wrongly typed,
+wrongly owned, or wrongly permissioned receipts fail closed with a short
+reason token; receipt contents and filesystem paths are never echoed to
+either stream.
 
 Success requires distinct current evidence, not a single green indicator:
 
-| Evidence | Required success criterion |
-| --- | --- |
-| Service | `mimir.service` is active. |
-| Timer | `mimir-offsite.timer` is active. |
-| Tunnel | `tunnel-v1:connected` from the tunnel owner. |
-| Mac sync | `sync-v1:complete` after a guarded sync. |
-| T7 local copy | `local-copy-v1:complete` after copy and integrity verification. |
-| Offsite | `offsite-v1:complete` from encrypted-copy status. |
-| Heimdall | `heimdall-v1:fresh`, a freshness receipt rather than dashboard presence. |
-| Restore | `restore-v1:representative-ok` from a representative isolated restore. |
-| Deployment | `deployment-marker-v1:recoverable`, proving the previous marker/data remain recoverable. |
+| Check | Variable | Required receipt status |
+| --- | --- | --- |
+| Service | — (systemd read) | `mimir.service` is active. |
+| Timer | — (systemd read) | `mimir-offsite.timer` is active. |
+| Tunnel | `MIMIR_RELOCATION_TUNNEL_EVIDENCE` | `tunnel-v1:connected` from the tunnel owner. |
+| Mac sync | `MIMIR_RELOCATION_SYNC_EVIDENCE` | `sync-v1:complete` after a guarded sync. |
+| T7 copy completion | `MIMIR_RELOCATION_T7_COPY_EVIDENCE` | `local-copy-v1:complete` after the copy finishes. |
+| T7 integrity | `MIMIR_RELOCATION_T7_INTEGRITY_EVIDENCE` | `local-copy-integrity-v1:verified` from a separate integrity verification. |
+| Offsite | `MIMIR_RELOCATION_OFFSITE_EVIDENCE` | `offsite-v1:complete` from encrypted-copy status. |
+| Heimdall | `MIMIR_RELOCATION_HEIMDALL_EVIDENCE` | `heimdall-v1:fresh`, a freshness receipt rather than dashboard presence. |
+| Restore | `MIMIR_RELOCATION_RESTORE_EVIDENCE` | `restore-v1:representative-ok` from a representative isolated restore. |
+| Deployment | `MIMIR_RELOCATION_DEPLOYMENT_EVIDENCE` | `deployment-marker-v1:recoverable`, proving the previous marker/data remain recoverable. |
 
-Copy completion, integrity validation, and representative restore are separate
-records. The hook intentionally does not treat an archive directory, a timer,
-or a dashboard panel as a substitute for any of them.
+Copy completion, integrity validation, and representative restore are three
+separate receipts from separate procedures. The hook intentionally does not
+treat an archive directory, a timer, a finished copy, or a dashboard panel as
+a substitute for any of them.
 
 ## Mutating lifecycle operations
 
 `drain` and `compensate` are declared mutating hooks with 300-second deadlines
 and mandatory idempotency. They are not automated by this repository: invoking
-them through the read-only script is refused. A lifecycle executor may invoke
-them only after ADR-007 preflight using one attempt ID, plan/digest, desired
-revision, observation evidence, deadline, and idempotency key. A retry for the
-same key returns the recorded result; it must not repeat side effects.
+them through the read-only script or CLI is refused. A lifecycle executor may
+invoke them only after ADR-007 preflight using one attempt ID, plan/digest,
+desired revision, observation evidence, deadline, and idempotency key. A retry
+for the same key returns the recorded result; it must not repeat side effects.
 
 Drain must quiesce writes only after a recoverable pre-attempt baseline has been
 recorded. A failed, timed-out, or partial drain enters `compensate`; compensation

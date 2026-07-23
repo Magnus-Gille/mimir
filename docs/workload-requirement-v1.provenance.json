@@ -5,5 +5,7 @@
   "schema_sha256": "9a69f1b23499cd6e70fdaa80ee57bf983e7e5b288882e0cf2b0f01f10824fbbe",
   "fixture_set_path": "tests/fixtures/node-substrate-contract/consumer-fixture-set.json",
   "fixture_set_sha256": "355481f2b3866840795ba18033077d6f36487d1a447b36c323384cf7837c5fcb",
+  "vendored_schema_path": "docs/vendor/grimnir/node-substrate-contract-v1.schema.json",
+  "vendored_fixture_set_path": "docs/vendor/grimnir/consumer-fixture-set.json",
   "interpretation": "No consumer-specific overlay is present."
 }

@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grimnir.gille.ai/contracts/node-substrate/v1/schema.json",
+  "title": "Grimnir node/substrate contracts v1",
+  "description": "Versioned, public-safe records. Validation of cross-record decisions is defined by tests/scripts/validate-node-substrate-contract.mjs; these documents never authorize a live mutation.",
+  "oneOf": [
+    { "$ref": "#/$defs/node-capability" },
+    { "$ref": "#/$defs/workload-requirement" },
+    { "$ref": "#/$defs/placement-intent" },
+    { "$ref": "#/$defs/lifecycle-result" }
+  ],
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{2,62}$" },
+    "utc": { "type": "string", "format": "date-time" },
+    "digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "extension": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "version", "decision_effect"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{2,62}$" },
+        "version": { "type": "string", "pattern": "^v[1-9][0-9]*$" },
+        "decision_effect": { "enum": ["informational"] }
+      }
+    },
+    "evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["evidence_id", "producer", "observed_at", "digest"],
+      "properties": {
+        "evidence_id": { "$ref": "#/$defs/id" },
+        "producer": { "const": "brokkr" },
+        "observed_at": { "$ref": "#/$defs/utc" },
+        "digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "hook": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "mode", "contract_versions", "deadline_seconds", "idempotency_required"],
+      "properties": {
+        "name": { "enum": ["preflight", "drain", "verify", "rollback", "compensate"] },
+        "mode": { "enum": ["read_only", "mutating"] },
+        "contract_versions": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "const": "v1" } },
+        "deadline_seconds": { "type": "integer", "minimum": 1 },
+        "idempotency_required": { "const": true },
+        "compensation_hook": { "enum": ["rollback", "compensate"] }
+      }
+    },
+    "node-capability": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "schema_version", "node_id", "observed_at", "valid_until", "evidence", "capability_status", "architecture", "resources", "uptime_class", "network_capabilities", "logical_storage", "service_manager", "deployment_mechanisms", "health_reporting", "extensions"],
+      "properties": {
+        "kind": { "const": "node-capability" }, "schema_version": { "const": "v1" }, "node_id": { "$ref": "#/$defs/id" },
+        "observed_at": { "$ref": "#/$defs/utc" }, "valid_until": { "$ref": "#/$defs/utc" }, "evidence": { "$ref": "#/$defs/evidence" },
+        "capability_status": { "enum": ["known", "unknown", "not_applicable"] }, "architecture": { "enum": ["arm64", "x86_64", "unknown", "not_applicable"] },
+        "resources": { "type": "object", "additionalProperties": false, "required": ["cpu_cores", "memory_mib"], "properties": { "cpu_cores": { "type": "integer", "minimum": 1 }, "memory_mib": { "type": "integer", "minimum": 1 } } },
+        "uptime_class": { "enum": ["always_on", "best_effort", "unknown", "not_applicable"] },
+        "network_capabilities": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["wired", "wifi", "tailnet", "unknown", "not_applicable"] } },
+        "logical_storage": { "type": "array", "minItems": 1, "items": { "type": "object", "additionalProperties": false, "required": ["class", "available_mib", "status"], "properties": { "class": { "enum": ["local_ssd", "external_ssd", "network_share", "unknown", "not_applicable"] }, "available_mib": { "type": "integer", "minimum": 0 }, "status": { "enum": ["known", "unknown", "not_applicable"] } } } },
+        "service_manager": { "enum": ["systemd", "launchd", "unknown", "not_applicable"] }, "deployment_mechanisms": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["guarded_deploy", "systemd", "manual_operator", "unknown", "not_applicable"] } },
+        "health_reporting": { "enum": ["supported", "unsupported", "unknown", "not_applicable"] }, "extensions": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/extension" } }
+      }
+    },
+    "workload-requirement": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "schema_version", "workload_id", "supported_architectures", "persistent_data", "ports", "units", "timers", "secrets_boundary", "dependencies", "backup_restore", "health", "hooks", "extensions"],
+      "properties": {
+        "kind": { "const": "workload-requirement" }, "schema_version": { "const": "v1" }, "workload_id": { "$ref": "#/$defs/id" },
+        "supported_architectures": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["arm64", "x86_64"] } },
+        "persistent_data": { "enum": ["none", "required", "unknown", "not_applicable"] }, "ports": { "type": "array", "uniqueItems": true, "items": { "type": "integer", "minimum": 1 } },
+        "units": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z0-9@._-]+$" } }, "timers": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z0-9@._-]+$" } },
+        "secrets_boundary": { "enum": ["owner_overlay", "none", "unknown", "not_applicable"] }, "dependencies": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "backup_restore": { "enum": ["required", "not_required", "unknown", "not_applicable"] }, "health": { "enum": ["component_hook", "external_probe", "unknown", "not_applicable"] }, "hooks": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/hook" } }, "extensions": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/extension" } }
+      }
+    },
+    "placement-intent": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "schema_version", "placement_id", "workload_id", "target_node_id", "desired_revision", "created_at", "planned_drift", "extensions"],
+      "properties": {
+        "kind": { "const": "placement-intent" }, "schema_version": { "const": "v1" }, "placement_id": { "$ref": "#/$defs/id" }, "workload_id": { "$ref": "#/$defs/id" }, "target_node_id": { "$ref": "#/$defs/id" }, "desired_revision": { "$ref": "#/$defs/digest" }, "created_at": { "$ref": "#/$defs/utc" },
+        "planned_drift": { "type": "array", "uniqueItems": true, "items": { "enum": ["placement", "network", "storage", "service"] } }, "extensions": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/extension" } }
+      }
+    },
+    "lifecycle-result": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "schema_version", "result_id", "attempt_id", "plan_id", "plan_digest", "desired_revision", "observation_evidence_id", "action", "deadline", "idempotency_key", "phase", "outcome", "drift", "hook_results", "substrate", "created_at", "extensions"],
+      "properties": {
+        "kind": { "const": "lifecycle-result" }, "schema_version": { "const": "v1" }, "result_id": { "$ref": "#/$defs/id" }, "attempt_id": { "$ref": "#/$defs/id" }, "plan_id": { "$ref": "#/$defs/id" }, "plan_digest": { "$ref": "#/$defs/digest" }, "desired_revision": { "$ref": "#/$defs/digest" }, "observation_evidence_id": { "$ref": "#/$defs/id" }, "action": { "enum": ["preflight", "relocate"] }, "deadline": { "$ref": "#/$defs/utc" }, "idempotency_key": { "$ref": "#/$defs/id" }, "phase": { "enum": ["preflight", "drain", "realize", "verify", "compensate", "substrate_rollback"] }, "outcome": { "enum": ["promoted", "blocked"] }, "drift": { "enum": ["planned", "unexpected", "none", "unknown"] }, "created_at": { "$ref": "#/$defs/utc" },
+        "hook_results": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["result_id", "hook", "attempt_id", "plan_id", "plan_digest", "desired_revision", "observation_evidence_id", "action", "deadline", "idempotency_key", "outcome"], "properties": { "result_id": { "$ref": "#/$defs/id" }, "hook": { "enum": ["preflight", "drain", "verify", "rollback", "compensate"] }, "attempt_id": { "$ref": "#/$defs/id" }, "plan_id": { "$ref": "#/$defs/id" }, "plan_digest": { "$ref": "#/$defs/digest" }, "desired_revision": { "$ref": "#/$defs/digest" }, "observation_evidence_id": { "$ref": "#/$defs/id" }, "action": { "enum": ["preflight", "relocate"] }, "deadline": { "$ref": "#/$defs/utc" }, "idempotency_key": { "$ref": "#/$defs/id" }, "outcome": { "enum": ["success", "failed", "partial", "timed_out", "unavailable", "incompatible"] } } } },
+        "substrate": { "type": "object", "additionalProperties": false, "required": ["outcome", "rollback", "pre_state_evidence_id"], "properties": { "outcome": { "enum": ["not_started", "success", "failed", "partial", "timed_out"] }, "rollback": { "enum": ["not_needed", "verified", "failed", "not_applicable"] }, "pre_state_evidence_id": { "$ref": "#/$defs/id" } } }, "extensions": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/extension" } }
+      }
+    }
+  }
+}
