@@ -56,12 +56,17 @@ overlay supplies the binding via environment variables, all mandatory:
 The stdout result embeds a `hook_result` that echoes every binding field and is
 validated against the vendored normative schema before it is emitted. An
 invocation whose deadline has already passed (or that passes while checks run)
-records `timed_out` without treating partial reads as success. Results are
-recorded under `MIMIR_RELOCATION_RESULT_DIR/<hook>-<idempotency_key>.json`
-(mode 0600): retrying the same idempotency key replays the recorded result
-verbatim, and the same key presented with different bindings is refused as a
-conflict. `MIMIR_RELOCATION_TIMEOUT_SECONDS` (default 60) bounds each systemd
-status read.
+records `timed_out` without touching later commands or receipts. The deadline
+is checked before every check and caps each systemd status read; the configured
+`MIMIR_RELOCATION_TIMEOUT_SECONDS` is an integer from 1 through 300 (default
+60). Results are recorded under
+`MIMIR_RELOCATION_RESULT_DIR/<hook>-<idempotency_key>.json`: the directory
+must be an invoking-user-owned, non-symlink directory with mode `0700`, and
+records are mode `0600`. A replay requires the closed output shape, exact
+check set/outcomes/reasons, exact UTC `created_at`, a normative `hook_result`,
+and a deterministic content digest. Retrying the same idempotency key then
+replays the recorded result verbatim; the same key presented with different
+bindings is refused as a conflict.
 
 ## Evidence receipts
 
@@ -78,6 +83,12 @@ bytes, and exactly this shape:
   "schema_version": "v1",
   "check": "tunnel",
   "status": "tunnel-v1:connected",
+  "attempt_id": "attempt-001",
+  "plan_id": "plan-001",
+  "plan_digest": "sha256:<64 hex>",
+  "desired_revision": "sha256:<64 hex>",
+  "observation_evidence_id": "obs-001",
+  "action": "relocate",
   "observed_at": "2026-07-23T10:00:00Z",
   "valid_until": "2026-07-23T11:00:00Z"
 }
@@ -85,10 +96,11 @@ bytes, and exactly this shape:
 
 Freshness is explicit: both timestamps must be exact second-resolution UTC,
 `observed_at` must not be in the future, and `valid_until` must still be ahead
-of the invocation clock. Stale, future, malformed, oversize, wrongly typed,
-wrongly owned, or wrongly permissioned receipts fail closed with a short
-reason token; receipt contents and filesystem paths are never echoed to
-either stream.
+of the invocation clock. The six attempt fields shown above must exactly match
+the current invocation binding; a mismatch fails closed with a constant
+non-leaking reason token. Stale, future, malformed, oversize, wrongly typed,
+wrongly owned, or wrongly permissioned receipts also fail closed; receipt
+contents and filesystem paths are never echoed to either stream.
 
 Success requires distinct current evidence, not a single green indicator:
 

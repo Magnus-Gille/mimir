@@ -4,6 +4,7 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   rmSync,
   symlinkSync,
@@ -15,7 +16,8 @@ import { fileURLToPath } from "node:url";
 import {
   EVIDENCE_CHECKS,
   readBinding,
-  readReceipt,
+  readReceipt as readReceiptRaw,
+  resultContentDigest,
   runHook,
 } from "../src/relocation-verify.js";
 import { definitionErrors, loadNormativeSchema } from "../src/node-substrate.js";
@@ -29,6 +31,24 @@ const NOW = Date.parse("2026-07-23T12:00:00Z");
 const UID = process.getuid?.() ?? 0;
 
 const TUNNEL = { check: "tunnel", status: "tunnel-v1:connected" };
+const RECEIPT_BINDING = {
+  attempt_id: "attempt-001",
+  plan_id: "plan-001",
+  plan_digest: `sha256:${"a".repeat(64)}`,
+  desired_revision: `sha256:${"b".repeat(64)}`,
+  observation_evidence_id: "obs-001",
+  action: "relocate" as const,
+};
+
+function readReceipt(
+  path: string,
+  spec: { check: string; status: string },
+  nowMs: number,
+  uid: number | undefined = UID,
+  receiptBinding = RECEIPT_BINDING,
+) {
+  return readReceiptRaw(path, spec, nowMs, uid, receiptBinding);
+}
 
 let workDir: string;
 
@@ -38,6 +58,12 @@ function receiptBody(check: string, status: string, overrides: Record<string, un
     schema_version: "v1",
     check,
     status,
+    attempt_id: "attempt-001",
+    plan_id: "plan-001",
+    plan_digest: `sha256:${"a".repeat(64)}`,
+    desired_revision: `sha256:${"b".repeat(64)}`,
+    observation_evidence_id: "obs-001",
+    action: "relocate",
     observed_at: "2026-07-23T11:00:00Z",
     valid_until: "2026-07-23T13:00:00Z",
     ...overrides,
@@ -213,9 +239,34 @@ describe("readReceipt", () => {
       "extra.json",
       receiptBody("tunnel", "tunnel-v1:connected", { note: "extra" }),
     );
-    expect(readReceipt(path, TUNNEL, NOW, UID)).toEqual({
+    expect(readReceipt(path, TUNNEL, NOW, UID, {
+      attempt_id: "attempt-001",
+      plan_id: "plan-001",
+      plan_digest: `sha256:${"a".repeat(64)}`,
+      desired_revision: `sha256:${"b".repeat(64)}`,
+      observation_evidence_id: "obs-001",
+      action: "relocate",
+    })).toEqual({
       ok: false,
       reason: "not-a-closed-receipt",
+    });
+  });
+
+  it("rejects an otherwise fresh receipt bound to a different attempt with a constant token", () => {
+    const path = writeReceipt(
+      "other-attempt.json",
+      receiptBody("tunnel", "tunnel-v1:connected", { attempt_id: "attempt-002" }),
+    );
+    expect(readReceipt(path, TUNNEL, NOW, UID, {
+      attempt_id: "attempt-001",
+      plan_id: "plan-001",
+      plan_digest: `sha256:${"a".repeat(64)}`,
+      desired_revision: `sha256:${"b".repeat(64)}`,
+      observation_evidence_id: "obs-001",
+      action: "relocate",
+    })).toEqual({
+      ok: false,
+      reason: "binding-mismatch",
     });
   });
 
@@ -412,6 +463,39 @@ describe("runHook", () => {
     expect((output.hook_result as Record<string, unknown>).outcome).toBe("timed_out");
   });
 
+  it("stops before later commands and receipts once the overall deadline expires", () => {
+    const env = fullEnv();
+    const start = Date.parse("2026-07-23T12:29:59Z");
+    let calls = 0;
+    const advancing = () => (calls++ === 0 ? start : start + 120_000);
+    const { output } = runHook("preflight", env, { nowMs: advancing });
+    expect(output.checks).toEqual([{ check: "service", outcome: "success" }]);
+    expect(readFileSync(join(workDir, "systemctl-calls"), "utf8")).toContain("mimir.service");
+    expect(readFileSync(join(workDir, "systemctl-calls"), "utf8")).not.toContain("mimir-offsite.timer");
+  });
+
+  it("records timed_out when the deadline passes immediately after the final check", () => {
+    const env = fullEnv();
+    const start = Date.parse("2026-07-23T12:29:59Z");
+    let calls = 0;
+    const finalExpiry = () => (calls++ < 10 ? start : start + 120_000);
+    const first = runHook("preflight", env, { nowMs: finalExpiry });
+    expect((first.output.hook_result as Record<string, unknown>).outcome).toBe("timed_out");
+    expect(first.output.checks).toHaveLength(10);
+    expect(runHook("preflight", env, { nowMs: clock(NOW) }).output).toEqual(first.output);
+  });
+
+  it.each(["301", "9007199254740992"]) (
+    "rejects an unsafe configured timeout %s before any check",
+    (timeout) => {
+      const env = fullEnv({ MIMIR_RELOCATION_TIMEOUT_SECONDS: timeout });
+      const { output, exitCode } = runHook("preflight", env, { nowMs: clock(NOW) });
+      expect(exitCode).toBe(2);
+      expect(output.error).toBe("invalid_binding");
+      expect(readFileSync(join(workDir, "systemctl-calls"), "utf8")).toBe("");
+    },
+  );
+
   it("fails closed when a receipt variable is not provided", () => {
     const env = fullEnv();
     delete env.MIMIR_RELOCATION_RESTORE_EVIDENCE;
@@ -507,6 +591,51 @@ describe("runHook", () => {
     const { output, exitCode } = runHook("preflight", env, { nowMs: clock(NOW) });
     expect(exitCode).toBe(2);
     expect(output.error).toBe("result_record_invalid");
+  });
+
+  it("fails closed when the result directory is a symlink or is not mode 0700", () => {
+    const env = fullEnv();
+    const resultDir = env.MIMIR_RELOCATION_RESULT_DIR as string;
+    const target = join(workDir, "result-target");
+    mkdirSync(target, { mode: 0o700 });
+    symlinkSync(target, resultDir);
+    expect(runHook("preflight", env, { nowMs: clock(NOW) }).output.error).toBe(
+      "result_directory_invalid",
+    );
+    rmSync(resultDir);
+    mkdirSync(resultDir, { mode: 0o755 });
+    chmodSync(resultDir, 0o755);
+    expect(runHook("preflight", env, { nowMs: clock(NOW) }).output.error).toBe(
+      "result_directory_invalid",
+    );
+  });
+
+  it("rejects a replay whose digest-valid content has a tampered check outcome", () => {
+    const env = fullEnv();
+    expect(runHook("preflight", env, { nowMs: clock(NOW) }).exitCode).toBe(0);
+    const recordPath = join(env.MIMIR_RELOCATION_RESULT_DIR as string, "preflight-idem-001.json");
+    const record = JSON.parse(readFileSync(recordPath, "utf8"));
+    record.checks[0].outcome = "failed";
+    record.checks[0].reason = "mimir.service is not active";
+    record.content_digest = resultContentDigest(record);
+    writeFileSync(recordPath, JSON.stringify(record), { mode: 0o600 });
+    expect(runHook("preflight", env, { nowMs: clock(NOW) }).output.error).toBe(
+      "result_record_invalid",
+    );
+  });
+
+  it.each(["removed", "extra"])("rejects a replay with a %s check even if its digest is recomputed", (tamper) => {
+    const env = fullEnv();
+    expect(runHook("preflight", env, { nowMs: clock(NOW) }).exitCode).toBe(0);
+    const recordPath = join(env.MIMIR_RELOCATION_RESULT_DIR as string, "preflight-idem-001.json");
+    const record = JSON.parse(readFileSync(recordPath, "utf8"));
+    if (tamper === "removed") record.checks.pop();
+    else record.checks.push({ check: "unexpected", outcome: "success" });
+    record.content_digest = resultContentDigest(record);
+    writeFileSync(recordPath, JSON.stringify(record), { mode: 0o600 });
+    expect(runHook("preflight", env, { nowMs: clock(NOW) }).output.error).toBe(
+      "result_record_invalid",
+    );
   });
 
   it("never leaks receipt content or filesystem paths on failure", () => {
