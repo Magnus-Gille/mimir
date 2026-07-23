@@ -1,0 +1,9 @@
+{
+  "source_repository": "Magnus-Gille/grimnir",
+  "source_revision": "6d54d49c91612eae7dce5f66286d801900c38c35",
+  "schema_path": "docs/node-substrate-contract-v1.schema.json",
+  "schema_sha256": "9a69f1b23499cd6e70fdaa80ee57bf983e7e5b288882e0cf2b0f01f10824fbbe",
+  "fixture_set_path": "tests/fixtures/node-substrate-contract/consumer-fixture-set.json",
+  "fixture_set_sha256": "355481f2b3866840795ba18033077d6f36487d1a447b36c323384cf7837c5fcb",
+  "interpretation": "No consumer-specific overlay is present."
+}

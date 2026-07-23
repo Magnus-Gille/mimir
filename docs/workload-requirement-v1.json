@@ -1,0 +1,21 @@
+{
+  "kind": "workload-requirement",
+  "schema_version": "v1",
+  "workload_id": "mimir",
+  "supported_architectures": ["arm64", "x86_64"],
+  "persistent_data": "required",
+  "ports": [3031],
+  "units": ["mimir.service", "mimir-offsite.service"],
+  "timers": ["mimir-offsite.timer"],
+  "secrets_boundary": "owner_overlay",
+  "dependencies": ["cloudflare-tunnel", "mac-sync", "heimdall"],
+  "backup_restore": "required",
+  "health": "component_hook",
+  "hooks": [
+    {"name": "preflight", "mode": "read_only", "contract_versions": ["v1"], "deadline_seconds": 60, "idempotency_required": true},
+    {"name": "drain", "mode": "mutating", "contract_versions": ["v1"], "deadline_seconds": 300, "idempotency_required": true, "compensation_hook": "compensate"},
+    {"name": "verify", "mode": "read_only", "contract_versions": ["v1"], "deadline_seconds": 60, "idempotency_required": true},
+    {"name": "compensate", "mode": "mutating", "contract_versions": ["v1"], "deadline_seconds": 300, "idempotency_required": true}
+  ],
+  "extensions": [{"id": "mimir-relocation-evidence", "version": "v1", "decision_effect": "informational"}]
+}
