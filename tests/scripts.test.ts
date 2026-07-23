@@ -414,6 +414,7 @@ esac
 case "$*" in
   *"curl -fsS --max-time 3"*) exit "\${MOCK_HEALTH_RC:-0}" ;;
   *"test -f"*) exit "\${MOCK_ENV_FILE_RC:-0}" ;;
+  *"printf configured"*) printf '%s' "\${MOCK_HEIMDALL_STATE:-configured}" ;;
   *"head -n 1"*) printf '%s\\n' "\${MOCK_PREVIOUS_COMMIT:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}" ;;
   *"npm ci --omit=dev"*) exit "\${MOCK_DEPENDENCY_RC:-0}" ;;
   *"sudo install -m 0644"*) exit "\${MOCK_UNIT_RC:-0}" ;;
@@ -451,6 +452,50 @@ exit 0
     expect(invocations).toContain("MIMIR_BASE_URL");
     expect(invocations).not.toContain("HEIMDALL_HUB_URL");
     expect(invocations).not.toContain("HEIMDALL_FLEET_TOKEN");
+    expect(invocations).not.toContain("npm ");
+    expect(invocations).not.toContain("rsync ");
+  });
+
+  it("warns before deployment when Heimdall reporting is disabled", () => {
+    const root = tempDir();
+    const { bin, calls } = mockCommands(root);
+    const result = spawnSync("bash", [join(REPO_ROOT, "scripts/deploy-nas.sh"), "test-nas"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        DEPLOY_CALLS: calls,
+        MOCK_HEIMDALL_STATE: "disabled",
+      },
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).toContain("WARNING");
+    expect(result.stderr).toContain("Heimdall reporting is disabled");
+    const invocations = readFileSync(calls, "utf8");
+    expect(invocations).toContain("HEIMDALL_HUB_URL");
+    expect(invocations).toContain("HEIMDALL_FLEET_TOKEN");
+  });
+
+  it("fails before build or sync when only one Heimdall variable is configured", () => {
+    const root = tempDir();
+    const { bin, calls } = mockCommands(root);
+    const result = spawnSync("bash", [join(REPO_ROOT, "scripts/deploy-nas.sh"), "test-nas"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        DEPLOY_CALLS: calls,
+        MOCK_HEIMDALL_STATE: "partial",
+      },
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("both HEIMDALL_HUB_URL and HEIMDALL_FLEET_TOKEN");
+    const invocations = readFileSync(calls, "utf8");
+    expect(invocations).not.toContain("chmod 600");
     expect(invocations).not.toContain("npm ");
     expect(invocations).not.toContain("rsync ");
   });
