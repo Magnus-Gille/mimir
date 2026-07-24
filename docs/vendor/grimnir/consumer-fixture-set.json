@@ -1,0 +1,6 @@
+{
+  "contract": "grimnir.node-substrate/v1",
+  "consumers": ["brokkr", "hugin", "mimir"],
+  "fixtures": ["positive.json", "partial-drain.json", "partial-substrate.json"],
+  "interpretation": "Each consumer reads the same versioned records and must reject decision-driving unknown, stale, incompatible, or unsupported semantics. No consumer-specific overlay is present."
+}

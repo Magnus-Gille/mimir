@@ -60,15 +60,22 @@ mimir/
 │   ├── share-token.ts     # HMAC token generation + validation
 │   ├── secret-scan.ts     # Ingest-time secret scan + quarantine (mimir#13)
 │   ├── heimdall-report.ts # Periodic self-report + panel push helper
+│   ├── node-substrate.ts  # SHA-pinned vendored-schema loader + normative validator
+│   ├── relocation-verify.ts # ADR-007 read-only relocation hooks (typed receipts)
 │   └── cli/
 │       ├── share.ts       # Pi-side CLI for generating share URLs
-│       └── secret-scan.ts # CLI wrapper for the ingest secret scan
+│       ├── secret-scan.ts # CLI wrapper for the ingest secret scan
+│       └── relocation-verify.ts # CLI for the preflight/verify relocation hooks
+├── docs/vendor/grimnir/   # Byte-exact vendored Grimnir node-substrate v1 schema + fixture manifest
 ├── tests/
 │   ├── server.test.ts     # supertest integration tests
 │   ├── share-token.test.ts # Token unit tests
-│   └── secret-scan.test.ts # Secret scan + quarantine unit tests
+│   ├── secret-scan.test.ts # Secret scan + quarantine unit tests
+│   ├── relocation-verify.test.ts # Relocation hook + receipt fail-closed tests
+│   └── workload-contract.test.ts # Manifest vs vendored normative schema + SHA drift
 └── scripts/
     ├── deploy-nas.sh           # Deploy to NAS Pi
+    ├── relocation-verify.sh    # Thin wrapper for the read-only relocation hooks
     ├── share.sh                # Generate share URL (sync + ssh + clipboard)
     ├── sync-artifacts.sh       # Manual rsync ~/mimir/ from laptop to NAS
     ├── sync-artifacts-daemon.sh # Launchd daemon wrapper (auto-sync)

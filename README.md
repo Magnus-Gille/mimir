@@ -303,27 +303,38 @@ mimir/
 ├── mimir-offsite.service
 ├── mimir-offsite.timer
 ├── docs/
-│   └── offsite-backup.md
+│   ├── offsite-backup.md
+│   ├── relocation.md
+│   ├── workload-requirement-v1.json
+│   ├── workload-requirement-v1.provenance.json
+│   └── vendor/
+│       └── grimnir/            # SHA-pinned normative schema + fixture manifest
 ├── scripts/
 │   ├── backup-artifacts.sh
 │   ├── deploy-nas.sh
 │   ├── offsite-backup.sh
+│   ├── relocation-verify.sh
 │   ├── share.sh
 │   ├── sync-artifacts-daemon.sh
 │   └── sync-artifacts.sh
 ├── src/
 │   ├── heimdall-report.ts
 │   ├── index.ts
+│   ├── node-substrate.ts
+│   ├── relocation-verify.ts
 │   ├── secret-scan.ts
 │   ├── share-token.ts
 │   └── cli/
+│       ├── relocation-verify.ts
 │       ├── secret-scan.ts
 │       └── share.ts
 └── tests/
     ├── heimdall-report.test.ts
+    ├── relocation-verify.test.ts
     ├── secret-scan.test.ts
     ├── server.test.ts
-    └── share-token.test.ts
+    ├── share-token.test.ts
+    └── workload-contract.test.ts
 ```
 
 ## Design Decisions
