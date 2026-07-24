@@ -436,6 +436,20 @@ describe("runHook", () => {
     expect(checks.find((check) => check.check === "service")?.outcome).toBe("failed");
   });
 
+  it("distinguishes an unavailable systemd status check from an inactive unit", () => {
+    setProcessEnv("PATH", join(workDir, "missing-systemctl"));
+    const env = fullEnv();
+    const { output, exitCode, diagnostics } = runHook("preflight", env, { nowMs: clock(NOW) });
+    expect(exitCode).toBe(1);
+    const checks = output.checks as Array<{ check: string; outcome: string; reason?: string }>;
+    expect(checks.find((check) => check.check === "service")).toEqual({
+      check: "service",
+      outcome: "unavailable",
+      reason: "mimir.service status check unavailable",
+    });
+    expect(diagnostics.join("\n")).toContain("service (mimir.service) unavailable");
+  });
+
   it("records timed_out when a systemd status read exceeds the bounded timeout", () => {
     setProcessEnv("MOCK_SYSTEMCTL_SLEEP", "5");
     const env = fullEnv({ MIMIR_RELOCATION_TIMEOUT_SECONDS: "1" });
@@ -553,6 +567,42 @@ describe("runHook", () => {
     expect(second.exitCode).toBe(0);
     expect(second.output).toEqual(first.output);
     expect(second.diagnostics.join("\n")).toContain("REPLAY");
+  });
+
+  it("fails closed instead of replaying success after the invocation deadline", () => {
+    const env = fullEnv();
+    expect(runHook("preflight", env, { nowMs: clock(NOW) }).exitCode).toBe(0);
+
+    const replay = runHook("preflight", env, {
+      nowMs: clock(Date.parse("2026-07-23T13:00:00Z")),
+    });
+
+    expect(replay.exitCode).toBe(1);
+    expect(replay.output.error).toBe("replay_expired");
+    expect(replay.diagnostics.join("\n")).toContain("invocation deadline");
+    expect(replay.diagnostics.join("\n")).not.toContain("REPLAY:");
+  });
+
+  it("fails closed instead of replaying success after its evidence expires", () => {
+    const env = fullEnv();
+    for (const spec of EVIDENCE_CHECKS) {
+      env[spec.variable] = writeReceipt(
+        `short-lived-${spec.check}.json`,
+        receiptBody(spec.check, spec.status, {
+          valid_until: "2026-07-23T12:15:00Z",
+        }),
+      );
+    }
+    expect(runHook("preflight", env, { nowMs: clock(NOW) }).exitCode).toBe(0);
+
+    const replay = runHook("preflight", env, {
+      nowMs: clock(Date.parse("2026-07-23T12:20:00Z")),
+    });
+
+    expect(replay.exitCode).toBe(1);
+    expect(replay.output.error).toBe("replay_expired");
+    expect(replay.diagnostics.join("\n")).toContain("evidence is no longer fresh");
+    expect(replay.diagnostics.join("\n")).not.toContain("REPLAY:");
   });
 
   it("refuses the same idempotency key under a different attempt binding", () => {

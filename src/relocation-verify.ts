@@ -225,6 +225,14 @@ function systemdCheck(unit: string, timeoutMs: number): CheckOutcome {
   return result.status === 0 ? "success" : "failed";
 }
 
+function systemdFailureReason(unit: string, outcome: Exclude<CheckOutcome, "success">): string {
+  switch (outcome) {
+    case "failed": return `${unit} is not active`;
+    case "timed_out": return `${unit} status check timed out`;
+    case "unavailable": return `${unit} status check unavailable`;
+  }
+}
+
 function toExactUtc(ms: number): string { return new Date(Math.floor(ms / 1000) * 1000).toISOString().replace(/\.000Z$/, "Z"); }
 function deterministicResultId(hook: string, binding: Binding): string {
   return `r-${createHash("sha256").update([hook, ...Object.values(binding)].join("\n")).digest("hex").slice(0, 24)}`;
@@ -268,7 +276,13 @@ function validChecks(checks: JsonValue, outcome: JsonValue): checks is JsonValue
       if (Object.keys(entry).sort().join(",") !== "check,outcome") return false;
     } else if (
       Object.keys(entry).sort().join(",") !== "check,outcome,reason" || typeof entry.reason !== "string" ||
-      (system ? !["failed", "timed_out", "unavailable"].includes(String(entry.outcome)) || entry.reason !== `${SYSTEMD_CHECKS[index].unit} is not active` : entry.outcome !== "failed" || !RECEIPT_REASONS.has(entry.reason))
+      (system
+        ? !["failed", "timed_out", "unavailable"].includes(String(entry.outcome)) ||
+          entry.reason !== systemdFailureReason(
+            SYSTEMD_CHECKS[index].unit,
+            entry.outcome as Exclude<CheckOutcome, "success">,
+          )
+        : entry.outcome !== "failed" || !RECEIPT_REASONS.has(entry.reason))
     ) return false;
   }
   const outcomes = checks.map((entry) => (entry as Record<string, JsonValue>).outcome);
@@ -316,7 +330,7 @@ export function runHook(hook: ReadOnlyHook, env: NodeJS.ProcessEnv, options: Hoo
   try { schema = loadNormativeSchema(); } catch { return { output: errorOutput("schema_unavailable"), diagnostics: ["BLOCKED: normative schema unavailable"], exitCode: 2 }; }
   if (!ensureResultDirectory(resultDir, expectedUid)) return { output: errorOutput("result_directory_invalid"), diagnostics: ["BLOCKED: result directory is unsafe"], exitCode: 2 };
   const recordPath = join(resultDir, `${hook}-${binding.idempotency_key}.json`);
-  const replay = tryReplay(hook, binding, recordPath, diagnostics, expectedUid, schema);
+  const replay = tryReplay(hook, binding, recordPath, diagnostics, expectedUid, schema, env, nowFn);
   if (replay !== undefined) return replay;
 
   const checks: CheckResult[] = [];
@@ -331,7 +345,9 @@ export function runHook(hook: ReadOnlyHook, env: NodeJS.ProcessEnv, options: Hoo
     const gate = beforeCheck();
     if (gate === undefined) break;
     const checkOutcome = systemdCheck(unit, Math.min(timeoutSeconds * 1000, gate.remaining));
-    checks.push(checkOutcome === "success" ? { check, outcome: checkOutcome } : { check, outcome: checkOutcome, reason: `${unit} is not active` });
+    checks.push(checkOutcome === "success"
+      ? { check, outcome: checkOutcome }
+      : { check, outcome: checkOutcome, reason: systemdFailureReason(unit, checkOutcome) });
     diagnostics.push(checkOutcome === "success" ? `PASS: ${check} (${unit})` : `BLOCKED: ${check} (${unit}) ${checkOutcome}`);
   }
   if (!expired) for (const spec of EVIDENCE_CHECKS) {
@@ -359,7 +375,7 @@ export function runHook(hook: ReadOnlyHook, env: NodeJS.ProcessEnv, options: Hoo
     writeFileSync(recordPath, `${JSON.stringify(output, null, 2)}\n`, { flag: "wx", mode: 0o600 });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      const raced = tryReplay(hook, binding, recordPath, diagnostics, expectedUid, schema);
+      const raced = tryReplay(hook, binding, recordPath, diagnostics, expectedUid, schema, env, nowFn);
       if (raced !== undefined) return raced;
       return { output: errorOutput("idempotency_conflict"), diagnostics: [...diagnostics, "BLOCKED: idempotency record conflict"], exitCode: 2 };
     }
@@ -369,7 +385,16 @@ export function runHook(hook: ReadOnlyHook, env: NodeJS.ProcessEnv, options: Hoo
   return { output, diagnostics, exitCode: outcome === "success" ? 0 : 1 };
 }
 
-function tryReplay(hook: string, binding: Binding, recordPath: string, diagnostics: string[], uid: number | undefined, schema: Record<string, JsonValue>): HookRunResult | undefined {
+function tryReplay(
+  hook: string,
+  binding: Binding,
+  recordPath: string,
+  diagnostics: string[],
+  uid: number | undefined,
+  schema: Record<string, JsonValue>,
+  env: NodeJS.ProcessEnv,
+  nowFn: () => number,
+): HookRunResult | undefined {
   let exists = true;
   try { lstatSync(recordPath); } catch { exists = false; }
   if (!exists) return undefined;
@@ -380,6 +405,32 @@ function tryReplay(hook: string, binding: Binding, recordPath: string, diagnosti
   if (!isPlainObject(record) || !isPlainObject(record.hook_result)) return { output: errorOutput("result_record_invalid"), diagnostics: [...diagnostics, "BLOCKED: recorded idempotency result is invalid"], exitCode: 2 };
   if (!bindingMatchesRecord(hook, binding, record.hook_result)) return { output: errorOutput("binding_conflict"), diagnostics: [...diagnostics, "BLOCKED: idempotency key already used by a different attempt binding; refusing replay"], exitCode: 2 };
   if (!validReplayRecord(record, hook, binding, schema)) return { output: errorOutput("result_record_invalid"), diagnostics: [...diagnostics, "BLOCKED: recorded idempotency result is invalid"], exitCode: 2 };
+  if (record.hook_result.outcome === "success") {
+    const now = nowFn();
+    if (now >= Date.parse(binding.deadline)) {
+      return {
+        output: errorOutput("replay_expired"),
+        diagnostics: [...diagnostics, "BLOCKED: recorded success is past the invocation deadline; refusing replay"],
+        exitCode: 1,
+      };
+    }
+    for (const spec of EVIDENCE_CHECKS) {
+      const path = env[spec.variable];
+      const result = path === undefined || path === ""
+        ? { ok: false as const, reason: "not-provided" }
+        : readReceipt(path, spec, now, uid, binding);
+      if (!result.ok) {
+        return {
+          output: errorOutput("replay_expired"),
+          diagnostics: [
+            ...diagnostics,
+            `BLOCKED: recorded success evidence is no longer fresh (${spec.variable}: ${result.reason}); refusing replay`,
+          ],
+          exitCode: 1,
+        };
+      }
+    }
+  }
   diagnostics.push(`REPLAY: returning the recorded ${hook} result for this idempotency key`);
   return { output: record, diagnostics, exitCode: record.hook_result.outcome === "success" ? 0 : 1 };
 }

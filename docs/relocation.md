@@ -64,9 +64,11 @@ is checked before every check and caps each systemd status read; the configured
 must be an invoking-user-owned, non-symlink directory with mode `0700`, and
 records are mode `0600`. A replay requires the closed output shape, exact
 check set/outcomes/reasons, exact UTC `created_at`, a normative `hook_result`,
-and a deterministic content digest. Retrying the same idempotency key then
-replays the recorded result verbatim; the same key presented with different
-bindings is refused as a conflict.
+and a deterministic content digest. A recorded success is replayed verbatim
+only while its invocation deadline and every bound evidence receipt remain
+fresh; an expired deadline or receipt fails closed instead of returning stale
+success. The same key presented with different bindings is refused as a
+conflict. Recorded non-success results remain safe to replay.
 
 ## Evidence receipts
 
@@ -74,8 +76,8 @@ Evidence is consumed as closed typed JSON receipts written by the component
 that owns each fact. The private overlay supplies their locations through the
 `MIMIR_RELOCATION_*_EVIDENCE` variables; no default path is assumed. A receipt
 must be a regular non-symlink file (FIFOs and directories are rejected), owned
-by the invoking user, mode `0600`/`0400` (no group/other access), at most 4096
-bytes, and exactly this shape:
+by the invoking user, with no group/other permission bits (for example `0600`
+or `0400`), at most 4096 bytes, and exactly this shape:
 
 ```json
 {
