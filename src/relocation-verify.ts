@@ -120,7 +120,10 @@ export const EVIDENCE_CHECKS: ReadonlyArray<EvidenceSpec> = [
 const RECEIPT_KEYS = [
   "kind", "schema_version", "check", "status", ...RECEIPT_BINDING_FIELDS, "observed_at", "valid_until",
 ].sort();
-const OUTPUT_KEYS = ["kind", "schema_version", "hook_result", "checks", "created_at", "content_digest"].sort();
+const OUTPUT_KEYS = [
+  "kind", "schema_version", "hook_result", "checks", "created_at",
+  "evidence_valid_until", "content_digest",
+].sort();
 const CHECK_NAMES = ["service", "timer", ...EVIDENCE_CHECKS.map((spec) => spec.check)];
 const RECEIPT_REASONS = new Set([
   "not-provided", "unreadable", "symlink", "not-a-regular-file", "wrong-owner",
@@ -130,7 +133,9 @@ const RECEIPT_REASONS = new Set([
   "owner-check-unavailable",
 ]);
 
-export type ReceiptResult = { ok: true } | { ok: false; reason: string };
+export type ReceiptResult =
+  | { ok: true; validUntil: string }
+  | { ok: false; reason: string };
 type SafeRead = { ok: true; contents: string } | { ok: false; reason: string };
 
 interface PrivateFileStats {
@@ -210,7 +215,7 @@ export function readReceipt(
   if (validMs <= observedMs) return { ok: false, reason: "invalid-validity-window" };
   if (observedMs > nowMs) return { ok: false, reason: "future" };
   if (validMs <= nowMs) return { ok: false, reason: "stale" };
-  return { ok: true };
+  return { ok: true, validUntil };
 }
 
 export type CheckOutcome = "success" | "failed" | "timed_out" | "unavailable";
@@ -299,6 +304,13 @@ function validReplayRecord(record: JsonValue, hook: string, binding: Binding, sc
   if (!bindingMatchesRecord(hook, binding, record.hook_result)) return false;
   if (record.hook_result.result_id !== deterministicResultId(hook, binding)) return false;
   if (
+    record.hook_result.outcome === "success"
+      ? typeof record.evidence_valid_until !== "string" ||
+        !isExactUtc(record.evidence_valid_until) ||
+        Date.parse(record.evidence_valid_until) <= Date.parse(record.created_at)
+      : record.evidence_valid_until !== null
+  ) return false;
+  if (
     record.hook_result.outcome === "timed_out" &&
     Array.isArray(record.checks) &&
     record.checks.length === CHECK_NAMES.length &&
@@ -330,10 +342,11 @@ export function runHook(hook: ReadOnlyHook, env: NodeJS.ProcessEnv, options: Hoo
   try { schema = loadNormativeSchema(); } catch { return { output: errorOutput("schema_unavailable"), diagnostics: ["BLOCKED: normative schema unavailable"], exitCode: 2 }; }
   if (!ensureResultDirectory(resultDir, expectedUid)) return { output: errorOutput("result_directory_invalid"), diagnostics: ["BLOCKED: result directory is unsafe"], exitCode: 2 };
   const recordPath = join(resultDir, `${hook}-${binding.idempotency_key}.json`);
-  const replay = tryReplay(hook, binding, recordPath, diagnostics, expectedUid, schema, env, nowFn);
+  const replay = tryReplay(hook, binding, recordPath, diagnostics, expectedUid, schema, nowFn);
   if (replay !== undefined) return replay;
 
   const checks: CheckResult[] = [];
+  const evidenceValidity: Array<{ check: string; validUntilMs: number }> = [];
   let expired = false;
   const beforeCheck = (): { now: number; remaining: number } | undefined => {
     const now = nowFn();
@@ -356,11 +369,22 @@ export function runHook(hook: ReadOnlyHook, env: NodeJS.ProcessEnv, options: Hoo
     const path = env[spec.variable];
     const result = path === undefined || path === "" ? { ok: false as const, reason: "not-provided" } : readReceipt(path, spec, gate.now, expectedUid, binding);
     checks.push(result.ok ? { check: spec.check, outcome: "success" } : { check: spec.check, outcome: "failed", reason: result.reason });
+    if (result.ok) evidenceValidity.push({ check: spec.check, validUntilMs: Date.parse(result.validUntil) });
     diagnostics.push(result.ok ? `PASS: ${spec.check} receipt (${spec.variable})` : `BLOCKED: ${spec.check} receipt ${result.reason} (${spec.variable})`);
   }
-  if (!expired && nowFn() >= deadlineMs) {
+  const completedAt = nowFn();
+  if (!expired && completedAt >= deadlineMs) {
     expired = true;
     diagnostics.push("BLOCKED: invocation deadline passed while checks were running");
+  }
+  if (!expired) for (const evidence of evidenceValidity) {
+    if (evidence.validUntilMs > completedAt) continue;
+    const check = checks.find((entry) => entry.check === evidence.check);
+    if (check !== undefined) {
+      check.outcome = "failed";
+      check.reason = "stale";
+      diagnostics.push(`BLOCKED: ${evidence.check} receipt expired while checks were running`);
+    }
   }
   const outcome: "success" | "failed" | "timed_out" = expired || checks.some((check) => check.outcome === "timed_out") ? "timed_out" : checks.length === CHECK_NAMES.length && checks.every((check) => check.outcome === "success") ? "success" : "failed";
   const hookResult: Record<string, JsonValue> = {
@@ -369,13 +393,24 @@ export function runHook(hook: ReadOnlyHook, env: NodeJS.ProcessEnv, options: Hoo
     action: binding.action, deadline: binding.deadline, idempotency_key: binding.idempotency_key, outcome,
   };
   if (definitionErrors(schema, HOOK_RESULT_DEF, hookResult).length > 0) return { output: errorOutput("internal_schema_violation"), diagnostics: ["BLOCKED: internal error: emitted hook_result violates the normative schema"], exitCode: 2 };
-  const output: Record<string, JsonValue> = { kind: "mimir-relocation-hook-result", schema_version: "v1", hook_result: hookResult, checks: checks as unknown as JsonValue, created_at: toExactUtc(nowFn()), content_digest: "" };
+  const evidenceValidUntil = outcome === "success"
+    ? toExactUtc(Math.min(...evidenceValidity.map((entry) => entry.validUntilMs)))
+    : null;
+  const output: Record<string, JsonValue> = {
+    kind: "mimir-relocation-hook-result",
+    schema_version: "v1",
+    hook_result: hookResult,
+    checks: checks as unknown as JsonValue,
+    created_at: toExactUtc(completedAt),
+    evidence_valid_until: evidenceValidUntil,
+    content_digest: "",
+  };
   output.content_digest = resultContentDigest(output);
   try {
     writeFileSync(recordPath, `${JSON.stringify(output, null, 2)}\n`, { flag: "wx", mode: 0o600 });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      const raced = tryReplay(hook, binding, recordPath, diagnostics, expectedUid, schema, env, nowFn);
+      const raced = tryReplay(hook, binding, recordPath, diagnostics, expectedUid, schema, nowFn);
       if (raced !== undefined) return raced;
       return { output: errorOutput("idempotency_conflict"), diagnostics: [...diagnostics, "BLOCKED: idempotency record conflict"], exitCode: 2 };
     }
@@ -392,7 +427,6 @@ function tryReplay(
   diagnostics: string[],
   uid: number | undefined,
   schema: Record<string, JsonValue>,
-  env: NodeJS.ProcessEnv,
   nowFn: () => number,
 ): HookRunResult | undefined {
   let exists = true;
@@ -414,21 +448,12 @@ function tryReplay(
         exitCode: 1,
       };
     }
-    for (const spec of EVIDENCE_CHECKS) {
-      const path = env[spec.variable];
-      const result = path === undefined || path === ""
-        ? { ok: false as const, reason: "not-provided" }
-        : readReceipt(path, spec, now, uid, binding);
-      if (!result.ok) {
-        return {
-          output: errorOutput("replay_expired"),
-          diagnostics: [
-            ...diagnostics,
-            `BLOCKED: recorded success evidence is no longer fresh (${spec.variable}: ${result.reason}); refusing replay`,
-          ],
-          exitCode: 1,
-        };
-      }
+    if (now >= Date.parse(record.evidence_valid_until as string)) {
+      return {
+        output: errorOutput("replay_expired"),
+        diagnostics: [...diagnostics, "BLOCKED: recorded success evidence is no longer fresh; refusing replay"],
+        exitCode: 1,
+      };
     }
   }
   diagnostics.push(`REPLAY: returning the recorded ${hook} result for this idempotency key`);

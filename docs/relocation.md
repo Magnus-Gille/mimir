@@ -64,11 +64,13 @@ is checked before every check and caps each systemd status read; the configured
 must be an invoking-user-owned, non-symlink directory with mode `0700`, and
 records are mode `0600`. A replay requires the closed output shape, exact
 check set/outcomes/reasons, exact UTC `created_at`, a normative `hook_result`,
-and a deterministic content digest. A recorded success is replayed verbatim
-only while its invocation deadline and every bound evidence receipt remain
-fresh; an expired deadline or receipt fails closed instead of returning stale
-success. The same key presented with different bindings is refused as a
-conflict. Recorded non-success results remain safe to replay.
+and a deterministic content digest. A successful record captures the earliest
+`valid_until` of the evidence that produced it inside that digest. It is
+replayed verbatim only while both that bound evidence window and the invocation
+deadline remain fresh; expiry fails closed even if a receipt file is later
+replaced with a longer-lived one. The same key presented with different
+bindings is refused as a conflict. Recorded non-success results remain safe to
+replay.
 
 ## Evidence receipts
 

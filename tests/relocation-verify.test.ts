@@ -157,12 +157,18 @@ afterEach(() => {
 describe("readReceipt", () => {
   it("accepts a fresh, closed, owner-only receipt", () => {
     const path = writeReceipt("ok.json", receiptBody("tunnel", "tunnel-v1:connected"));
-    expect(readReceipt(path, TUNNEL, NOW, UID)).toEqual({ ok: true });
+    expect(readReceipt(path, TUNNEL, NOW, UID)).toEqual({
+      ok: true,
+      validUntil: "2026-07-23T13:00:00Z",
+    });
   });
 
   it("accepts mode 0400", () => {
     const path = writeReceipt("ro.json", receiptBody("tunnel", "tunnel-v1:connected"), 0o400);
-    expect(readReceipt(path, TUNNEL, NOW, UID)).toEqual({ ok: true });
+    expect(readReceipt(path, TUNNEL, NOW, UID)).toEqual({
+      ok: true,
+      validUntil: "2026-07-23T13:00:00Z",
+    });
   });
 
   it("rejects a missing file without leaking the path", () => {
@@ -593,7 +599,20 @@ describe("runHook", () => {
         }),
       );
     }
-    expect(runHook("preflight", env, { nowMs: clock(NOW) }).exitCode).toBe(0);
+    const first = runHook("preflight", env, { nowMs: clock(NOW) });
+    expect(first.exitCode).toBe(0);
+    expect(first.output.evidence_valid_until).toBe("2026-07-23T12:15:00Z");
+
+    // Replacing the files with later-expiring receipts must not extend the
+    // validity of the result that was created from the original evidence.
+    for (const spec of EVIDENCE_CHECKS) {
+      writeFileSync(
+        env[spec.variable] as string,
+        JSON.stringify(receiptBody(spec.check, spec.status, {
+          valid_until: "2026-07-23T14:00:00Z",
+        })),
+      );
+    }
 
     const replay = runHook("preflight", env, {
       nowMs: clock(Date.parse("2026-07-23T12:20:00Z")),
