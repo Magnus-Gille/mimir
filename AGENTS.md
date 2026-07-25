@@ -125,10 +125,10 @@ command itself has an indeterminate outcome. It prints a clean-worktree redeploy
 using the captured rollback target when available. The remote `.env` is enforced as mode
 `0600` without displaying its values.
 
-The generic Linux service expects `.env` at `/home/mimir/mimir-server/.env`:
+The checked-in Linux service expects `.env` at `/home/magnus/mimir-server/.env`:
 ```
 MIMIR_API_KEY=<generate with: openssl rand -hex 32>
-MIMIR_ROOT_DIR=/home/mimir/mimir
+MIMIR_ROOT_DIR=/home/magnus/mimir
 MIMIR_ALLOWED_HOSTS=files.example.com
 MIMIR_TRUST_PROXY=loopback
 ```
