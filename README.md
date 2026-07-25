@@ -124,20 +124,20 @@ used by rate limiting.
 
 ## Deployment
 
-The included Linux service template runs as a dedicated `mimir` user from
-`/home/mimir/mimir-server`, serving `/home/mimir/mimir`. Deploy from this repo:
+The included Linux service template runs as `magnus` from
+`/home/magnus/mimir-server`, serving `/home/magnus/mimir`. Deploy from this repo:
 
 ```bash
 ./scripts/deploy-nas.sh [hostname-or-ip]
 ```
 
 The target host is required; pass it explicitly or set `MIMIR_NAS_HOST`. The host
-needs `/home/mimir/mimir-server/.env` with at
+needs `/home/magnus/mimir-server/.env` with at
 least:
 
 ```bash
 MIMIR_API_KEY=<generate with: openssl rand -hex 32>
-MIMIR_ROOT_DIR=/home/mimir/mimir
+MIMIR_ROOT_DIR=/home/magnus/mimir
 MIMIR_ALLOWED_HOSTS=files.example.com
 MIMIR_TRUST_PROXY=loopback
 ```
@@ -156,7 +156,7 @@ The authoritative runtime file is the deployed
 `/home/<deployment-user>/mimir-server/.env`, not a development checkout's
 `.env`.
 
-The deployment account defaults to `mimir`. Set `MIMIR_DEPLOY_USER` locally to
+The deployment account defaults to `magnus`. Set `MIMIR_DEPLOY_USER` locally to
 use another Linux account; the deploy script renders all installed systemd paths
 and `User=` directives for that account.
 
@@ -175,7 +175,7 @@ The remote preflight warns when Heimdall reporting is intentionally disabled
 and rejects a partial Heimdall pair before the build or any remote mutation.
 
 `mimir.service` runs the HTTP server with `ProtectSystem=strict`,
-`ReadOnlyPaths=/home/mimir/mimir`, and write access only to the server directory.
+`ReadOnlyPaths=/home/magnus/mimir`, and write access only to the server directory.
 
 ### Reverse proxy or tunnel
 

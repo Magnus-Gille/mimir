@@ -6,7 +6,7 @@ set -euo pipefail
 
 NAS_HOST="${1:-${MIMIR_NAS_HOST:-}}"
 [ -n "$NAS_HOST" ] || { echo "ERROR: pass a deployment host or set MIMIR_NAS_HOST." >&2; exit 1; }
-DEPLOY_USER="${MIMIR_DEPLOY_USER:-mimir}"
+DEPLOY_USER="${MIMIR_DEPLOY_USER:-magnus}"
 [[ "$DEPLOY_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || {
   echo "ERROR: MIMIR_DEPLOY_USER must be a Linux account name." >&2
   exit 1
@@ -117,7 +117,7 @@ echo "==> Installing dependencies on NAS Pi..."
 ssh "$REMOTE" "cd '$REMOTE_DIR' && npm ci --omit=dev"
 
 echo "==> Refreshing systemd units..."
-ssh "$REMOTE" "set -eu; unit_tmp=\$(mktemp -d /tmp/mimir-units.XXXXXX); trap 'rm -rf \"\$unit_tmp\"' EXIT; for unit in mimir.service mimir-offsite.service mimir-offsite.timer; do sed -e 's|^User=mimir$|User=$DEPLOY_USER|' -e 's|/home/mimir|/home/$DEPLOY_USER|g' '$REMOTE_DIR/'\"\$unit\" > \"\$unit_tmp/\$unit\"; done; sudo install -m 0644 \"\$unit_tmp/mimir.service\" \"\$unit_tmp/mimir-offsite.service\" \"\$unit_tmp/mimir-offsite.timer\" /etc/systemd/system/; sudo systemctl daemon-reload; sudo systemctl enable mimir; if sudo systemctl is-enabled --quiet mimir-offsite.timer; then sudo systemctl restart mimir-offsite.timer; fi"
+ssh "$REMOTE" "set -eu; unit_tmp=\$(mktemp -d /tmp/mimir-units.XXXXXX); trap 'rm -rf \"\$unit_tmp\"' EXIT; for unit in mimir.service mimir-offsite.service mimir-offsite.timer; do bash '$REMOTE_DIR/scripts/render-systemd-unit.sh' '$DEPLOY_USER' '$REMOTE_DIR/'\"\$unit\" > \"\$unit_tmp/\$unit\"; done; sudo install -m 0644 \"\$unit_tmp/mimir.service\" \"\$unit_tmp/mimir-offsite.service\" \"\$unit_tmp/mimir-offsite.timer\" /etc/systemd/system/; sudo systemctl daemon-reload; sudo systemctl enable mimir; if sudo systemctl is-enabled --quiet mimir-offsite.timer; then sudo systemctl restart mimir-offsite.timer; fi"
 
 echo "==> Checking artifacts directory..."
 ssh "$REMOTE" "mkdir -p '$REMOTE_ROOT' && echo '  $REMOTE_ROOT exists'"
