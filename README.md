@@ -92,6 +92,7 @@ Heimdall reporting helpers.
 | `MIMIR_FRESHNESS_PUBLISHER_USER` | — (required by installer) | Actual OS account that runs the backup/sync freshness publisher |
 | `MIMIR_REMOTE_FRESHNESS_DIR` | `/var/lib/mimir/heimdall-freshness` | Remote sync publisher's freshness surface (sync daemon) |
 | `MIMIR_REMOTE_FRESHNESS_PUBLISHER` | — | Deployment-specific remote command allowed to publish sync freshness when enabled |
+| `MIMIR_REMOTE_SYNC_STAMP` | `/home/mimir/mimir-sync.stamp` | Legacy sync heartbeat retained until the new publisher is configured |
 | `MIMIR_SHARE_SECRET` | - | HMAC secret that enables `/share/:token` |
 | `MIMIR_BASE_URL` | `http://127.0.0.1:3031` | Base URL used by the share CLI |
 | `MIMIR_QUARANTINE_DIR` | `<target-dir>-quarantine` | Secret-scan quarantine directory |

@@ -271,6 +271,21 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
   });
 });
 
+describe("sync freshness compatibility", () => {
+  it("keeps the legacy heartbeat until the new publisher is explicitly configured", () => {
+    const legacy = runSyncScript("sync-artifacts-daemon.sh");
+    expect(legacy.result.status, legacy.result.stderr).toBe(0);
+    expect(legacy.invocations).toContain("date +%s > '/home/mimir/mimir-sync.stamp'");
+
+    const freshness = runSyncScript("sync-artifacts-daemon.sh", {
+      MIMIR_REMOTE_FRESHNESS_PUBLISHER: "/usr/local/libexec/mimir-publish-freshness",
+    });
+    expect(freshness.result.status, freshness.result.stderr).toBe(0);
+    expect(freshness.invocations).toContain("'/usr/local/libexec/mimir-publish-freshness' sync 'success'");
+    expect(freshness.invocations).not.toContain("date +%s >");
+  });
+});
+
 describe("local backup script", () => {
   it("keeps the default log outside the deployed code tree", () => {
     const root = tempDir();

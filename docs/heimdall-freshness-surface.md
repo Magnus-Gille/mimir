@@ -71,8 +71,9 @@ and attempts to publish `error` when a mirror fails. Its remote SSH account must
 the configured publisher (or otherwise have only the narrowly delegated ability to run
 the publisher); it must never be the probe identity. Set
 `MIMIR_REMOTE_FRESHNESS_PUBLISHER` to that deployment's publisher script path when
-enabling sync evidence; it has no fixed default. Until the directory is installed,
-both jobs keep their historical behavior and publish nothing.
+enabling sync evidence; it has no fixed default. Until it is configured, the sync
+daemon preserves its existing `MIMIR_REMOTE_SYNC_STAMP` heartbeat. Once configured,
+it writes only the new metadata record, avoiding conflicting freshness signals.
 
 To remove the surface without touching archive data or any unexpected state:
 

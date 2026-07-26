@@ -16,6 +16,7 @@ NAS="${MIMIR_NAS:-${NAS_HOST:+mimir@$NAS_HOST}}"
 LOCAL_ROOT="${MIMIR_LOCAL_ROOT:-$HOME/mimir}"
 REMOTE_ROOT="${MIMIR_REMOTE_ROOT:-/home/mimir/mimir}"
 REMOTE_INBOX="${MIMIR_REMOTE_INBOX:-/home/mimir/mimir-inbox}"
+SYNC_STAMP="${MIMIR_REMOTE_SYNC_STAMP:-/home/mimir/mimir-sync.stamp}"
 REMOTE_FRESHNESS_DIR="${MIMIR_REMOTE_FRESHNESS_DIR:-/var/lib/mimir/heimdall-freshness}"
 REMOTE_FRESHNESS_PUBLISHER="${MIMIR_REMOTE_FRESHNESS_PUBLISHER:-}"
 LOCAL="$LOCAL_ROOT/"
@@ -36,12 +37,14 @@ quote_remote_sh() {
 }
 
 publish_sync_freshness() {
-  # The remote command is deliberately a fixed publisher, not a write to a
-  # home-directory stamp. If the installer has not created its state directory,
-  # this is a no-op; once present, a publication failure is fail-loud.
   # A deployment-specific publisher path is intentionally required once this
   # optional surface is enabled; no account or code-tree location is assumed.
-  [ -n "$REMOTE_FRESHNESS_PUBLISHER" ] || return 0
+  # Preserve the old heartbeat until that opt-in is explicitly configured.
+  if [ -z "$REMOTE_FRESHNESS_PUBLISHER" ]; then
+    [ "$1" = success ] || return 0
+    ssh -o ConnectTimeout=5 -o BatchMode=yes "$NAS" "date +%s > '$SYNC_STAMP'" 2>/dev/null || true
+    return 0
+  fi
   local remote_dir remote_publisher state
   remote_dir=$(quote_remote_sh "$REMOTE_FRESHNESS_DIR")
   remote_publisher=$(quote_remote_sh "$REMOTE_FRESHNESS_PUBLISHER")
