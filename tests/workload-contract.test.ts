@@ -1,11 +1,14 @@
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   GRIMNIR_FIXTURE_SET_SHA256,
+  GRIMNIR_NORMATIVE_VALIDATOR_SHA256,
   GRIMNIR_SCHEMA_SHA256,
   GRIMNIR_SOURCE_REVISION,
+  assertVendoredContractArtifactsPinned,
   checkSchemaSupported,
   loadConsumerFixtureSet,
   loadNormativeSchema,
@@ -24,6 +27,11 @@ const provenance = JSON.parse(
 const schema = loadNormativeSchema();
 const clone = (): Record<string, JsonValue> => structuredClone(manifest);
 
+const canonicalValidator = resolve(
+  root,
+  "docs/vendor/grimnir/tests/scripts/validate-node-substrate-contract.mjs",
+);
+
 describe("vendored Grimnir contract provenance", () => {
   it("records the exact immutable source revision and digests", () => {
     expect(provenance).toEqual({
@@ -33,18 +41,37 @@ describe("vendored Grimnir contract provenance", () => {
       schema_sha256: GRIMNIR_SCHEMA_SHA256,
       fixture_set_path: "tests/fixtures/node-substrate-contract/consumer-fixture-set.json",
       fixture_set_sha256: GRIMNIR_FIXTURE_SET_SHA256,
-      vendored_schema_path: "docs/vendor/grimnir/node-substrate-contract-v1.schema.json",
-      vendored_fixture_set_path: "docs/vendor/grimnir/consumer-fixture-set.json",
+      vendored_schema_path: "docs/vendor/grimnir/docs/node-substrate-contract-v1.schema.json",
+      vendored_fixture_set_path: "docs/vendor/grimnir/tests/fixtures/node-substrate-contract/consumer-fixture-set.json",
+      normative_validator_path: "tests/scripts/validate-node-substrate-contract.mjs",
+      normative_validator_sha256: GRIMNIR_NORMATIVE_VALIDATOR_SHA256,
+      vendored_normative_validator_path:
+        "docs/vendor/grimnir/tests/scripts/validate-node-substrate-contract.mjs",
+      shared_fixture_sha256: {
+        "positive.json": "42f34fe1c576648240cef0f7f427073e9f39c11f8bfe0cf3f2ea74899bfee234",
+        "partial-drain.json": "b596e56fb60a0710e1653c1a7935e15a98baf818b7ce6c56421a84cfbdd21d7b",
+        "partial-substrate.json": "3a26d123bfcb98adbd8f8f81c2736b38d485a1ac2665deb1770636f219ba6d07",
+        "negative.json": "e67d9233a556aa6da9728e9c07ae95ac3b1bc9abe9a4ac8ad817158829b8ead5",
+      },
       interpretation: "No consumer-specific overlay is present.",
     });
     expect(GRIMNIR_SOURCE_REVISION).toBe("6d54d49c91612eae7dce5f66286d801900c38c35");
   });
 
   it("detects drift between the vendored artifacts and the pinned digests", () => {
+    expect(() => assertVendoredContractArtifactsPinned()).not.toThrow();
     expect(sha256Hex(read(provenance.vendored_schema_path))).toBe(provenance.schema_sha256);
     expect(sha256Hex(read(provenance.vendored_fixture_set_path))).toBe(
       provenance.fixture_set_sha256,
     );
+    expect(sha256Hex(read(provenance.vendored_normative_validator_path))).toBe(
+      provenance.normative_validator_sha256,
+    );
+    for (const [name, digest] of Object.entries(provenance.shared_fixture_sha256)) {
+      expect(
+        sha256Hex(read(`docs/vendor/grimnir/tests/fixtures/node-substrate-contract/${name}`)),
+      ).toBe(digest);
+    }
   });
 
   it("fails closed when a vendored artifact does not match its pin", () => {
@@ -69,6 +96,17 @@ describe("vendored Grimnir contract provenance", () => {
 
   it("uses only the JSON Schema subset the local evaluator implements", () => {
     expect(() => checkSchemaSupported(schema)).not.toThrow();
+  });
+
+  it("executes the unchanged canonical positive, partial, and semantic-negative suite", () => {
+    const result = spawnSync(process.execPath, [canonicalValidator], {
+      cwd: root,
+      encoding: "utf8",
+    });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain(
+      "Node/substrate v1 normative schema plus 10 hermetic fixture scenarios validated.",
+    );
   });
 });
 
