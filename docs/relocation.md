@@ -7,15 +7,14 @@ The versioned requirement record is [workload-requirement-v1.json](workload-requ
 
 ## Normative schema and provenance
 
-The exact Grimnir node/substrate v1 schema and the shared consumer fixture
-manifest are vendored byte-for-byte under
+The exact Grimnir node/substrate v1 schema, shared consumer fixtures, and
+normative validator are vendored byte-for-byte under
 [`docs/vendor/grimnir/`](vendor/grimnir/) from the immutable source revision in
 [workload-requirement-v1.provenance.json](workload-requirement-v1.provenance.json).
-`src/node-substrate.ts` refuses to load a vendored artifact whose SHA-256
-digest drifts from those pins, and the test suite validates the Mimir
-workload manifest against the vendored normative schema rather than
-hand-asserting fields. Mimir does not extend or reinterpret decision-driving
-shared fields.
+`src/node-substrate.ts` refuses to load the schema if any artifact's SHA-256
+digest drifts from those pins. The test suite executes the unchanged canonical
+validator, including its positive, partial, and semantic-negative scenarios.
+Mimir does not extend or reinterpret decision-driving shared fields.
 
 ## Stable requirements
 

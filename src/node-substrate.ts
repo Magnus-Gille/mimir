@@ -12,6 +12,7 @@
  */
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const GRIMNIR_SOURCE_REPOSITORY = "Magnus-Gille/grimnir";
@@ -23,13 +24,39 @@ export const GRIMNIR_FIXTURE_SET_SOURCE_PATH =
   "tests/fixtures/node-substrate-contract/consumer-fixture-set.json";
 export const GRIMNIR_FIXTURE_SET_SHA256 =
   "355481f2b3866840795ba18033077d6f36487d1a447b36c323384cf7837c5fcb";
+export const GRIMNIR_NORMATIVE_VALIDATOR_SOURCE_PATH =
+  "tests/scripts/validate-node-substrate-contract.mjs";
+export const GRIMNIR_NORMATIVE_VALIDATOR_SHA256 =
+  "526df55086a5e2049dd5ad95c556710c01e54d6c22146cb9b9dd1e4f5bd55c9a";
+
+export const VENDORED_GRIMNIR_ROOT = fileURLToPath(
+  new URL("../docs/vendor/grimnir", import.meta.url),
+);
 
 export const VENDORED_SCHEMA_PATH = fileURLToPath(
-  new URL("../docs/vendor/grimnir/node-substrate-contract-v1.schema.json", import.meta.url),
+  new URL("../docs/vendor/grimnir/docs/node-substrate-contract-v1.schema.json", import.meta.url),
 );
 export const VENDORED_FIXTURE_SET_PATH = fileURLToPath(
-  new URL("../docs/vendor/grimnir/consumer-fixture-set.json", import.meta.url),
+  new URL(
+    "../docs/vendor/grimnir/tests/fixtures/node-substrate-contract/consumer-fixture-set.json",
+    import.meta.url,
+  ),
 );
+
+/** Every byte-exact source artifact required by the canonical validator. */
+export const VENDORED_ARTIFACT_SHA256: Readonly<Record<string, string>> = {
+  "docs/node-substrate-contract-v1.schema.json": GRIMNIR_SCHEMA_SHA256,
+  "tests/scripts/validate-node-substrate-contract.mjs": GRIMNIR_NORMATIVE_VALIDATOR_SHA256,
+  "tests/fixtures/node-substrate-contract/consumer-fixture-set.json": GRIMNIR_FIXTURE_SET_SHA256,
+  "tests/fixtures/node-substrate-contract/positive.json":
+    "42f34fe1c576648240cef0f7f427073e9f39c11f8bfe0cf3f2ea74899bfee234",
+  "tests/fixtures/node-substrate-contract/partial-drain.json":
+    "b596e56fb60a0710e1653c1a7935e15a98baf818b7ce6c56421a84cfbdd21d7b",
+  "tests/fixtures/node-substrate-contract/partial-substrate.json":
+    "3a26d123bfcb98adbd8f8f81c2736b38d485a1ac2665deb1770636f219ba6d07",
+  "tests/fixtures/node-substrate-contract/negative.json":
+    "e67d9233a556aa6da9728e9c07ae95ac3b1bc9abe9a4ac8ad817158829b8ead5",
+};
 
 export type JsonValue =
   | null
@@ -56,13 +83,33 @@ export function loadVendoredJson(path: string, expectedSha256: string): JsonValu
   return JSON.parse(bytes.toString("utf8")) as JsonValue;
 }
 
+/**
+ * Verify the entire canonical suite before using any contract artifact.
+ * A modified validator or fixture is as unsafe as a modified schema, so all
+ * vendored bytes are a single fail-closed trust boundary.
+ */
+export function assertVendoredContractArtifactsPinned(): void {
+  for (const [sourcePath, expectedSha256] of Object.entries(VENDORED_ARTIFACT_SHA256)) {
+    const path = resolve(VENDORED_GRIMNIR_ROOT, sourcePath);
+    const actual = sha256Hex(readFileSync(path));
+    if (actual !== expectedSha256) {
+      throw new Error(
+        `vendored contract artifact drifted from its pinned revision ` +
+          `(${sourcePath}: expected sha256:${expectedSha256}, got sha256:${actual})`,
+      );
+    }
+  }
+}
+
 export function loadNormativeSchema(): Record<string, JsonValue> {
+  assertVendoredContractArtifactsPinned();
   const schema = loadVendoredJson(VENDORED_SCHEMA_PATH, GRIMNIR_SCHEMA_SHA256);
   if (!isPlainObject(schema)) throw new Error("vendored schema is not an object");
   return schema;
 }
 
 export function loadConsumerFixtureSet(): Record<string, JsonValue> {
+  assertVendoredContractArtifactsPinned();
   const manifest = loadVendoredJson(VENDORED_FIXTURE_SET_PATH, GRIMNIR_FIXTURE_SET_SHA256);
   if (!isPlainObject(manifest)) throw new Error("vendored fixture manifest is not an object");
   return manifest;

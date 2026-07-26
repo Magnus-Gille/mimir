@@ -1,0 +1,8 @@
+{
+  "records": [
+    {
+      "kind": "lifecycle-result", "schema_version": "v1", "result_id": "result-sub-001", "attempt_id": "attempt-sub-001", "plan_id": "plan-sub-001", "plan_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "desired_revision": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "observation_evidence_id": "obs-sub-001", "action": "relocate", "deadline": "2026-07-23T13:30:00Z", "idempotency_key": "idem-sub-001", "phase": "substrate_rollback", "outcome": "blocked", "drift": "planned", "created_at": "2026-07-23T13:10:00Z",
+      "hook_results": [], "substrate": { "outcome": "partial", "rollback": "verified", "pre_state_evidence_id": "obs-sub-001" }, "extensions": []
+    }
+  ]
+}

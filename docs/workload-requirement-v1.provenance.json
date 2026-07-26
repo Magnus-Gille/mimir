@@ -5,7 +5,16 @@
   "schema_sha256": "9a69f1b23499cd6e70fdaa80ee57bf983e7e5b288882e0cf2b0f01f10824fbbe",
   "fixture_set_path": "tests/fixtures/node-substrate-contract/consumer-fixture-set.json",
   "fixture_set_sha256": "355481f2b3866840795ba18033077d6f36487d1a447b36c323384cf7837c5fcb",
-  "vendored_schema_path": "docs/vendor/grimnir/node-substrate-contract-v1.schema.json",
-  "vendored_fixture_set_path": "docs/vendor/grimnir/consumer-fixture-set.json",
+  "vendored_schema_path": "docs/vendor/grimnir/docs/node-substrate-contract-v1.schema.json",
+  "vendored_fixture_set_path": "docs/vendor/grimnir/tests/fixtures/node-substrate-contract/consumer-fixture-set.json",
+  "normative_validator_path": "tests/scripts/validate-node-substrate-contract.mjs",
+  "normative_validator_sha256": "526df55086a5e2049dd5ad95c556710c01e54d6c22146cb9b9dd1e4f5bd55c9a",
+  "vendored_normative_validator_path": "docs/vendor/grimnir/tests/scripts/validate-node-substrate-contract.mjs",
+  "shared_fixture_sha256": {
+    "positive.json": "42f34fe1c576648240cef0f7f427073e9f39c11f8bfe0cf3f2ea74899bfee234",
+    "partial-drain.json": "b596e56fb60a0710e1653c1a7935e15a98baf818b7ce6c56421a84cfbdd21d7b",
+    "partial-substrate.json": "3a26d123bfcb98adbd8f8f81c2736b38d485a1ac2665deb1770636f219ba6d07",
+    "negative.json": "e67d9233a556aa6da9728e9c07ae95ac3b1bc9abe9a4ac8ad817158829b8ead5"
+  },
   "interpretation": "No consumer-specific overlay is present."
 }
