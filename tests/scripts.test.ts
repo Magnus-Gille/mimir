@@ -256,6 +256,18 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
     expect(result.status).not.toBe(0);
     expect(invocations).not.toContain("--max-delete=");
   });
+
+  it("quotes freshness publisher configuration before handing it to the remote shell", () => {
+    const { result, invocations } = runSyncScript(script, {
+      MIMIR_REMOTE_FRESHNESS_DIR: "/state'; touch should-not-run; #",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    if (script === "sync-artifacts-daemon.sh") {
+      expect(invocations).toContain("[ -d '/state'\\''; touch should-not-run; #' ]");
+    } else {
+      expect(invocations).not.toContain("publish-freshness");
+    }
+  });
 });
 
 describe("local backup script", () => {

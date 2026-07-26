@@ -16,7 +16,8 @@ NAS="${MIMIR_NAS:-${NAS_HOST:+mimir@$NAS_HOST}}"
 LOCAL_ROOT="${MIMIR_LOCAL_ROOT:-$HOME/mimir}"
 REMOTE_ROOT="${MIMIR_REMOTE_ROOT:-/home/mimir/mimir}"
 REMOTE_INBOX="${MIMIR_REMOTE_INBOX:-/home/mimir/mimir-inbox}"
-SYNC_STAMP="${MIMIR_REMOTE_SYNC_STAMP:-/home/mimir/mimir-sync.stamp}"
+REMOTE_FRESHNESS_DIR="${MIMIR_REMOTE_FRESHNESS_DIR:-/var/lib/mimir/heimdall-freshness}"
+REMOTE_FRESHNESS_PUBLISHER="${MIMIR_REMOTE_FRESHNESS_PUBLISHER:-/home/mimir/mimir-server/scripts/publish-freshness.sh}"
 LOCAL="$LOCAL_ROOT/"
 REMOTE="$NAS:$REMOTE_ROOT/"
 INBOX="$NAS:$REMOTE_INBOX/"
@@ -25,6 +26,26 @@ PENDING="$STATE_DIR/import-pending"
 QUARANTINE="${MIMIR_QUARANTINE_DIR:-${LOCAL%/}-quarantine}"
 MAX_DELETE="${MIMIR_SYNC_MAX_DELETE:-1000}"
 MAX_DELETE_PCT="${MIMIR_SYNC_MAX_DELETE_PCT:-20}"
+
+quote_remote_sh() {
+  # SSH hands this string to a remote shell. Quote configuration values so an
+  # owner-overlay value cannot change the command structure.
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+publish_sync_freshness() {
+  # The remote command is deliberately a fixed publisher, not a write to a
+  # home-directory stamp. If the installer has not created its state directory,
+  # this is a no-op; once present, a publication failure is fail-loud.
+  local remote_dir remote_publisher state
+  remote_dir=$(quote_remote_sh "$REMOTE_FRESHNESS_DIR")
+  remote_publisher=$(quote_remote_sh "$REMOTE_FRESHNESS_PUBLISHER")
+  state=$(quote_remote_sh "$1")
+  ssh -o ConnectTimeout=5 -o BatchMode=yes "$NAS" \
+    "if [ -d $remote_dir ]; then $remote_publisher sync $state; fi"
+}
 
 case "$MAX_DELETE" in ''|*[!0-9]*) echo "ERROR: MIMIR_SYNC_MAX_DELETE must be a positive integer." >&2; exit 1;; esac
 [ "$MAX_DELETE" -ge 1 ] || { echo "ERROR: MIMIR_SYNC_MAX_DELETE must be at least 1." >&2; exit 1; }
@@ -102,14 +123,16 @@ if [ "$DELETES" -gt 0 ]; then
   fi
 fi
 if rsync -a --delete --max-delete="$MAX_DELETE" "$LOCAL" "$REMOTE"; then
-  # Heartbeat for Heimdall's sync-freshness probe. Written OUTSIDE the mirrored
-  # tree so the --delete above can't remove it. Records when the sync last ran
-  # successfully (every 30 min) rather than newest-content age — which avoids
-  # false "Backup stale" criticals when no new files have been created lately.
-  ssh -o ConnectTimeout=5 -o BatchMode=yes "$NAS" "date +%s > '$SYNC_STAMP'" 2>/dev/null || true
+  # Publishes only a normalized UTC timestamp and state, outside the mirrored
+  # tree. A restricted probe cannot traverse the archive or read artifacts.
+  if ! publish_sync_freshness success; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Sync completed but freshness publication FAILED"
+    exit 1
+  fi
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] Sync complete"
 else
   RC=$?
+  publish_sync_freshness error || true
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] Push FAILED (rsync exit $RC)"
   exit "$RC"
 fi
