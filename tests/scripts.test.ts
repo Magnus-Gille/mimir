@@ -256,6 +256,34 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
     expect(result.status).not.toBe(0);
     expect(invocations).not.toContain("--max-delete=");
   });
+
+  it("quotes freshness publisher configuration before handing it to the remote shell", () => {
+    const { result, invocations } = runSyncScript(script, {
+      MIMIR_REMOTE_FRESHNESS_DIR: "/state'; touch should-not-run; #",
+      MIMIR_REMOTE_FRESHNESS_PUBLISHER: "/usr/local/libexec/mimir-publish-freshness",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    if (script === "sync-artifacts-daemon.sh") {
+      expect(invocations).toContain("[ -d '/state'\\''; touch should-not-run; #' ]");
+    } else {
+      expect(invocations).not.toContain("publish-freshness");
+    }
+  });
+});
+
+describe("sync freshness compatibility", () => {
+  it("keeps the legacy heartbeat until the new publisher is explicitly configured", () => {
+    const legacy = runSyncScript("sync-artifacts-daemon.sh");
+    expect(legacy.result.status, legacy.result.stderr).toBe(0);
+    expect(legacy.invocations).toContain("date +%s > '/home/mimir/mimir-sync.stamp'");
+
+    const freshness = runSyncScript("sync-artifacts-daemon.sh", {
+      MIMIR_REMOTE_FRESHNESS_PUBLISHER: "/usr/local/libexec/mimir-publish-freshness",
+    });
+    expect(freshness.result.status, freshness.result.stderr).toBe(0);
+    expect(freshness.invocations).toContain("'/usr/local/libexec/mimir-publish-freshness' sync 'success'");
+    expect(freshness.invocations).not.toContain("date +%s >");
+  });
 });
 
 describe("local backup script", () => {

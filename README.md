@@ -88,6 +88,11 @@ Heimdall reporting helpers.
 | `MIMIR_SYNC_MAX_DELETE_PCT` | `20` | Abort sync above this share of the actual remote population |
 | `MIMIR_SYNC_STATE_DIR` | `$XDG_STATE_HOME/mimir` or `~/.local/state/mimir` | Durable out-of-tree staging for unverified inbox imports |
 | `MIMIR_BACKUP_LOG` | `$XDG_STATE_HOME/mimir/backup.log` or `~/.local/state/mimir/backup.log` | Local backup log, kept outside the deployed code tree |
+| `MIMIR_FRESHNESS_DIR` | `/var/lib/mimir/heimdall-freshness` | Installed metadata-only backup/sync freshness surface (optional) |
+| `MIMIR_FRESHNESS_PUBLISHER_USER` | — (required by installer) | Actual OS account that runs the backup/sync freshness publisher |
+| `MIMIR_REMOTE_FRESHNESS_DIR` | `/var/lib/mimir/heimdall-freshness` | Remote sync publisher's freshness surface (sync daemon) |
+| `MIMIR_REMOTE_FRESHNESS_PUBLISHER` | — | Deployment-specific remote command allowed to publish sync freshness when enabled |
+| `MIMIR_REMOTE_SYNC_STAMP` | `/home/mimir/mimir-sync.stamp` | Legacy sync heartbeat retained until the new publisher is configured |
 | `MIMIR_SHARE_SECRET` | - | HMAC secret that enables `/share/:token` |
 | `MIMIR_BASE_URL` | `http://127.0.0.1:3031` | Base URL used by the share CLI |
 | `MIMIR_QUARANTINE_DIR` | `<target-dir>-quarantine` | Secret-scan quarantine directory |
@@ -258,6 +263,11 @@ capacity, Samba, and Time Machine concerns belong to the Brokkr platform layer.
 `scripts/backup-artifacts.sh` makes an append-only local copy. Its generic defaults
 are `/home/mimir/mimir/` and `/mnt/backup/mimir/`; override the source, destination,
 mount point, and log path for your host.
+
+For a restricted Heimdall storage probe, use the separate
+[freshness surface](docs/heimdall-freshness-surface.md). It carries only fixed
+backup/sync state and UTC timestamps; it grants no traversal into archive, backup,
+log, or home directories.
 
 ### Encrypted Offsite Copy
 

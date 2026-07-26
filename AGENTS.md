@@ -80,6 +80,8 @@ mimir/
     ├── sync-artifacts.sh       # Manual rsync ~/mimir/ from laptop to NAS
     ├── sync-artifacts-daemon.sh # Launchd daemon wrapper (auto-sync)
     ├── backup-artifacts.sh     # Backup artifacts SD→NAS disk (cron on Pi)
+    ├── publish-freshness.sh    # Atomic metadata-only backup/sync probe records
+    ├── install-heimdall-freshness-surface.sh # Root-only least-authority state setup
     └── offsite-backup.sh       # Encrypted push to cloud (rclone crypt; systemd timer)
 ```
 
