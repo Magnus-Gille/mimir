@@ -260,6 +260,7 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
   it("quotes freshness publisher configuration before handing it to the remote shell", () => {
     const { result, invocations } = runSyncScript(script, {
       MIMIR_REMOTE_FRESHNESS_DIR: "/state'; touch should-not-run; #",
+      MIMIR_REMOTE_FRESHNESS_PUBLISHER: "/usr/local/libexec/mimir-publish-freshness",
     });
     expect(result.status, result.stderr).toBe(0);
     if (script === "sync-artifacts-daemon.sh") {

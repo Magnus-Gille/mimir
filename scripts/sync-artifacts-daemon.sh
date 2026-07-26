@@ -17,7 +17,7 @@ LOCAL_ROOT="${MIMIR_LOCAL_ROOT:-$HOME/mimir}"
 REMOTE_ROOT="${MIMIR_REMOTE_ROOT:-/home/mimir/mimir}"
 REMOTE_INBOX="${MIMIR_REMOTE_INBOX:-/home/mimir/mimir-inbox}"
 REMOTE_FRESHNESS_DIR="${MIMIR_REMOTE_FRESHNESS_DIR:-/var/lib/mimir/heimdall-freshness}"
-REMOTE_FRESHNESS_PUBLISHER="${MIMIR_REMOTE_FRESHNESS_PUBLISHER:-/home/mimir/mimir-server/scripts/publish-freshness.sh}"
+REMOTE_FRESHNESS_PUBLISHER="${MIMIR_REMOTE_FRESHNESS_PUBLISHER:-}"
 LOCAL="$LOCAL_ROOT/"
 REMOTE="$NAS:$REMOTE_ROOT/"
 INBOX="$NAS:$REMOTE_INBOX/"
@@ -39,6 +39,9 @@ publish_sync_freshness() {
   # The remote command is deliberately a fixed publisher, not a write to a
   # home-directory stamp. If the installer has not created its state directory,
   # this is a no-op; once present, a publication failure is fail-loud.
+  # A deployment-specific publisher path is intentionally required once this
+  # optional surface is enabled; no account or code-tree location is assumed.
+  [ -n "$REMOTE_FRESHNESS_PUBLISHER" ] || return 0
   local remote_dir remote_publisher state
   remote_dir=$(quote_remote_sh "$REMOTE_FRESHNESS_DIR")
   remote_publisher=$(quote_remote_sh "$REMOTE_FRESHNESS_PUBLISHER")

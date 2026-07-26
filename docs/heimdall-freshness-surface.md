@@ -7,15 +7,17 @@ archive, backup destination, logs, or a user's home directory.
 ## Read contract
 
 The root installer creates `/var/lib/mimir/heimdall-freshness` with ownership
-`mimir:heimdall-storage-probe` and mode `2750`. The setgid bit makes records
-published by the `mimir` user retain the probe group. Each of the only two allowed
-records has mode `0640`: `backup.json` and `sync.json`.
+`$MIMIR_FRESHNESS_PUBLISHER_USER:heimdall-storage-probe` and mode `2750`. The
+publisher user is deliberately explicit: it must be the actual account that runs
+the installed backup/sync publication commands, not an assumed service account. The
+setgid bit makes records retain the probe group. Each of the only two allowed records
+has mode `0640`: `backup.json` and `sync.json`.
 
 The dedicated probe identity is a **member** of `heimdall-storage-probe`; it has
-directory `r-x` and record `r--`, never write. The publisher is `mimir` (directory
-owner) and must not be the probe identity. A platform owner adds the probe identity
-to that dedicated group as part of its owner-only overlay; do not add it to a broad
-service or home-directory group.
+directory `r-x` and record `r--`, never write. The publisher is the explicitly
+configured directory owner and must not be the probe identity. A platform owner adds
+the probe identity to that dedicated group as part of its owner-only overlay; do not
+add it to a broad service or home-directory group.
 
 Every record has exactly this shape:
 
@@ -44,11 +46,12 @@ without changing the publication format.
 
 ## Installation and rollback
 
-On the NAS, after the `mimir` publisher user and the dedicated probe identity exist,
-the platform owner runs:
+On the NAS, after the actual publisher user and the dedicated probe identity exist,
+the platform owner explicitly binds the surface to that publisher:
 
 ```bash
-sudo ./scripts/install-heimdall-freshness-surface.sh
+sudo MIMIR_FRESHNESS_PUBLISHER_USER=<runtime-or-backup-publisher> \
+  ./scripts/install-heimdall-freshness-surface.sh
 sudo usermod -a -G heimdall-storage-probe heimdall-storage-probe
 ```
 
@@ -65,9 +68,11 @@ stat -c '%U:%G %a %n' /var/lib/mimir/heimdall-freshness \
 `backup-artifacts.sh` publishes `backup` after a successful copy and `error` after a
 mount or rsync failure. The sync daemon publishes `sync` after a successful mirror
 and attempts to publish `error` when a mirror fails. Its remote SSH account must be
-the `mimir` publisher (or otherwise have only the narrowly delegated ability to run
-the publisher); it must never be the probe identity. Until the directory is
-installed, both jobs keep their historical behavior and publish nothing.
+the configured publisher (or otherwise have only the narrowly delegated ability to run
+the publisher); it must never be the probe identity. Set
+`MIMIR_REMOTE_FRESHNESS_PUBLISHER` to that deployment's publisher script path when
+enabling sync evidence; it has no fixed default. Until the directory is installed,
+both jobs keep their historical behavior and publish nothing.
 
 To remove the surface without touching archive data or any unexpected state:
 

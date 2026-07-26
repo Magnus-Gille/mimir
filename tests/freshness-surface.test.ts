@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -19,6 +19,34 @@ function publish(dir: string, subject: string, state: string) {
     encoding: "utf8",
     env: { ...process.env, MIMIR_FRESHNESS_DIR: dir },
   });
+}
+
+function executable(path: string, body: string): void {
+  writeFileSync(path, `#!/bin/bash\nprintf '%s %s\\n' "$(basename "$0")" "$*" >> "$INSTALLER_CALLS"\n${body}`);
+  chmodSync(path, 0o755);
+}
+
+function installerHarness() {
+  const root = tempDir();
+  const bin = join(root, "bin");
+  const calls = join(root, "calls");
+  mkdirSync(bin);
+  executable(join(bin, "id"), 'printf "0\\n"');
+  executable(join(bin, "getent"), "exit 1");
+  for (const command of ["groupadd", "install", "chown", "chmod", "rm", "rmdir"]) {
+    executable(join(bin, command), "exit 0");
+  }
+  return {
+    root,
+    run(args: string[] = [], env: Record<string, string> = {}) {
+      const result = spawnSync("bash", [join(REPO_ROOT, "scripts", "install-heimdall-freshness-surface.sh"), ...args], {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, INSTALLER_CALLS: calls, ...env },
+      });
+      return { result, calls: existsSync(calls) ? readFileSync(calls, "utf8") : "" };
+    },
+  };
 }
 
 afterEach(() => {
@@ -63,5 +91,63 @@ describe("Heimdall freshness surface", () => {
     expect(installer).toContain("2750");
     expect(installer).toContain("0640");
     expect(installer).toContain("--remove");
+  });
+
+  it("refuses a symlinked surface before remove can mutate its target", () => {
+    const harness = installerHarness();
+    const target = join(harness.root, "target");
+    const surface = join(harness.root, "surface");
+    mkdirSync(target);
+    symlinkSync(target, surface);
+
+    const { result, calls } = harness.run(["--remove"], { MIMIR_FRESHNESS_DIR: surface });
+    expect(result.status).not.toBe(0);
+    expect(calls).not.toMatch(/^(rm|rmdir|install|chown|chmod|groupadd) /m);
+  });
+
+  it("refuses a symlinked fixed record before apply mutates the surface", () => {
+    const harness = installerHarness();
+    const surface = join(harness.root, "surface");
+    const target = join(harness.root, "target");
+    mkdirSync(surface);
+    writeFileSync(target, "not a freshness record");
+    symlinkSync(target, join(surface, "backup.json"));
+
+    const { result, calls } = harness.run([], { MIMIR_FRESHNESS_DIR: surface });
+    expect(result.status).not.toBe(0);
+    expect(calls).not.toMatch(/^(install|chown|chmod|groupadd) /m);
+  });
+
+  it("refuses an unexpected fixed record type before remove mutates the surface", () => {
+    const harness = installerHarness();
+    const surface = join(harness.root, "surface");
+    mkdirSync(join(surface, "sync.json"), { recursive: true });
+
+    const { result, calls } = harness.run(["--remove"], { MIMIR_FRESHNESS_DIR: surface });
+    expect(result.status).not.toBe(0);
+    expect(calls).not.toMatch(/^(rm|rmdir|install|chown|chmod|groupadd) /m);
+  });
+
+  it("rejects root paths, unexpected record types, and option-like identities before mutation", () => {
+    const rootPath = installerHarness();
+    expect(rootPath.run([], { MIMIR_FRESHNESS_DIR: "/" }).result.status).not.toBe(0);
+    expect(rootPath.run([], { MIMIR_FRESHNESS_DIR: "/" }).calls).not.toMatch(/^(install|chown|chmod|groupadd) /m);
+
+    const typePath = installerHarness();
+    const surface = join(typePath.root, "surface");
+    mkdirSync(join(surface, "sync.json"), { recursive: true });
+    const typed = typePath.run([], { MIMIR_FRESHNESS_DIR: surface });
+    expect(typed.result.status).not.toBe(0);
+    expect(typed.calls).not.toMatch(/^(install|chown|chmod|groupadd) /m);
+
+    const identity = installerHarness();
+    const invalid = identity.run([], { MIMIR_FRESHNESS_PUBLISHER_USER: "--bad" });
+    expect(invalid.result.status).not.toBe(0);
+    expect(invalid.calls).not.toMatch(/^(install|chown|chmod|groupadd) /m);
+
+    const group = installerHarness();
+    const invalidGroup = group.run([], { MIMIR_FRESHNESS_PROBE_GROUP: "--bad" });
+    expect(invalidGroup.result.status).not.toBe(0);
+    expect(invalidGroup.calls).not.toMatch(/^(install|chown|chmod|groupadd) /m);
   });
 });
