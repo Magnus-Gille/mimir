@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +11,7 @@ type Probe = {
   target: string;
   assert_regex?: string;
   expected_secondary_doc?: string;
+  expected_related_docs?: string[];
 };
 
 type ProbeFixture = {
@@ -36,6 +38,10 @@ function listIndexedDocs(root: string, base = root): string[] {
       continue;
     }
 
+    if (relativePath === "index.md") {
+      continue;
+    }
+
     if (absolute.endsWith(".md") || absolute.endsWith(".json")) {
       paths.push(`docs/${relativePath}`);
     }
@@ -45,10 +51,12 @@ function listIndexedDocs(root: string, base = root): string[] {
 }
 
 const agentsGuidance = readFileSync(join(REPO_ROOT, "AGENTS.md"), "utf8");
+const docsIndex = readFileSync(join(DOCS_ROOT, "index.md"), "utf8");
 const probeFixture = JSON.parse(
   readFileSync(join(REPO_ROOT, "tests/ab-instructions-probes.json"), "utf8"),
 ) as ProbeFixture;
 const probes = probeFixture.probes;
+const singleLineAgentsGuidance = agentsGuidance.replace(/\s+/g, " ").trim();
 const historicalControlExamples = new Map([
   [
     "secret-scan-quarantine-control",
@@ -56,11 +64,32 @@ const historicalControlExamples = new Map([
   ],
 ]);
 
-describe("agent guidance index", () => {
-  it("indexes every non-vendored repo doc from AGENTS.md", () => {
-    expect(agentsGuidance).toContain("## Reference docs");
+function assertPosixEreMatch(pattern: string, input: string, label: string): void {
+  const result = spawnSync("grep", ["-E", pattern], {
+    encoding: "utf8",
+    input: `${input}\n`,
+  });
 
-    const missing = listIndexedDocs(DOCS_ROOT).filter((path) => !agentsGuidance.includes(path));
+  if (result.error) {
+    throw result.error;
+  }
+
+  if (result.status !== 0) {
+    throw new Error(
+      `grep -E failed for ${label} with status ${result.status}: ${result.stderr.trim() || "no stderr"}`,
+    );
+  }
+}
+
+describe("agent guidance index", () => {
+  it("keeps AGENTS lean and indexes every non-vendored repo doc from docs/index.md", () => {
+    expect(agentsGuidance).toContain("## Reference docs");
+    expect(agentsGuidance).toContain("docs/index.md");
+    expect(agentsGuidance).toContain("docs/relocation.md");
+    expect(agentsGuidance).not.toContain("docs/workload-requirement-v1.json");
+    expect(agentsGuidance).not.toContain("docs/workload-requirement-v1.provenance.json");
+
+    const missing = listIndexedDocs(DOCS_ROOT).filter((path) => !docsIndex.includes(path));
     expect(missing).toEqual([]);
   });
 
@@ -85,12 +114,14 @@ describe("agent guidance index", () => {
       } else {
         expect(probe.target).toBe("AGENTS.md");
         expect(probe.assert_regex).toBeTypeOf("string");
-        const regex = new RegExp(probe.assert_regex!, "s");
-        expect(regex.test(agentsGuidance)).toBe(true);
+        const regex = new RegExp(probe.assert_regex!);
+        expect(regex.test(singleLineAgentsGuidance)).toBe(true);
+        assertPosixEreMatch(probe.assert_regex!, singleLineAgentsGuidance, `${probe.id} AGENTS guidance`);
 
         const historicalExample = historicalControlExamples.get(probe.id);
         if (historicalExample) {
           expect(regex.test(historicalExample)).toBe(true);
+          assertPosixEreMatch(probe.assert_regex!, historicalExample, `${probe.id} historical example`);
         }
       }
 
@@ -98,6 +129,12 @@ describe("agent guidance index", () => {
         expect(statSync(join(REPO_ROOT, probe.expected_secondary_doc)).isFile()).toBe(true);
         expect(indexedDocs).toContain(probe.expected_secondary_doc);
         coveredDocs.add(probe.expected_secondary_doc);
+      }
+
+      for (const relatedDoc of probe.expected_related_docs ?? []) {
+        expect(statSync(join(REPO_ROOT, relatedDoc)).isFile()).toBe(true);
+        expect(indexedDocs).toContain(relatedDoc);
+        coveredDocs.add(relatedDoc);
       }
     }
 

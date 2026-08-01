@@ -35,6 +35,7 @@ mimir/
 │       ├── secret-scan.ts
 │       └── relocation-verify.ts
 ├── docs/
+│   ├── index.md
 │   ├── agent-reference.md
 │   ├── offsite-backup.md
 │   ├── heimdall-freshness-surface.md

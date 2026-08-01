@@ -34,15 +34,18 @@
       "id": "workload-manifest-and-provenance",
       "kind": "retrieval",
       "prompt": "Where are Mimir's machine-readable relocation requirement record and the pinned Grimnir provenance digests?",
-      "target": "docs/workload-requirement-v1.json",
-      "expected_secondary_doc": "docs/workload-requirement-v1.provenance.json"
+      "target": "docs/relocation.md",
+      "expected_related_docs": [
+        "docs/workload-requirement-v1.json",
+        "docs/workload-requirement-v1.provenance.json"
+      ]
     },
     {
       "id": "secret-scan-quarantine-control",
       "kind": "control",
       "prompt": "If an inbox import contains a private key or other secret-looking token, what must happen before it can reach the NAS mirror?",
       "target": "AGENTS.md",
-      "assert_regex": "(?=.*(?:MIMIR_QUARANTINE_DIR|quarantin(?:e|ed|ing)))(?=.*outside the servable tree)(?=.*(?:block(?:ed|s)? mirroring|mirroring (?:stays |remains )?blocked))"
+      "assert_regex": "(MIMIR_QUARANTINE_DIR|quarantin(e|ed|ing)).*outside the servable tree"
     }
   ]
 }

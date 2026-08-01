@@ -41,18 +41,16 @@ Agents don't talk to Mímir directly via MCP. Instead:
 ## Reference docs
 
 AGENTS keeps behavioral and safety rules inline. For lookup-only material, open
-the single best-matching repo doc below. Exception: provenance or relocation
-record questions should inspect the normative
-`docs/workload-requirement-v1.json` and
-`docs/workload-requirement-v1.provenance.json` records directly rather than
-answering only from this index.
+the single best-matching repo doc below, or start with `docs/index.md` for the
+full map. Machine-readable relocation and provenance questions always route
+through `docs/relocation.md`; inspect the normative records linked there before
+answering.
 
+- `docs/index.md` — full documentation map, including the machine-readable contract artifacts.
 - `docs/agent-reference.md` — endpoint map, project structure, operator command examples, checked-in unit files, deployment `.env` example, and the full environment-variable catalog.
 - `docs/offsite-backup.md` — encrypted offsite backup setup, crypt remote/key custody, retention, verification, disaster recovery, and the `mimir-offsite.service` / `mimir-offsite.timer` flow.
 - `docs/heimdall-freshness-surface.md` — Heimdall probe surface contract, permissions, freshness/error classification, and install/remove steps.
-- `docs/relocation.md` — ADR-007 relocation boundary, read-only hook bindings, evidence receipts, and drain/compensate rules.
-- `docs/workload-requirement-v1.json` — machine-readable relocation requirement record.
-- `docs/workload-requirement-v1.provenance.json` — pinned Grimnir source revision and SHA-256 digests for vendored contract artifacts.
+- `docs/relocation.md` — ADR-007 relocation boundary, read-only hook bindings, evidence receipts, drain/compensate rules, and links to the normative machine-readable records.
 
 ## How to build
 
