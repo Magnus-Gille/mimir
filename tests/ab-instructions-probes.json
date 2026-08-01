@@ -1,39 +1,48 @@
-[
-  {
-    "id": "endpoint-share-route",
-    "prompt": "How do temporary public share links work in Mimir, and which route serves them?",
-    "expected_doc": "docs/agent-reference.md"
-  },
-  {
-    "id": "offsite-delete-threshold-env",
-    "prompt": "Which environment variables control the offsite backup delete thresholds and retention window?",
-    "expected_doc": "docs/agent-reference.md"
-  },
-  {
-    "id": "offsite-restore-verification",
-    "prompt": "How do I verify the cloud backup is encrypted and actually restorable after setup?",
-    "expected_doc": "docs/offsite-backup.md"
-  },
-  {
-    "id": "heimdall-freshness-contract",
-    "prompt": "What exact files can Heimdall's restricted storage probe read, and how should it classify stale versus error?",
-    "expected_doc": "docs/heimdall-freshness-surface.md"
-  },
-  {
-    "id": "relocation-evidence-binding",
-    "prompt": "Which receipt fields have to match the current relocation attempt before preflight or verify will trust them?",
-    "expected_doc": "docs/relocation.md"
-  },
-  {
-    "id": "workload-manifest-and-provenance",
-    "prompt": "Where are Mimir's machine-readable relocation requirement record and the pinned Grimnir provenance digests?",
-    "expected_doc": "docs/workload-requirement-v1.json",
-    "expected_secondary_doc": "docs/workload-requirement-v1.provenance.json"
-  },
-  {
-    "id": "secret-scan-quarantine-control",
-    "prompt": "If an inbox import contains a private key or other secret-looking token, what must happen before it can reach the NAS mirror?",
-    "control": true,
-    "expected_rule": "The staged file is quarantined outside the servable tree and mirroring stays blocked."
-  }
-]
+{
+  "probes": [
+    {
+      "id": "endpoint-share-route",
+      "kind": "retrieval",
+      "prompt": "How do temporary public share links work in Mimir, and which route serves them?",
+      "target": "docs/agent-reference.md"
+    },
+    {
+      "id": "offsite-delete-threshold-env",
+      "kind": "retrieval",
+      "prompt": "Which environment variables control the offsite backup delete thresholds and retention window?",
+      "target": "docs/agent-reference.md"
+    },
+    {
+      "id": "offsite-restore-verification",
+      "kind": "retrieval",
+      "prompt": "How do I verify the cloud backup is encrypted and actually restorable after setup?",
+      "target": "docs/offsite-backup.md"
+    },
+    {
+      "id": "heimdall-freshness-contract",
+      "kind": "retrieval",
+      "prompt": "What exact files can Heimdall's restricted storage probe read, and how should it classify stale versus error?",
+      "target": "docs/heimdall-freshness-surface.md"
+    },
+    {
+      "id": "relocation-evidence-binding",
+      "kind": "retrieval",
+      "prompt": "Which receipt fields have to match the current relocation attempt before preflight or verify will trust them?",
+      "target": "docs/relocation.md"
+    },
+    {
+      "id": "workload-manifest-and-provenance",
+      "kind": "retrieval",
+      "prompt": "Where are Mimir's machine-readable relocation requirement record and the pinned Grimnir provenance digests?",
+      "target": "docs/workload-requirement-v1.json",
+      "expected_secondary_doc": "docs/workload-requirement-v1.provenance.json"
+    },
+    {
+      "id": "secret-scan-quarantine-control",
+      "kind": "control",
+      "prompt": "If an inbox import contains a private key or other secret-looking token, what must happen before it can reach the NAS mirror?",
+      "target": "AGENTS.md",
+      "assert_regex": "staged and blocks mirroring[\\s\\S]*MIMIR_QUARANTINE_DIR[\\s\\S]*outside the servable tree"
+    }
+  ]
+}

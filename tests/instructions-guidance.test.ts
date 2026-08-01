@@ -5,11 +5,15 @@ import { describe, expect, it } from "vitest";
 
 type Probe = {
   id: string;
+  kind: "retrieval" | "control";
   prompt: string;
-  control?: boolean;
-  expected_doc?: string;
+  target: string;
+  assert_regex?: string;
   expected_secondary_doc?: string;
-  expected_rule?: string;
+};
+
+type ProbeFixture = {
+  probes: Probe[];
 };
 
 const REPO_ROOT = join(fileURLToPath(new URL("..", import.meta.url)));
@@ -41,9 +45,10 @@ function listIndexedDocs(root: string, base = root): string[] {
 }
 
 const agentsGuidance = readFileSync(join(REPO_ROOT, "AGENTS.md"), "utf8");
-const probes = JSON.parse(
+const probeFixture = JSON.parse(
   readFileSync(join(REPO_ROOT, "tests/ab-instructions-probes.json"), "utf8"),
-) as Probe[];
+) as ProbeFixture;
+const probes = probeFixture.probes;
 
 describe("agent guidance index", () => {
   it("indexes every non-vendored repo doc from AGENTS.md", () => {
@@ -53,21 +58,37 @@ describe("agent guidance index", () => {
     expect(missing).toEqual([]);
   });
 
-  it("freezes a mixed probe set that points at real docs and keeps an inline control", () => {
+  it("freezes a harness-compatible mixed probe set with doc coverage and an inline control", () => {
+    expect(Array.isArray(probeFixture.probes)).toBe(true);
     expect(probes.length).toBeGreaterThanOrEqual(6);
     expect(new Set(probes.map((probe) => probe.id)).size).toBe(probes.length);
-    expect(probes.some((probe) => probe.control)).toBe(true);
+
+    const indexedDocs = listIndexedDocs(DOCS_ROOT);
+    const coveredDocs = new Set<string>();
+    const controls = probes.filter((probe) => probe.kind === "control");
+
+    expect(controls).toHaveLength(1);
 
     for (const probe of probes) {
       expect(probe.prompt.length).toBeGreaterThan(20);
+      expect(statSync(join(REPO_ROOT, probe.target)).isFile()).toBe(true);
 
-      if (probe.expected_doc) {
-        expect(statSync(join(REPO_ROOT, probe.expected_doc)).isFile()).toBe(true);
+      if (probe.kind === "retrieval") {
+        expect(indexedDocs).toContain(probe.target);
+        coveredDocs.add(probe.target);
+      } else {
+        expect(probe.target).toBe("AGENTS.md");
+        expect(probe.assert_regex).toBeTypeOf("string");
+        expect(new RegExp(probe.assert_regex!, "s").test(agentsGuidance)).toBe(true);
       }
 
       if (probe.expected_secondary_doc) {
         expect(statSync(join(REPO_ROOT, probe.expected_secondary_doc)).isFile()).toBe(true);
+        expect(indexedDocs).toContain(probe.expected_secondary_doc);
+        coveredDocs.add(probe.expected_secondary_doc);
       }
     }
+
+    expect([...coveredDocs].sort()).toEqual(indexedDocs);
   });
 });
