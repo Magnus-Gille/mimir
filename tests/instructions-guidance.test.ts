@@ -74,6 +74,10 @@ function assertPosixEreMatch(pattern: string, input: string, label: string): voi
     throw result.error;
   }
 
+  if (result.status === 2) {
+    throw new Error(`grep -E rejected the ${label} pattern: ${result.stderr.trim() || "no stderr"}`);
+  }
+
   if (result.status !== 0) {
     throw new Error(
       `grep -E failed for ${label} with status ${result.status}: ${result.stderr.trim() || "no stderr"}`,
@@ -86,8 +90,7 @@ describe("agent guidance index", () => {
     expect(agentsGuidance).toContain("## Reference docs");
     expect(agentsGuidance).toContain("docs/index.md");
     expect(agentsGuidance).toContain("docs/relocation.md");
-    expect(agentsGuidance).not.toContain("docs/workload-requirement-v1.json");
-    expect(agentsGuidance).not.toContain("docs/workload-requirement-v1.provenance.json");
+    expect(agentsGuidance).toContain("inspect the normative records before answering");
 
     const missing = listIndexedDocs(DOCS_ROOT).filter((path) => !docsIndex.includes(path));
     expect(missing).toEqual([]);
@@ -109,8 +112,12 @@ describe("agent guidance index", () => {
       expect(statSync(join(REPO_ROOT, probe.target)).isFile()).toBe(true);
 
       if (probe.kind === "retrieval") {
-        expect(indexedDocs).toContain(probe.target);
-        coveredDocs.add(probe.target);
+        if (probe.target === "docs/index.md") {
+          expect(docsIndex).toContain("# Documentation index");
+        } else {
+          expect(indexedDocs).toContain(probe.target);
+          coveredDocs.add(probe.target);
+        }
       } else {
         expect(probe.target).toBe("AGENTS.md");
         expect(probe.assert_regex).toBeTypeOf("string");

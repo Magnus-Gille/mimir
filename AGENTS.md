@@ -42,9 +42,8 @@ Agents don't talk to Mímir directly via MCP. Instead:
 
 AGENTS keeps behavioral and safety rules inline. For lookup-only material, open
 the single best-matching repo doc below, or start with `docs/index.md` for the
-full map. Machine-readable relocation and provenance questions always route
-through `docs/relocation.md`; inspect the normative records linked there before
-answering.
+full map. For machine-readable relocation or provenance answers, use that map
+or `docs/relocation.md` to find and inspect the normative records before answering.
 
 - `docs/index.md` — full documentation map, including the machine-readable contract artifacts.
 - `docs/agent-reference.md` — endpoint map, project structure, operator command examples, checked-in unit files, deployment `.env` example, and the full environment-variable catalog.
@@ -137,9 +136,10 @@ Command examples and TTL formats for `scripts/share.sh` live in
 ## Offsite backup (cloud)
 
 Mímir's offsite copy must remain client-side encrypted and fail closed if the
-remote is not a verified crypt. Full setup, retention, verification, disaster
-recovery, and `scripts/offsite-backup.sh` / `mimir-offsite.*` details live in
-`docs/offsite-backup.md`.
+remote is not a verified crypt. Each Grimnir service uses its own crypt key;
+keys are never shared. Pruning is by name and never destructive, while the
+mirror remains fail-loud. Full setup, retention, verification, disaster recovery,
+and `scripts/offsite-backup.sh` / `mimir-offsite.*` details live in `docs/offsite-backup.md`.
 
 > **Boundary:** this is *cloud replication of Mímir's own artifacts* — a service
 > concern, so it lives here. The destination **disk** and **Time Machine** stay Brokkr's
