@@ -49,6 +49,12 @@ const probeFixture = JSON.parse(
   readFileSync(join(REPO_ROOT, "tests/ab-instructions-probes.json"), "utf8"),
 ) as ProbeFixture;
 const probes = probeFixture.probes;
+const historicalControlExamples = new Map([
+  [
+    "secret-scan-quarantine-control",
+    "The staged file is quarantined outside the servable tree and mirroring stays blocked.",
+  ],
+]);
 
 describe("agent guidance index", () => {
   it("indexes every non-vendored repo doc from AGENTS.md", () => {
@@ -79,7 +85,13 @@ describe("agent guidance index", () => {
       } else {
         expect(probe.target).toBe("AGENTS.md");
         expect(probe.assert_regex).toBeTypeOf("string");
-        expect(new RegExp(probe.assert_regex!, "s").test(agentsGuidance)).toBe(true);
+        const regex = new RegExp(probe.assert_regex!, "s");
+        expect(regex.test(agentsGuidance)).toBe(true);
+
+        const historicalExample = historicalControlExamples.get(probe.id);
+        if (historicalExample) {
+          expect(regex.test(historicalExample)).toBe(true);
+        }
       }
 
       if (probe.expected_secondary_doc) {

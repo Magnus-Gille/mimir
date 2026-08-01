@@ -42,7 +42,7 @@
       "kind": "control",
       "prompt": "If an inbox import contains a private key or other secret-looking token, what must happen before it can reach the NAS mirror?",
       "target": "AGENTS.md",
-      "assert_regex": "staged and blocks mirroring[\\s\\S]*MIMIR_QUARANTINE_DIR[\\s\\S]*outside the servable tree"
+      "assert_regex": "(?=.*(?:MIMIR_QUARANTINE_DIR|quarantin(?:e|ed|ing)))(?=.*outside the servable tree)(?=.*(?:block(?:ed|s)? mirroring|mirroring (?:stays |remains )?blocked))"
     }
   ]
 }

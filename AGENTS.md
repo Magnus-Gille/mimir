@@ -41,7 +41,11 @@ Agents don't talk to Mímir directly via MCP. Instead:
 ## Reference docs
 
 AGENTS keeps behavioral and safety rules inline. For lookup-only material, open
-exactly one of these repo docs:
+the single best-matching repo doc below. Exception: provenance or relocation
+record questions should inspect the normative
+`docs/workload-requirement-v1.json` and
+`docs/workload-requirement-v1.provenance.json` records directly rather than
+answering only from this index.
 
 - `docs/agent-reference.md` — endpoint map, project structure, operator command examples, checked-in unit files, deployment `.env` example, and the full environment-variable catalog.
 - `docs/offsite-backup.md` — encrypted offsite backup setup, crypt remote/key custody, retention, verification, disaster recovery, and the `mimir-offsite.service` / `mimir-offsite.timer` flow.
