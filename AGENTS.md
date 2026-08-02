@@ -15,15 +15,6 @@ Part of the Grimnir system: **Munin** (memory/brain), **Mímir** (file archive),
 - **Storage:** A configurable local archive with optional local and encrypted offsite copies. Mímir owns artifact replication; the **destination disk** — mount, capacity, shares, and hardware health — belongs to the platform layer ([Brokkr](https://github.com/Magnus-Gille/brokkr) in the full ecosystem).
 - **Server code:** Kept separate from the served artifact directory
 
-### Endpoints
-
-| Endpoint | Method | Auth | Purpose |
-|----------|--------|------|---------|
-| `/health` | GET | None | Health check |
-| `/files/*` | GET | Bearer | Serve file from archive |
-| `/list/*` | GET | Bearer | JSON directory listing |
-| `/share/:token` | GET | None (HMAC token) | Temporary public file sharing |
-
 ### How agents use Mímir
 
 Agents don't talk to Mímir directly via MCP. Instead:
@@ -47,46 +38,18 @@ Agents don't talk to Mímir directly via MCP. Instead:
      for known secret formats before they reach the servable tree; hits are quarantined and
      alerted (Heimdall panel, or a loud log if the panel push isn't configured). See mimir#13.
 
-## Project structure
+## Reference docs
 
-```
-mimir/
-├── package.json
-├── tsconfig.json
-├── AGENTS.md              # This file
-├── mimir.service          # systemd unit file
-├── src/
-│   ├── index.ts           # Express server
-│   ├── share-token.ts     # HMAC token generation + validation
-│   ├── secret-scan.ts     # Ingest-time secret scan + quarantine (mimir#13)
-│   ├── heimdall-report.ts # Periodic self-report + panel push helper
-│   ├── node-substrate.ts  # SHA-pinned vendored-schema loader + normative validator
-│   ├── relocation-verify.ts # ADR-007 read-only relocation hooks (typed receipts)
-│   └── cli/
-│       ├── share.ts       # Pi-side CLI for generating share URLs
-│       ├── secret-scan.ts # CLI wrapper for the ingest secret scan
-│       └── relocation-verify.ts # CLI for the preflight/verify relocation hooks
-├── docs/vendor/grimnir/   # Byte-exact vendored Grimnir node-substrate v1 schema + fixture manifest
-├── tests/
-│   ├── server.test.ts     # supertest integration tests
-│   ├── share-token.test.ts # Token unit tests
-│   ├── secret-scan.test.ts # Secret scan + quarantine unit tests
-│   ├── relocation-verify.test.ts # Relocation hook + receipt fail-closed tests
-│   └── workload-contract.test.ts # Manifest vs vendored normative schema + SHA drift
-└── scripts/
-    ├── deploy-nas.sh           # Deploy to NAS Pi
-    ├── relocation-verify.sh    # Thin wrapper for the read-only relocation hooks
-    ├── share.sh                # Generate share URL (sync + ssh + clipboard)
-    ├── sync-artifacts.sh       # Manual rsync ~/mimir/ from laptop to NAS
-    ├── sync-artifacts-daemon.sh # Launchd daemon wrapper (auto-sync)
-    ├── backup-artifacts.sh     # Backup artifacts SD→NAS disk (cron on Pi)
-    ├── publish-freshness.sh    # Atomic metadata-only backup/sync probe records
-    ├── install-heimdall-freshness-surface.sh # Root-only least-authority state setup
-    └── offsite-backup.sh       # Encrypted push to cloud (rclone crypt; systemd timer)
-```
+AGENTS keeps behavioral and safety rules inline. For lookup-only material, open
+the single best-matching repo doc below, or start with `docs/index.md` for the
+full map. For machine-readable relocation or provenance answers, use that map
+or `docs/relocation.md` to find and inspect the normative records before answering.
 
-Offsite backup also ships `mimir-offsite.service` + `mimir-offsite.timer` (systemd
-units, repo root) and `docs/offsite-backup.md` (setup + runbook + disaster recovery).
+- `docs/index.md` — full documentation map, including the machine-readable contract artifacts.
+- `docs/agent-reference.md` — endpoint map, project structure, operator command examples, checked-in unit files, deployment `.env` example, and the full environment-variable catalog.
+- `docs/offsite-backup.md` — encrypted offsite backup setup, crypt remote/key custody, retention, verification, disaster recovery, and the `mimir-offsite.service` / `mimir-offsite.timer` flow.
+- `docs/heimdall-freshness-surface.md` — Heimdall probe surface contract, permissions, freshness/error classification, and install/remove steps.
+- `docs/relocation.md` — ADR-007 relocation boundary, read-only hook bindings, evidence receipts, drain/compensate rules, and links to the normative machine-readable records.
 
 ## How to build
 
@@ -127,13 +90,8 @@ command itself has an indeterminate outcome. It prints a clean-worktree redeploy
 using the captured rollback target when available. The remote `.env` is enforced as mode
 `0600` without displaying its values.
 
-The checked-in Linux service expects `.env` at `/home/magnus/mimir-server/.env`:
-```
-MIMIR_API_KEY=<generate with: openssl rand -hex 32>
-MIMIR_ROOT_DIR=/home/magnus/mimir
-MIMIR_ALLOWED_HOSTS=files.example.com
-MIMIR_TRUST_PROXY=loopback
-```
+The checked-in service/unit path expectations and deployment `.env` example live
+in `docs/agent-reference.md`.
 
 ### Reverse proxy or tunnel
 
@@ -146,18 +104,8 @@ network addresses.
 
 ## Syncing files from laptop
 
-**Automatic:** Run `scripts/sync-artifacts-daemon.sh` from a scheduler. It checks target reachability before syncing and skips if offline.
-
-```bash
-MIMIR_NAS=archive@files.internal ./scripts/sync-artifacts-daemon.sh
-```
-
-**Manual:**
-```bash
-./scripts/sync-artifacts.sh [hostname-or-ip]
-```
-
-Syncs `~/mimir/` to `~/mimir/` on the NAS Pi. Symmetric paths on both machines — no excludes needed.
+Command examples for `scripts/sync-artifacts-daemon.sh` and
+`scripts/sync-artifacts.sh` live in `docs/agent-reference.md`.
 
 ### Ingest secret scan
 
@@ -176,45 +124,10 @@ additionally pushes a `fail`-state Heimdall panel when `HEIMDALL_HUB_URL`/
 `HEIMDALL_FLEET_TOKEN` are set. Manual full-tree audit: `node dist/cli/secret-scan.js
 ~/mimir` (omit `--stdin` to walk the whole tree).
 
-## Environment variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MIMIR_PORT` | `3031` | HTTP server port |
-| `MIMIR_HOST` | `127.0.0.1` | Bind address (localhost for tunnel) |
-| `MIMIR_API_KEY` | — | Bearer token (required) |
-| `MIMIR_ROOT_DIR` | `./data` | Root directory to serve |
-| `MIMIR_ALLOWED_HOSTS` | — | Extra allowed Host headers (comma-separated) |
-| `MIMIR_TRUST_PROXY` | `false` | Explicit trusted-proxy value or hop count |
-| `MIMIR_RATE_LIMIT` | `60` | Max requests per minute per IP |
-| `MIMIR_INSTANCE_ID` | `default` | Stable instance identity reported to Heimdall |
-| `MIMIR_DEPLOY_HOST` | `localhost` | Deployment host label reported to Heimdall |
-| `MIMIR_SYNC_MAX_DELETE` | `1000` | Abort laptop→NAS mirror at or above this many deletions |
-| `MIMIR_SYNC_MAX_DELETE_PCT` | `20` | Abort mirror above this percentage of the actual remote population |
-| `MIMIR_SYNC_STATE_DIR` | `$XDG_STATE_HOME/mimir` or `~/.local/state/mimir` | Durable out-of-tree staging for unverified inbox imports |
-| `MIMIR_BACKUP_LOG` | `$XDG_STATE_HOME/mimir/backup.log` or `~/.local/state/mimir/backup.log` | Local backup log, kept outside the deployed code tree |
-| `MIMIR_SHARE_SECRET` | — | HMAC secret for share links (optional, enables `/share`) |
-| `MIMIR_BASE_URL` | `http://127.0.0.1:3031` | Base URL for generated share links (CLI only) |
-| `MIMIR_OFFSITE_REMOTE` | `mimir-crypt` | rclone crypt remote name (offsite backup) |
-| `MIMIR_OFFSITE_ROOT` | `$HOME/mimir` | Directory pushed offsite |
-| `MIMIR_OFFSITE_RETENTION_DAYS` | `30` | Archive (deleted/changed file) prune horizon |
-| `MIMIR_OFFSITE_MAX_DELETE` | `1000` | Abort a run that would delete more than this many files |
-| `MIMIR_OFFSITE_MAX_DELETE_PCT` | `25` | ...or more than this % of `current/` (whichever trips first) |
-| `MIMIR_OFFSITE_STATE_DIR` | `$XDG_STATE_HOME/mimir` or `~/.local/state/mimir` | Deployment-stable heartbeat/log directory |
-| `MIMIR_QUARANTINE_DIR` | `<target-dir>-quarantine` | Where ingest secret-scan hits are moved (see below) |
-| `HEIMDALL_HUB_URL` / `HEIMDALL_FLEET_TOKEN` | — | Heimdall panel push — periodic self-report and secret-scan `fail` alerts |
-
 ## Sharing files
 
-Generate a temporary public URL for any file in `~/mimir/`:
-
-```bash
-./scripts/share.sh ~/mimir/presentations/deck.pdf       # 24h default
-./scripts/share.sh ~/mimir/presentations/deck.pdf 7d    # custom TTL
-./scripts/share.sh presentations/deck.pdf 1h             # relative path ok
-```
-
-The script: syncs the file to Pi, generates an HMAC-signed token on the Pi, prints the URL and copies to clipboard. TTL formats: `1h`, `6h`, `12h`, `24h`, `3d`, `7d`.
+Command examples and TTL formats for `scripts/share.sh` live in
+`docs/agent-reference.md`.
 
 **Requires:** `MIMIR_SHARE_SECRET` in the Pi's `.env` file. Generate with `openssl rand -hex 32`.
 
@@ -222,20 +135,11 @@ The script: syncs the file to Pi, generates an HMAC-signed token on the Pi, prin
 
 ## Offsite backup (cloud)
 
-The third copy in a 3-2-1 strategy: `scripts/offsite-backup.sh` pushes `~/mimir/`
-to cloud object storage as a **client-side-encrypted** copy via an `rclone crypt` remote (contents
-*and* filenames encrypted — required for any sensitive archive; the script fails
-*closed* if the remote isn't a verified crypt). Runs on the Pi via `mimir-offsite.timer`
-(daily). Mirrors `current/` and keeps 30 days of deleted/changed versions in tagged,
-seven-character per-run sibling dirs, pruned **by name** (`--backup-dir`, never destructive).
-Guards: a preflight delete-count gate (+ `--max-delete`) aborts an implausible wipe.
-Emits a heartbeat stamp and a `pass`/`fail` Heimdall panel. The mirror is fail-loud;
-archive pruning is best-effort (warns, still `pass`).
-
-This is the **reference implementation** of the Grimnir offsite-backup pattern
-(mimir#9); munin-memory#172 and brokkr#1 copy-adapt it (each with its **own** crypt key
-— never shared). Full setup, key custody, verification, and disaster-recovery steps:
-[`docs/offsite-backup.md`](docs/offsite-backup.md).
+Mímir's offsite copy must remain client-side encrypted and fail closed if the
+remote is not a verified crypt. Each Grimnir service uses its own crypt key;
+keys are never shared. Pruning is by name and never destructive, while the
+mirror remains fail-loud. Full setup, retention, verification, disaster recovery,
+and `scripts/offsite-backup.sh` / `mimir-offsite.*` details live in `docs/offsite-backup.md`.
 
 > **Boundary:** this is *cloud replication of Mímir's own artifacts* — a service
 > concern, so it lives here. The destination **disk** and **Time Machine** stay Brokkr's

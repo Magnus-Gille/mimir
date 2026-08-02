@@ -4,6 +4,8 @@ This public-safe contract implements the workload-owner boundary in Grimnir
 ADR-007. The machine, network realization, and physical relocation are Brokkr
 concerns. Mimir owns its archive semantics, service verification, and recovery.
 The versioned requirement record is [workload-requirement-v1.json](workload-requirement-v1.json).
+For machine-readable relocation or provenance answers, `docs/index.md` and this
+document are discovery maps; inspect the linked normative records before answering.
 
 ## Normative schema and provenance
 
