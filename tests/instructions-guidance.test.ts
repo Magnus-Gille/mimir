@@ -10,7 +10,6 @@ type Probe = {
   prompt: string;
   target: string;
   assert_regex?: string;
-  expected_secondary_doc?: string;
   expected_related_docs?: string[];
 };
 
@@ -64,6 +63,61 @@ const historicalControlExamples = new Map([
   ],
 ]);
 
+function listTrackedPaths(): Set<string> {
+  const result = spawnSync("git", ["ls-files"], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  });
+
+  if (result.error) {
+    throw result.error;
+  }
+
+  if (result.status !== 0) {
+    throw new Error(`git ls-files failed with status ${result.status}: ${result.stderr.trim() || "no stderr"}`);
+  }
+
+  return new Set(result.stdout.split("\n").filter(Boolean));
+}
+
+function extractDocumentedFiles(markdown: string): string[] {
+  const match = markdown.match(/## Project structure\s+```(?:\w+)?\n([\s\S]*?)\n```/);
+
+  if (!match) {
+    throw new Error("docs/agent-reference.md is missing its Project structure code block");
+  }
+
+  const files: string[] = [];
+  const directories: string[] = [];
+
+  for (const rawLine of match[1].split("\n")) {
+    const line = rawLine.replace(/\s+#.*$/, "");
+    const entryMatch = line.match(/^([│ ]*)(├── |└── )(.*)$/);
+
+    if (!entryMatch) {
+      continue;
+    }
+
+    const depth = Math.floor(entryMatch[1].length / 4);
+    const entry = entryMatch[3].trim();
+
+    if (!entry) {
+      continue;
+    }
+
+    if (entry.endsWith("/")) {
+      directories[depth] = entry.slice(0, -1);
+      directories.length = depth + 1;
+      continue;
+    }
+
+    const parent = directories.slice(0, depth).join("/");
+    files.push(parent ? `${parent}/${entry}` : entry);
+  }
+
+  return files.sort();
+}
+
 function assertPosixEreMatch(pattern: string, input: string, label: string): void {
   const result = spawnSync("grep", ["-E", pattern], {
     encoding: "utf8",
@@ -85,15 +139,28 @@ function assertPosixEreMatch(pattern: string, input: string, label: string): voi
   }
 }
 
+const trackedPaths = listTrackedPaths();
+const agentReference = readFileSync(join(DOCS_ROOT, "agent-reference.md"), "utf8");
+const documentedFiles = extractDocumentedFiles(agentReference);
+
 describe("agent guidance index", () => {
   it("keeps AGENTS lean and indexes every non-vendored repo doc from docs/index.md", () => {
     expect(agentsGuidance).toContain("## Reference docs");
     expect(agentsGuidance).toContain("docs/index.md");
     expect(agentsGuidance).toContain("docs/relocation.md");
     expect(agentsGuidance).toContain("inspect the normative records before answering");
+    expect(agentsGuidance.length).toBeLessThan(9_000);
 
-    const missing = listIndexedDocs(DOCS_ROOT).filter((path) => !docsIndex.includes(path));
+    const indexedDocs = listIndexedDocs(DOCS_ROOT);
+    const missing = indexedDocs.filter((path) => !docsIndex.includes(path));
     expect(missing).toEqual([]);
+    expect(indexedDocs.filter((path) => !trackedPaths.has(path))).toEqual([]);
+  });
+
+  it("documents only tracked clean-clone files in the extracted agent reference", () => {
+    expect(documentedFiles).toContain("PROJECT_STATUS.md");
+    expect(documentedFiles).not.toContain("STATUS.md");
+    expect(documentedFiles.filter((path) => !trackedPaths.has(path))).toEqual([]);
   });
 
   it("freezes a harness-compatible mixed probe set with doc coverage and an inline control", () => {
@@ -109,6 +176,7 @@ describe("agent guidance index", () => {
 
     for (const probe of probes) {
       expect(probe.prompt.length).toBeGreaterThan(20);
+      expect(trackedPaths.has(probe.target)).toBe(true);
       expect(statSync(join(REPO_ROOT, probe.target)).isFile()).toBe(true);
 
       if (probe.kind === "retrieval") {
@@ -132,13 +200,8 @@ describe("agent guidance index", () => {
         }
       }
 
-      if (probe.expected_secondary_doc) {
-        expect(statSync(join(REPO_ROOT, probe.expected_secondary_doc)).isFile()).toBe(true);
-        expect(indexedDocs).toContain(probe.expected_secondary_doc);
-        coveredDocs.add(probe.expected_secondary_doc);
-      }
-
       for (const relatedDoc of probe.expected_related_docs ?? []) {
+        expect(trackedPaths.has(relatedDoc)).toBe(true);
         expect(statSync(join(REPO_ROOT, relatedDoc)).isFile()).toBe(true);
         expect(indexedDocs).toContain(relatedDoc);
         coveredDocs.add(relatedDoc);

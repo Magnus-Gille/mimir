@@ -38,6 +38,8 @@ integrations are opt-in; missing integration variables do not prevent startup.
 `/files/*` and `/share/:token` support range requests for large files. Share links
 serve browser-safe media inline when appropriate and download other files as
 attachments; `?dl=1` or `?download=1` forces attachment mode.
+The lookup-only operator copy of this route map lives in
+[`docs/agent-reference.md`](docs/agent-reference.md).
 
 ## Quick Start
 
@@ -304,48 +306,9 @@ successful pushes are intentionally silent.
 
 ## Project Structure
 
-```text
-mimir/
-├── CLAUDE.md
-├── AGENTS.md
-├── README.md
-├── mimir.service
-├── mimir-offsite.service
-├── mimir-offsite.timer
-├── docs/
-│   ├── offsite-backup.md
-│   ├── relocation.md
-│   ├── workload-requirement-v1.json
-│   ├── workload-requirement-v1.provenance.json
-│   └── vendor/
-│       └── grimnir/            # SHA-pinned normative schema + fixture manifest
-├── scripts/
-│   ├── backup-artifacts.sh
-│   ├── deploy-nas.sh
-│   ├── offsite-backup.sh
-│   ├── relocation-verify.sh
-│   ├── share.sh
-│   ├── sync-artifacts-daemon.sh
-│   └── sync-artifacts.sh
-├── src/
-│   ├── heimdall-report.ts
-│   ├── index.ts
-│   ├── node-substrate.ts
-│   ├── relocation-verify.ts
-│   ├── secret-scan.ts
-│   ├── share-token.ts
-│   └── cli/
-│       ├── relocation-verify.ts
-│       ├── secret-scan.ts
-│       └── share.ts
-└── tests/
-    ├── heimdall-report.test.ts
-    ├── relocation-verify.test.ts
-    ├── secret-scan.test.ts
-    ├── server.test.ts
-    ├── share-token.test.ts
-    └── workload-contract.test.ts
-```
+The current clean-clone structure, checked-in unit paths, and operator command
+reference live in [`docs/agent-reference.md`](docs/agent-reference.md). The
+lookup-only documentation map is [`docs/index.md`](docs/index.md).
 
 ## Design Decisions
 
