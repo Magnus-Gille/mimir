@@ -1,9 +1,13 @@
-# Mímir #40 follow-up issue drafts
+# Mímir #40 follow-up implementation issues
 
-These are reviewable drafts targeted at `Magnus-Gille/mimir`.
+The approved drafts below were published in `Magnus-Gille/mimir` on 2026-10-09.
 
-**DRAFTS NOT FILED.** Production rollout requires separate approval. Each draft is
-filed by `mimir` when (and only when) the owner approves publication.
+- [#41 — Build the Mímir source adapter and immutable snapshot contract](https://github.com/Magnus-Gille/mimir/issues/41)
+- [#42 — Package the separately deployable M5 search runtime](https://github.com/Magnus-Gille/mimir/issues/42), blocked by #41.
+- [#43 — Integrate agent retrieval and evaluate the corpus](https://github.com/Magnus-Gille/mimir/issues/43), blocked by #41 and #42.
+
+All three are sub-issues of #40. Their published bodies match the approved drafts
+below. Production rollout requires separate approval.
 
 ## 1. Build the Mímir source adapter and immutable snapshot contract
 
