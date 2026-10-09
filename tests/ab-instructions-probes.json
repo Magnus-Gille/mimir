@@ -41,6 +41,12 @@
       ]
     },
     {
+      "id": "local-artifact-search-prototype",
+      "kind": "retrieval",
+      "prompt": "How do I run the local artifact-search prototype and detect stale slide or PDF page references without changing the archive?",
+      "target": "docs/artifact-search-poc.md"
+    },
+    {
       "id": "secret-scan-quarantine-control",
       "kind": "control",
       "prompt": "If an inbox import contains a private key or other secret-looking token, what must happen before it can reach the NAS mirror?",
