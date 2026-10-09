@@ -47,6 +47,18 @@
       "target": "docs/artifact-search-poc.md"
     },
     {
+      "id": "artifact-search-placement",
+      "kind": "retrieval",
+      "prompt": "Where should artifact extraction, index and embeddings run, and how does search work while the laptop is off?",
+      "target": "docs/artifact-search-architecture.md"
+    },
+    {
+      "id": "artifact-search-followups",
+      "kind": "retrieval",
+      "prompt": "Which bounded implementation issue drafts follow the artifact-search spike, and which repository owns them?",
+      "target": "docs/artifact-search-followups.md"
+    },
+    {
       "id": "secret-scan-quarantine-control",
       "kind": "control",
       "prompt": "If an inbox import contains a private key or other secret-looking token, what must happen before it can reach the NAS mirror?",

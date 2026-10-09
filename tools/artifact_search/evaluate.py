@@ -8,14 +8,18 @@ import time
 from typing import Any
 
 
-def evaluate(db: Path, cases: list[dict], top: int = 5) -> dict:
+def evaluate(db: Path, cases: list[dict], top: int = 5, search_fn=None) -> dict:
     """Evaluate search results without returning query or source-content data."""
     _validate_cases(cases)
     if isinstance(top, bool) or not isinstance(top, int) or top <= 0 or top > 100:
         raise ValueError("top must be an integer from 1 through 100")
+    if search_fn is not None and not callable(search_fn):
+        raise TypeError("search_fn must be callable")
 
-    core_name = f"{__package__}.core" if __package__ else "core"
-    core = import_module(core_name)
+    if search_fn is None:
+        core_name = f"{__package__}.core" if __package__ else "core"
+        core = import_module(core_name)
+        search_fn = core.search
     started = time.perf_counter()
     results: list[dict[str, Any]] = []
     successful = 0
@@ -26,11 +30,13 @@ def evaluate(db: Path, cases: list[dict], top: int = 5) -> dict:
 
     for case in cases:
         case_started = time.perf_counter()
-        search_output = core.search(db, case["query"], top)
+        search_output = search_fn(db, case["query"], top)
         if isinstance(search_output, dict):
             hits = search_output.get("results", [])
+            mode = search_output.get("mode", "lexical")
         else:
             hits = search_output
+            mode = "lexical"
         if hits is None:
             hits = []
         else:
@@ -52,6 +58,7 @@ def evaluate(db: Path, cases: list[dict], top: int = 5) -> dict:
                 "label": case["label"],
                 "hit": hit,
                 "rank": rank,
+                "mode": mode,
                 "elapsed_ms": _elapsed_ms(case_started),
             }
         )
@@ -117,3 +124,74 @@ def _matching_rank(hits: list[object], expected: list[dict]) -> int | None:
         if any(_matches(hit, item) for item in expected):
             return rank
     return None
+
+
+class _MemoizedEmbedder:
+    """Share and safely copy query embeddings across compare evaluations."""
+
+    def __init__(self, embedder, identity):
+        if embedder.identity != identity:
+            raise ValueError('Embedding identity mismatch')
+        self._embedder = embedder
+        self.identity = identity
+        self._cache: dict[tuple[str, ...], list[list[float]]] = {}
+        self.calls = 0
+
+    def embed(self, inputs):
+        from .vectors import normalize
+
+        if not isinstance(inputs, list) or not inputs or not all(isinstance(item, str) for item in inputs):
+            raise ValueError("Embedding input must be a nonempty list of strings")
+        cache_key = tuple(inputs)
+        cached = self._cache.get(cache_key)
+        if cached is None:
+            raw = self._embedder.embed(list(inputs))
+            if not isinstance(raw, list) or len(raw) != len(inputs):
+                raise ValueError("Embedding count mismatch")
+            validated = [normalize(vector, self.identity.dimensions) for vector in raw]
+            self._cache[cache_key] = [list(vector) for vector in validated]
+            self.calls += 1
+            cached = self._cache[cache_key]
+        return [list(vector) for vector in cached]
+
+
+def compare(db, cases: list[dict], embedder, identity, top: int = 5, min_score: float = 0.0) -> dict:
+    """Compare lexical, vector, and hybrid retrieval on one shared query cache."""
+
+    memoized = _MemoizedEmbedder(embedder, identity)
+    reports = {
+        "lexical": evaluate(db, cases, top=top),
+    }
+    semantic_name = f"{__package__}.semantic" if __package__ else "semantic"
+    semantic = import_module(semantic_name)
+
+    def vector_search(search_db, query, search_top):
+        return semantic.semantic_search(
+            search_db,
+            query,
+            memoized,
+            identity,
+            top=search_top,
+            mode="vector",
+            min_score=min_score,
+        )
+
+    def hybrid_search(search_db, query, search_top):
+        return semantic.semantic_search(
+            search_db,
+            query,
+            memoized,
+            identity,
+            top=search_top,
+            mode="hybrid",
+            min_score=min_score,
+        )
+
+    reports["vector"] = evaluate(db, cases, top=top, search_fn=vector_search)
+    reports["hybrid"] = evaluate(db, cases, top=top, search_fn=hybrid_search)
+    return {
+        **reports,
+        "query_embedding_calls": memoized.calls,
+        "shared_query_embeddings": True,
+        "cosine_floor": min_score,
+    }

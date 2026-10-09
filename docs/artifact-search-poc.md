@@ -2,20 +2,22 @@
 
 This is an independent, local CLI under `tools/artifact_search/`. It reads an
 explicit archive manifest and writes a private SQLite index outside the archive.
-It does not add server endpoints, alter sync/deployment, schedule jobs, call an
-embedding provider, or change original files.
+It does not add server endpoints, alter sync/deployment, schedule jobs or change
+original files. Embedding calls require an explicit private M5 route and command.
 
 ## Ownership and next boundary
 
 Mimir owns original artifact storage and authorized file access. Extraction,
-indexing and query ranking belong to a separate artifact-search component; this
-directory houses the feasibility spike, not a new Mimir production service.
+indexing and query ranking belong to an independently deployed artifact-search
+component, code-owned in this repository. This directory houses the feasibility
+spike. See [the ownership/placement decision](artifact-search-architecture.md).
 Gille Inference owns local embedding serving. Munin remains the selected-summary
 and operational-memory layer. A durable job may later be dispatched by Hugin.
 
-This follows the owner's accepted #40 sketch. Production ownership/repository and
-an authenticated agent-facing interface must be agreed before promotion beyond
-the local prototype. Future implementation issues belong to that selected owner.
+This follows the owner's accepted #40 sketch. The future service runs on M5 and
+pulls published originals from Mimir, so search does not depend on an awake laptop.
+The prototype currently runs locally; the remote adapter and authenticated
+agent-facing service are follow-up work in the Mimir repository.
 
 ## Run
 
@@ -43,6 +45,53 @@ python3 -m tools.artifact_search.cli evaluate \
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
   -s tools/artifact_search -p 'test_*.py'
 ```
+
+### Opt-in M5 vector indexing and comparison
+
+Load the private route through the existing approved `m5-auth` helper; do not
+print or save its exported bearer. `REVISION` is the accepted 40-character gateway
+SHA, a colon, and the operator-verified 64-character model-artifact SHA-256.
+The client verifies the gateway revision before and after each embedding call.
+The artifact checksum is an operator pin, not a model fingerprint attested by the API.
+
+```sh
+eval "$(m5-auth --env --tailnet)"
+# Set REVISION to the exact previously verified release:artifact checksum.
+python3 -m tools.artifact_search.cli embed \
+  --db /tmp/artifact-search-state/search.sqlite \
+  --embedding-revision "$REVISION" --dimensions 256
+
+printf '%s' 'beskrivningen av bilden jag söker' | \
+  python3 -m tools.artifact_search.cli search \
+  --db /tmp/artifact-search-state/search.sqlite --mode hybrid \
+  --embedding-revision "$REVISION" --dimensions 256
+
+python3 -m tools.artifact_search.cli compare \
+  --db /tmp/artifact-search-state/search.sqlite \
+  --cases /tmp/artifact-search-state/queries.json --top 5 \
+  --embedding-revision "$REVISION" --dimensions 256
+```
+
+`embed` sends only current, filtered extracted text/title, batches within the API's
+16-item/32-KiB limits and commits only complete unit vectors. Re-running resumes
+from the content cache. It pins model/revision/dimensions, task prefixes,
+normalization, segmentation and the extraction/detector pipeline. Private input
+is not sent to a public provider, proxy or redirect. Credentials stay in memory.
+Long Retry-After delays stop the command with bounded status/delay diagnostics;
+short (at most two-second) delays allow one retry. Do not retry before that delay.
+
+`vector` uses maximum segment cosine per original unit; `hybrid` uses fixed RRF60
+over BM25 and vector ranks. Hybrid explicitly falls back to lexical on a model
+outage or when no usable vectors are cached for the selected identity, with a
+distinct warning for each case. `--min-score` is an optional cosine floor (default zero), not calibrated
+answerability. Vector search can return irrelevant results for an absent topic.
+No threshold is tuned on the reported comparison set.
+
+Comparison embeds each distinct query once and shares those vectors across vector
+and hybrid ranking. Thus retrieval quality is comparable, but the modes' reported
+wall times are not latency comparisons: the hybrid pass reuses query embeddings.
+Reports include each case's actual retrieval mode; fallback is never counted as
+unlabelled semantic success. Repeated runs may see concurrent original changes.
 
 Queries may be supplied with `--query` or stdin. Prefer stdin for private query
 text. JSON query cases have `label`, `query`, and `expected`, where each expected
@@ -109,7 +158,7 @@ Known secret formats are checked in raw text/HTML and extracted text (including
 PDF text) before indexing. Detection excludes the file; originals are never
 quarantined, moved, or edited. This detector is a filter, not proof that arbitrary
 secrets are absent. It does not rely on ingest scanning, which some direct-copy
-paths bypass. No network or model calls are made. Corpus manifests, query labels,
+paths bypass. Lexical indexing/search make no model calls. Corpus manifests, query labels,
 excerpts and the real index remain operator-local and untracked.
 
 ## Local feasibility result (2026-10-09)
@@ -136,18 +185,60 @@ so this is a feasibility check, not an independently curated relevance benchmark
 Only the concrete issue query is owner-supplied; other cases are exploratory.
 Full private results and manifests are not committed.
 
+### Text/vector comparison after M5 integration
+
+The second run used the same 20-file selection. A concurrent source update brought
+the searchable corpus to 374 units (372 slides and 2 PDF pages) in 18 files.
+372 distinct title/text units were cached at 256 dimensions. Six additional
+paraphrase/miss cases were written before inspecting their retrieval results;
+the fixed 16-case file SHA-256 was
+`2ba47d68374b933e6fd1cecfee00799535762c0dd052de7928dbe8c993fc7310`.
+The query set has 14 positives and 2 negatives, mainly the issue's math-slide topic
+and CV retrieval. Labels are conductor-curated feasibility labels, not an
+independent human-held-out relevance benchmark. Existing gold locations were
+reused for the new paraphrases; many math locations are revisions/copies.
+
+| Mode | Positive Hit@5 | MRR | Correct empty results on negatives |
+| --- | --- | --- | --- |
+| Lexical | 10/14 (71.4%) | 0.631 | 1/2 |
+| Vector, 256 dimensions | 11/14 (78.6%) | 0.631 | 0/2 |
+| Hybrid, fixed RRF60 | 10/14 (71.4%) | 0.679 | 0/2 |
+
+Vector ranking recovered two newly added paraphrases that lexical search missed,
+but missed one positive that lexical found. Fixed hybrid fusion did not preserve
+those two semantic gains. Both semantic modes returned candidates for both
+negative queries at the preselected zero cosine floor. Therefore retain lexical
+as the CLI default, and expose semantic/hybrid as explicitly selected modes.
+Do not present these scores as an adequate production ranking/abstention policy.
+The next evaluation must test diverse queries, duplicates/distractors, candidate
+selection/fusion and reliable absence handling before widening the corpus.
+
+The comparison used one shared query embedding per case (16 calls), no changed
+threshold and no reranking-model calls. Whole-run wall times were approximately
+51 ms lexical, 4.28 s vector and 2.98 s hybrid; the latter reuses query embeddings
+and these times must not be compared as service latency or capacity claims.
+Gateway release was pinned to `e6a86a45aa15fc4a25dd95d53746e7e944ef05a9`;
+model artifact identity was the operator checksum pin described above, not an
+API-attested weight fingerprint.
+
+An initial embedding build stopped with a sanitized HTTP error after 304 cache
+rows; that invocation did not retain its status code, so the cause is unknown.
+The CLI now preserves bounded HTTP-status/Retry-After diagnostics. Resuming reused
+306 unit references and completed 68 more without writing originals. Synthetic
+tests separately cover batch count/shape failures and incomplete-unit non-caching.
+Another regression covers query-time reindex with SQLite row-ID reuse: freshness
+checks compare path, byte hash, extraction version and unit content after the
+model call, not only row IDs. No old snippet is returned as a new source version.
+
 ## Bounded follow-ups
 
-1. Select the permanent artifact-search owning project and curate an independent,
-   more diverse query set with expected original locations and difficult misses.
-2. Once Gille Inference has a verified embedding runtime, add an optional local
-   client to `POST /v1/embeddings`, model `embeddinggemma-2`. Pin checkpoint,
-   tokenizer, dimension, normalization and query/document prefixes in the cache
-   identity; rebuild embeddings when those change. Keep lexical search available
-   during model outages and respect gateway admission/retry behavior.
-3. Measure lexical, vector and hybrid ranking on the same held-out queries before
-   selecting fusion weights or increasing corpus size. A small corpus needs no
-   separate vector database initially.
+1. Implement the source snapshot adapter and the separately packaged M5 service
+   described in [the issue drafts](artifact-search-followups.md).
+2. Curate an independent, diverse set of real user queries and accepted locations,
+   difficult misses and distractors. Compare lexical/vector/hybrid and evaluate
+   abstention before tuning thresholds or selecting a production default.
+3. Keep model serving in Gille Inference. Add an attested model/runtime fingerprint
+   before automating upgrades; the prototype's artifact revision is operator-pinned.
 4. Add OCR or image embeddings only for measured misses where extracted text is
    insufficient; the currently drafted M5 API contract covers text/code only.
 5. Design authenticated agent retrieval, per-corpus permissions, authorized remote
