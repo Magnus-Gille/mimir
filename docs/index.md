@@ -10,5 +10,6 @@ repository's lookup-only documentation map.
 - `docs/artifact-search-poc.md` — independent local CLI for the #40 artifact-search spike, exact source locations, private index handling, validation and follow-up ownership.
 - `docs/artifact-search-architecture.md` — #40 ownership and placement decision, source/index/model boundaries, update and access contracts.
 - `docs/artifact-search-followups.md` — published implementation issues for the source adapter, M5 runtime and agent retrieval.
+- `docs/artifact-source-snapshots.md` — #41 immutable source manifest/object contract, local/HTTP acquisition, identity/delta behavior and acceptance boundary.
 - `docs/workload-requirement-v1.json` — machine-readable relocation requirement record.
 - `docs/workload-requirement-v1.provenance.json` — pinned Grimnir source revision and SHA-256 digests for vendored contract artifacts.

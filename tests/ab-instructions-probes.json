@@ -59,6 +59,12 @@
       "target": "docs/artifact-search-followups.md"
     },
     {
+      "id": "artifact-source-snapshots",
+      "kind": "retrieval",
+      "prompt": "How does the artifact source adapter publish and acquire a complete hash-pinned snapshot without treating a failed inventory as deletions?",
+      "target": "docs/artifact-source-snapshots.md"
+    },
+    {
       "id": "secret-scan-quarantine-control",
       "kind": "control",
       "prompt": "If an inbox import contains a private key or other secret-looking token, what must happen before it can reach the NAS mirror?",
