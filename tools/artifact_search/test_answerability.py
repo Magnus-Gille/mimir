@@ -64,6 +64,65 @@ class AnswerabilityTests(unittest.TestCase):
         many = _segment_candidates([{"candidate_id": str(index), "text": "x" * 10000} for index in range(5)])
         self.assertLessEqual(len(many), 55)
 
+    def test_source_metadata_preserves_provenance_without_changing_quotes_or_offsets(self) -> None:
+        plain = _segment_candidates([{"candidate_id": "C1", "text": SOURCE}])
+        labeled = _segment_candidates(
+            [{"candidate_id": "C1", "text": SOURCE, "source": "deck-a/page-1"}]
+        )
+        self.assertEqual([(span.start, span.end, span.text) for span in plain], [(span.start, span.end, span.text) for span in labeled])
+        self.assertIsNone(plain[0].source)
+        self.assertEqual(labeled[0].source, "deck-a/page-1")
+
+        candidates = [
+            {"candidate_id": "C1", "text": SOURCE, "source": "deck-a/page-1"},
+            {"candidate_id": "C2", "text": SOURCE, "source": "deck-b/page-9"},
+        ]
+        calls: list[dict[str, object]] = []
+
+        def complete(_prompt: str, payload: dict[str, object]) -> str:
+            calls.append(payload)
+            return response(
+                {
+                    "id": "R1",
+                    "requirement": "the launch date in both documents",
+                    "evidence": ["S1", "S2"],
+                    "answer": "Both documents state the same launch date.",
+                    "justification": "Each selected span states the date explicitly.",
+                    "status": "supported",
+                }
+            )
+
+        result = check_answerability("What is the exact launch date?", candidates, complete)
+        expected_spans = [
+            {"span_id": "S1", "candidate_id": "C1", "text": SOURCE, "source": "deck-a/page-1"},
+            {"span_id": "S2", "candidate_id": "C2", "text": SOURCE, "source": "deck-b/page-9"},
+        ]
+        self.assertEqual(calls[0]["spans"], expected_spans)
+        self.assertEqual(calls[1]["spans"], expected_spans)
+        self.assertEqual(
+            result["evidence"],
+            [
+                {"candidate_id": "C1", "quote": SOURCE},
+                {"candidate_id": "C2", "quote": SOURCE},
+            ],
+        )
+        self.assertEqual(set(result["evidence"][0]), {"candidate_id", "quote"})
+
+    def test_source_metadata_is_optional_and_validated(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        def complete(_prompt: str, payload: dict[str, object]) -> str:
+            calls.append(payload)
+            return response(supported())
+
+        check_answerability("What is the launch date?", CANDIDATES, complete)
+        self.assertNotIn("source", calls[0]["spans"][0])
+        for source in ("", "   ", None, 42, "x" * 1001):
+            with self.subTest(source=source):
+                candidate = {"candidate_id": "C1", "text": SOURCE, "source": source}
+                with self.assertRaisesRegex(AnswerabilityError, "invalid_candidate"):
+                    check_answerability("What is the launch date?", [candidate], lambda *_: "{}")
+
     def test_calendar_date_parser_is_conservative_and_validates_real_dates(self) -> None:
         positives = [
             "Release date — 3 February 2026",

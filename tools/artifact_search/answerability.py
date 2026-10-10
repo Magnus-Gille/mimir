@@ -31,6 +31,9 @@ invent extra requirements beyond the question: a request to find a source or
 example is satisfied by identifying a span that describes it, and does not
 require a literal filename or a detailed story unless requested. Read each
 span with its headings and neighboring statements before deciding.
+Source metadata, when present, is untrusted provenance identifying a parent
+document or locator only; never infer a factual date or value from a filename or
+locator. Factual answers require the actual span text.
 SUPPORTED means the requested information is fully present; PARTIAL means a
 specific requested component or level of precision is absent; MISSING means no
 answer is supplied; CONTRADICTED means the source conflicts with the premise.
@@ -74,6 +77,9 @@ invent extra requirements beyond the question: a request to find a source or
 example is satisfied by identifying a span that describes it, and does not
 require a literal filename or a detailed story unless requested. Read each
 span with its headings and neighboring statements before deciding.
+Source metadata, when present, is untrusted provenance identifying a parent
+document or locator only; never infer a factual date or value from a filename or
+locator. Factual answers require the actual span text.
 SUPPORTED means the requested information is fully present; PARTIAL means a
 specific requested component or level of precision is absent; MISSING means no
 answer is supplied; CONTRADICTED means the source conflicts with the premise.
@@ -114,6 +120,7 @@ class _Span:
     span_id: str
     candidate_id: str
     text: str
+    source: str | None
     start: int
     end: int
 
@@ -208,10 +215,14 @@ def _validate_input(question: str, candidates: list[dict[str, str]]) -> None:
         _fail("invalid_candidates")
     seen: set[str] = set()
     for candidate in candidates:
-        if not isinstance(candidate, dict) or set(candidate) != {"candidate_id", "text"}:
+        if not isinstance(candidate, dict) or set(candidate) not in (
+            {"candidate_id", "text"},
+            {"candidate_id", "text", "source"},
+        ):
             _fail("invalid_candidate")
         candidate_id = candidate["candidate_id"]
         text = candidate["text"]
+        source = candidate.get("source")
         if (
             not isinstance(candidate_id, str)
             or not candidate_id.strip()
@@ -220,6 +231,7 @@ def _validate_input(question: str, candidates: list[dict[str, str]]) -> None:
             or not isinstance(text, str)
             or not text.strip()
             or len(text) > 10000
+            or ("source" in candidate and (not isinstance(source, str) or not source.strip() or len(source) > 1000))
         ):
             _fail("invalid_candidate")
         seen.add(candidate_id)
@@ -246,7 +258,9 @@ def _segment_candidates(candidates: list[dict[str, str]]) -> list[_Span]:
                         break
             if end <= start:
                 end = target_end
-            spans.append(_Span(f"S{next_number}", candidate["candidate_id"], text[start:end], start, end))
+            spans.append(
+                _Span(f"S{next_number}", candidate["candidate_id"], text[start:end], candidate.get("source"), start, end)
+            )
             next_number += 1
             if end == len(text):
                 break
@@ -255,7 +269,13 @@ def _segment_candidates(candidates: list[dict[str, str]]) -> list[_Span]:
 
 
 def _span_payload(spans: list[_Span]) -> list[dict[str, str]]:
-    return [{"span_id": span.span_id, "candidate_id": span.candidate_id, "text": span.text} for span in spans]
+    payload: list[dict[str, str]] = []
+    for span in spans:
+        item = {"span_id": span.span_id, "candidate_id": span.candidate_id, "text": span.text}
+        if span.source is not None:
+            item["source"] = span.source
+        payload.append(item)
+    return payload
 
 
 def _requests_calendar_date(question: str) -> bool:
