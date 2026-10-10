@@ -83,6 +83,8 @@ class AnswerabilityTests(unittest.TestCase):
 
     def test_calendar_request_detection_excludes_year_month_meta_and_source_queries(self) -> None:
         self.assertTrue(_requests_calendar_date("What is the exact date?"))
+        self.assertTrue(_requests_calendar_date("What is the exact launch date?"))
+        self.assertTrue(_requests_calendar_date("Give the launch date."))
         self.assertTrue(_requests_calendar_date("On what date did it happen?"))
         self.assertTrue(_requests_calendar_date("Vilket exakt datum anges?"))
         self.assertTrue(_requests_calendar_date("Ange det exakta datumet."))
@@ -92,9 +94,30 @@ class AnswerabilityTests(unittest.TestCase):
             "What is the month?",
             "Why is an exact date missing?",
             "Where is the source for the exact date?",
+            "What is the date format?",
+            "What is the exact launch date formatting?",
+            "Vilket datumformat används?",
         ):
             with self.subTest(question=question):
                 self.assertFalse(_requests_calendar_date(question))
+
+    def test_calendar_date_suppresses_labeled_heading_numbers_only(self) -> None:
+        for text in (
+            "Page 3, February 2026",
+            "Section 3. February 2026",
+            "Slide 3 Feb 2026",
+            "Sida 3 februari 2026",
+            "Avsnitt 3. februari 2026",
+            "Bild 3 februari 2026",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(_has_calendar_date(text))
+        for text in (
+            "Slide 3 — Date: 3 February 2026",
+            "Launch date: 3 February 2026",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(_has_calendar_date(text))
 
     def test_full_date_guard_abstains_for_heading_number_and_month_year(self) -> None:
         candidate = [{"candidate_id": "C1", "text": "03 — Overview, Feb 2026"}]
@@ -112,6 +135,12 @@ class AnswerabilityTests(unittest.TestCase):
         multipart = check_answerability("What is the year and what is the exact date?", candidate, complete)
         self.assertFalse(multipart["answerable"])
         self.assertEqual(multipart["status"], "partial")
+
+        for question in ("What is the exact launch date?", "Give the launch date."):
+            with self.subTest(question=question):
+                guarded = check_answerability(question, candidate, complete)
+                self.assertFalse(guarded["answerable"])
+                self.assertEqual(guarded["status"], "partial")
 
         year_only = check_answerability("What is the launch year?", candidate, complete)
         self.assertTrue(year_only["answerable"])

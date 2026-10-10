@@ -163,14 +163,20 @@ _MONTH_DAY_DATE_RE = re.compile(
     rf"{_ORDINAL_PATTERN}\.?(?:\s+|[.,/-]\s*) (?P<year>\d{{4}})(?!\w)",
     re.IGNORECASE | re.VERBOSE,
 )
+_DATE_MODIFIER = r"(?:[A-Za-z][A-Za-z-]*(?:\s+[A-Za-z][A-Za-z-]*){0,1}\s+)?"
+_DATE_METADATA_SUFFIX = r"(?!\s+(?:format|formatting|source|location)\b)"
 _DATE_REQUEST_RE = re.compile(
     r"(?:"
-    r"\b(?:what|which)\s+(?:(?:is|was)\s+)?(?:the\s+)?(?:exact\s+)?date\b"
+    rf"\b(?:what|which)\s+(?:(?:is|was)\s+)?(?:the\s+)?(?:exact\s+)?{_DATE_MODIFIER}date\b{_DATE_METADATA_SUFFIX}"
     r"|\bon\s+what\s+(?:exact\s+)?date\b"
-    r"|\b(?:give|provide|state|identify)\s+(?:the\s+)?(?:exact\s+)?date\b"
+    rf"|\b(?:give|provide|state|identify)\s+(?:the\s+)?(?:exact\s+)?{_DATE_MODIFIER}date\b{_DATE_METADATA_SUFFIX}"
     r"|\bvilket\s+(?:(?:exakt|exakta)\s+)?datum(?:et)?\b"
     r"|\bange\s+(?:(?:det\s+)?(?:exakt|exakta)\s+)?datum(?:et)?\b"
     r")",
+    re.IGNORECASE,
+)
+_DATE_LABEL_PREFIX_RE = re.compile(
+    r"(?:page|section|slide|heading|sida|avsnitt|bild|rubrik)\s*[:#.-]?\s*$",
     re.IGNORECASE,
 )
 
@@ -250,6 +256,10 @@ def _valid_calendar_date(year: int, month: int, day: int) -> bool:
     return True
 
 
+def _is_labeled_number(text: str, index: int) -> bool:
+    return bool(_DATE_LABEL_PREFIX_RE.search(text[:index]))
+
+
 def _has_calendar_date(text: str) -> bool:
     """Recognize only tightly contiguous, real calendar dates.
 
@@ -258,13 +268,19 @@ def _has_calendar_date(text: str) -> bool:
     """
 
     for match in _ISO_DATE_RE.finditer(text):
+        if _is_labeled_number(text, match.start()):
+            continue
         if _valid_calendar_date(int(match["year"]), int(match["month"]), int(match["day"])):
             return True
     for match in _NUMERIC_DATE_RE.finditer(text):
+        if _is_labeled_number(text, match.start()):
+            continue
         if _valid_calendar_date(int(match["year"]), int(match["month"]), int(match["day"])):
             return True
     for pattern in (_DAY_MONTH_DATE_RE, _MONTH_DAY_DATE_RE):
         for match in pattern.finditer(text):
+            if _is_labeled_number(text, match.start()):
+                continue
             month = _MONTHS[match["month"].lower()]
             if _valid_calendar_date(int(match["year"]), month, int(match["day"])):
                 return True
