@@ -46,6 +46,12 @@ class SnapshotIndexTests(unittest.TestCase):
             "excluded": excluded or [],
         }
 
+    def reset_for_manifest(self, manifest: dict) -> None:
+        self.index.close()
+        self.db.unlink()
+        self.snapshot_id = hashlib.sha256(runtime_index._canonical_json(manifest)).hexdigest()
+        self.index = runtime_index.SnapshotIndex(self.db, self.snapshot_id, self.source_id, create=True)
+
     def test_restart_search_and_stable_locator(self) -> None:
         data = b"# Heading\n\nThe stable retrieval phrase is here."
         item = self.item("artifact-1", "docs/readme.md", data)
@@ -103,8 +109,9 @@ class SnapshotIndexTests(unittest.TestCase):
     def test_finish_requires_exact_artifact_and_exclusion_set(self) -> None:
         data = b"indexed content"
         artifact = self.item("artifact-1", "one.txt", data)
-        self.index.put(artifact, data)
         manifest = self.manifest([artifact], [{"path": "old.docx", "reason": "unsupported_format"}])
+        self.reset_for_manifest(manifest)
+        self.index.put(artifact, data)
         with self.assertRaisesRegex(ValueError, "manifest_mismatch"):
             self.index.finish(self.manifest([]))
         summary = self.index.finish(manifest)
@@ -117,8 +124,10 @@ class SnapshotIndexTests(unittest.TestCase):
     def test_finish_accepts_indexed_image_as_artifact_exclusion(self) -> None:
         image = b"image"
         artifact = self.item("image-1", "image.png", image)
+        manifest = self.manifest([artifact])
+        self.reset_for_manifest(manifest)
         self.index.put(artifact, image)
-        summary = self.index.finish(self.manifest([artifact]))
+        summary = self.index.finish(manifest)
         self.assertEqual(summary["file_count"], 0)
         self.assertEqual(summary["excluded_count"], 1)
         self.assertEqual(self.index.completed(), {"image-1"})
@@ -128,12 +137,24 @@ class SnapshotIndexTests(unittest.TestCase):
         item = self.item("artifact-1", "a.txt", data)
         self.index.put(item, data)
         self.assertEqual(self.index.search("' OR 1=1 --"), [])
+        self.assertEqual(self.index.search("the and or"), [])
         with self.assertRaisesRegex(ValueError, "invalid_top"):
             self.index.search("alpha", top=21)
         with self.assertRaisesRegex(ValueError, "invalid_query"):
             self.index.search("x" * 4097)
         # The database remains usable after hostile FTS syntax.
         self.assertEqual(self.index.search("alpha")[0]["path"], "a.txt")
+
+    def test_finish_rejects_exclusion_with_different_hash(self) -> None:
+        stored = b"image-one"
+        supplied = b"image-two"
+        stored_item = self.item("image-1", "image.png", stored)
+        supplied_item = self.item("image-1", "image.png", supplied)
+        manifest = self.manifest([supplied_item])
+        self.reset_for_manifest(manifest)
+        self.index.put(stored_item, stored)
+        with self.assertRaisesRegex(ValueError, "manifest_mismatch"):
+            self.index.finish(manifest)
 
 
 if __name__ == "__main__":

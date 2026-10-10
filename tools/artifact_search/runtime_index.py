@@ -17,7 +17,7 @@ import stat
 import time
 from typing import Any
 
-from .core import PIPELINE_VERSION, has_secret
+from .core import PIPELINE_VERSION, _match_query, has_secret
 from .extract import ExtractionError, extract
 
 
@@ -29,10 +29,9 @@ MAX_TOP = 20
 MAX_SNIPPET_CHARS = 512
 MAX_TITLE_CHARS = 512
 MAX_DB_PAGES = 131_072  # 512 MiB at SQLite's default 4 KiB page size.
-SCHEMA_VERSION = "runtime-index-1"
+SCHEMA_VERSION = "runtime-index-2"
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
 _HEX = re.compile(r"^[0-9a-f]{64}$")
-_TOKEN = re.compile(r"\w+", re.UNICODE)
 
 
 def _bounded_error(code: str, detail: str | None = None) -> ValueError:
@@ -107,17 +106,6 @@ def _manifest_exclusion(item: Any) -> dict[str, str]:
     return {"path": _check_path(item["path"]), "reason": item["reason"]}
 
 
-def _query_match(query: str) -> str:
-    words: list[str] = []
-    for word in _TOKEN.findall(query.casefold()):
-        if word not in words:
-            words.append(word)
-        if len(words) >= 64:
-            break
-    # Quoted tokens keep FTS operators and punctuation from becoming syntax.
-    return " OR ".join('"' + word.replace('"', '""') + '"' for word in words)
-
-
 class SnapshotIndex:
     """A private SQLite FTS5 index bound to one snapshot and source identity."""
 
@@ -142,6 +130,7 @@ class SnapshotIndex:
                 raise _bounded_error("index_not_private")
         elif not create:
             raise _bounded_error("index_missing")
+        self.connection: sqlite3.Connection | None = None
         try:
             if new:
                 fd = os.open(self.db, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
@@ -156,14 +145,20 @@ class SnapshotIndex:
                 self._create_schema()
             else:
                 self._validate_metadata()
-        except (sqlite3.DatabaseError, OSError) as exc:
-            try:
-                self.connection.close()
-            except Exception:
-                pass
+                quick_check = self.connection.execute("PRAGMA quick_check(1)").fetchone()
+                if quick_check is None or quick_check[0] != "ok":
+                    raise _bounded_error("index_corrupt")
+        except Exception as exc:
+            if self.connection is not None:
+                try:
+                    self.connection.close()
+                except sqlite3.DatabaseError:
+                    pass
             if isinstance(exc, sqlite3.DatabaseError):
                 raise _bounded_error("index_corrupt") from None
-            raise _bounded_error("index_unavailable") from exc
+            if isinstance(exc, OSError):
+                raise _bounded_error("index_unavailable") from exc
+            raise
 
     def _create_schema(self) -> None:
         try:
@@ -191,7 +186,9 @@ class SnapshotIndex:
                     path TEXT PRIMARY KEY,
                     artifact_id TEXT UNIQUE,
                     reason TEXT NOT NULL,
-                    status TEXT NOT NULL
+                    status TEXT NOT NULL,
+                    sha256 TEXT,
+                    size INTEGER
                 );
                 CREATE VIRTUAL TABLE search_fts USING fts5(title, text);
                 CREATE INDEX units_artifact_idx ON units(artifact_id);
@@ -270,10 +267,12 @@ class SnapshotIndex:
                 (record["artifact_id"], record["path"]),
             ).fetchall()
             old_exclusion = self.connection.execute(
-                "SELECT artifact_id, path, reason FROM exclusions WHERE artifact_id=? OR path=?",
+                "SELECT artifact_id, path, reason, sha256, size FROM exclusions WHERE artifact_id=? OR path=?",
                 (record["artifact_id"], record["path"]),
             ).fetchall()
             if any((row[0], row[1], row[2]) == (record["artifact_id"], record["path"], record["sha256"]) for row in existing) and old_exclusion == []:
+                return
+            if any((row[0], row[1], row[3], row[4]) == (record["artifact_id"], record["path"], record["sha256"], record["size"]) for row in old_exclusion):
                 return
             self._remove_artifact(record["artifact_id"])
             # A manifest path is also unique.  Remove a stale row when a
@@ -285,15 +284,15 @@ class SnapshotIndex:
 
             if has_secret(data.decode("utf-8", errors="replace")):
                 self.connection.execute(
-                    "INSERT INTO exclusions(path,artifact_id,reason,status) VALUES (?,?,?,?)",
-                    (record["path"], record["artifact_id"], "known_secret_format", "excluded"),
+                    "INSERT INTO exclusions(path,artifact_id,reason,status,sha256,size) VALUES (?,?,?,?,?,?)",
+                    (record["path"], record["artifact_id"], "known_secret_format", "excluded", record["sha256"], record["size"]),
                 )
                 return
             suffix = Path(record["path"]).suffix.lower()
             if suffix in IMAGE_SUFFIXES:
                 self.connection.execute(
-                    "INSERT INTO exclusions(path,artifact_id,reason,status) VALUES (?,?,?,?)",
-                    (record["path"], record["artifact_id"], "unsupported_format", "excluded"),
+                    "INSERT INTO exclusions(path,artifact_id,reason,status,sha256,size) VALUES (?,?,?,?,?,?)",
+                    (record["path"], record["artifact_id"], "unsupported_format", "excluded", record["sha256"], record["size"]),
                 )
                 return
             try:
@@ -306,14 +305,14 @@ class SnapshotIndex:
             units = [unit for unit in units if unit.text.strip() or unit.title.strip()]
             if has_secret("\n".join(f"{unit.title}\n{unit.text}" for unit in units)):
                 self.connection.execute(
-                    "INSERT INTO exclusions(path,artifact_id,reason,status) VALUES (?,?,?,?)",
-                    (record["path"], record["artifact_id"], "known_secret_format", "excluded"),
+                    "INSERT INTO exclusions(path,artifact_id,reason,status,sha256,size) VALUES (?,?,?,?,?,?)",
+                    (record["path"], record["artifact_id"], "known_secret_format", "excluded", record["sha256"], record["size"]),
                 )
                 return
             if not units:
                 self.connection.execute(
-                    "INSERT INTO exclusions(path,artifact_id,reason,status) VALUES (?,?,?,?)",
-                    (record["path"], record["artifact_id"], "no_searchable_text", "excluded"),
+                    "INSERT INTO exclusions(path,artifact_id,reason,status,sha256,size) VALUES (?,?,?,?,?,?)",
+                    (record["path"], record["artifact_id"], "no_searchable_text", "excluded", record["sha256"], record["size"]),
                 )
                 return
             current_count = int(self.connection.execute("SELECT COUNT(*) FROM units").fetchone()[0])
@@ -361,6 +360,8 @@ class SnapshotIndex:
             fingerprint = hashlib.sha256(_canonical_json(manifest)).hexdigest()
         except (TypeError, ValueError, OverflowError):
             raise _bounded_error("manifest_mismatch") from None
+        if fingerprint != self.snapshot_id:
+            raise _bounded_error("manifest_mismatch")
 
         def operation() -> dict:
             if self._is_complete():
@@ -372,13 +373,13 @@ class SnapshotIndex:
             for entry in excluded:
                 existing = self.connection.execute("SELECT artifact_id,reason FROM exclusions WHERE path=?", (entry["path"],)).fetchone()
                 if existing is None:
-                    self.connection.execute("INSERT INTO exclusions(path,artifact_id,reason,status) VALUES (?,?,?,?)", (entry["path"], None, entry["reason"], "manifest_excluded"))
+                    self.connection.execute("INSERT INTO exclusions(path,artifact_id,reason,status,sha256,size) VALUES (?,?,?,?,?,?)", (entry["path"], None, entry["reason"], "manifest_excluded", None, None))
                 elif existing[0] is not None or existing[1] != entry["reason"]:
                     raise _bounded_error("manifest_mismatch")
 
             rows = self.connection.execute("SELECT artifact_id,path,sha256,size FROM files").fetchall()
             file_by_id = {row[0]: row for row in rows}
-            exclusion_rows = self.connection.execute("SELECT artifact_id,path FROM exclusions WHERE artifact_id IS NOT NULL").fetchall()
+            exclusion_rows = self.connection.execute("SELECT artifact_id,path,sha256,size FROM exclusions WHERE artifact_id IS NOT NULL").fetchall()
             exclusion_by_id = {row[0]: row for row in exclusion_rows}
             if set(file_by_id) | set(exclusion_by_id) != set(artifact_ids) or set(file_by_id) & set(exclusion_by_id):
                 raise _bounded_error("manifest_mismatch")
@@ -389,7 +390,7 @@ class SnapshotIndex:
                         raise _bounded_error("manifest_mismatch")
                 else:
                     row = exclusion_by_id[item["artifact_id"]]
-                    if row[1] != item["path"]:
+                    if (row[1], row[2], row[3]) != (item["path"], item["sha256"], item["size"]):
                         raise _bounded_error("manifest_mismatch")
             current_paths = {row[1] for row in rows} | {row[1] for row in exclusion_rows}
             current_paths |= {row[0] for row in self.connection.execute("SELECT path FROM exclusions WHERE artifact_id IS NULL")}
@@ -432,7 +433,7 @@ class SnapshotIndex:
             raise _bounded_error("invalid_query")
         if isinstance(top, bool) or not isinstance(top, int) or not 1 <= top <= MAX_TOP:
             raise _bounded_error("invalid_top")
-        match = _query_match(query)
+        match = _match_query(query)
         if not match:
             return []
 
