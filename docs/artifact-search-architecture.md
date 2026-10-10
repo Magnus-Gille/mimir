@@ -1,8 +1,9 @@
 # Decision: independent artifact retrieval on M5
 
 Date: 2026-10-09. Scope: Mímir #40 feasibility and implementation ownership.
-Status: design selected for the spike; production implementation and deployment
-are follow-up work. This decision does not relocate or reconfigure a live service.
+Status: design selected for the spike; snapshot and standalone runtime packages
+are implemented. Production rollout and quality acceptance remain follow-up work.
+This decision does not relocate or reconfigure a live service.
 
 ## Ownership and placement
 
@@ -100,11 +101,15 @@ index coverage and model availability.
 
 ## Scope of this implementation
 
-The verified CLI spike runs on the laptop and calls the private M5 runtime. It
+The original verified CLI spike runs on the laptop and calls the private M5 runtime. It
 implements extraction, a local hash-checked source adapter, vector caching,
-lexical/vector/hybrid retrieval and a fixed-query comparison. It does not yet
-implement remote Mímir inventories, the always-on M5 retrieval service, agent
-API exposure, OCR, per-user ACLs or production deployment.
+lexical/vector/hybrid retrieval and a fixed-query comparison. The subsequent
+[snapshot adapter](artifact-source-snapshots.md) provides complete pinned local
+and HTTP snapshots. The [standalone runtime](artifact-search-runtime.md) adds an
+owner-authenticated lexical API, trusted freshness handoff, resumable indexing
+and exact-release packaging. It is ready for separately approved installation;
+no live M5 search deployment is claimed. Held-out owner review and quality
+evaluation remain pending; OCR and per-user ACLs remain out of scope.
 
 The bounded next work is specified in [artifact-search-followups.md](artifact-search-followups.md).
 Run instructions and measured limitations are in [artifact-search-poc.md](artifact-search-poc.md).

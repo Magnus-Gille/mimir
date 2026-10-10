@@ -102,6 +102,8 @@ def _validate_cases(cases: object) -> None:
                 raise ValueError("expected items need an integer number")
             if item['number'] < 1 or item['kind'] not in {'slide', 'page', 'section'}:
                 raise ValueError('expected locations need a supported kind and 1-based number')
+            if "sha256" in item and not isinstance(item["sha256"], str):
+                raise ValueError("expected sha256 must be a string when present")
 
 
 def _field(value: object, name: str, default: object = None) -> object:
@@ -112,11 +114,16 @@ def _field(value: object, name: str, default: object = None) -> object:
 
 def _matches(hit: object, expected: dict) -> bool:
     locator = _field(hit, "locator")
-    return (
+    matches_locator = (
         _field(hit, "path") == expected["path"]
         and _field(locator, "kind") == expected["kind"]
         and _field(locator, "number") == expected["number"]
     )
+    if not matches_locator:
+        return False
+    # Legacy cases omit this field. A labeled SHA-256 is a content identity
+    # assertion and must match the hit; a missing hit hash is not a match.
+    return "sha256" not in expected or _field(hit, "sha256") == expected["sha256"]
 
 
 def _matching_rank(hits: list[object], expected: list[dict]) -> int | None:

@@ -202,5 +202,6 @@ assert result['artifacts'] == 60
       if (server) await close(server);
       await rm(root, { recursive: true, force: true });
     }
-  });
+  // Includes three Python startups and real 1.1-second request pacing.
+  }, 15000);
 });
