@@ -212,13 +212,21 @@ retrieval and exact-quotation checks.
 `tools/artifact_search/answerability.py` provides an opt-in, transport-independent
 `check_answerability(question, candidates, complete)` function for offline
 experiments. It accepts up to five excerpts and makes at most two completion
-calls. It does not alter the lexical service, retrieval defaults, or deployment.
+calls. Each candidate has `candidate_id`, `text`, and optional `source` metadata
+(up to 1000 characters) identifying the document and locator. Metadata is passed
+separately, treated as untrusted context, and never inserted into a quoted excerpt. It does not alter the lexical service, retrieval defaults, or deployment.
 
 The code divides candidate text into bounded, overlapping, verbatim spans with
 stable IDs for that call. The model selects IDs rather than copying quotations;
 the code resolves selected IDs back to exact original text. The first assessment
-decomposes the question into required facts, properties and relationships. Any
-missing, partial or contradicted requirement causes abstention.
+decomposes the question into required facts, properties and relationships. Each
+requirement must provide an `answer` field and a source-grounding or missing-
+information `justification` before its `status`. Supported requirements need a
+concrete answer; other statuses may leave the answer blank. The parser enforces the response
+field order `id`, `requirement`, `evidence`, `answer`, `justification`, `status`.
+Answers and justifications are bounded to 2000 characters; supported answers and
+all justifications must be nonblank. Any missing, partial or contradicted
+requirement causes abstention.
 For a proposed complete answer, a second check receives the original question
 and only the selected spans, without the first assessment's requirements or
 verdict. It independently checks all requested parts, entity and time scope,
@@ -264,3 +272,18 @@ excluded two negative labels as ambiguous. The frozen labels and failed report
 remain intact; neither relabeling nor replaying this consumed set establishes a
 passing held-out result. Replacement labels require a new source-only review
 before inference, with the same predeclared thresholds.
+
+
+A second source-audited 16-case trial also failed with Qwen: 6/8 expected positive
+locations, 2/2 distractors, and 6/8 misses. Requiring concrete answers and
+justifications made the failures inspectable but did not improve those rates.
+Independent review of the selected evidence confirmed unsupported assertions,
+an incomplete answer, and a question with conflicting cross-document context.
+The consumed reports remain available privately. Subsequent blind questions
+must identify their event/document context where facts repeat, and their gold
+locations must account for equivalent answers within that context.
+
+The caller now supplies verified document/locator provenance separately from
+excerpt text. Model selection is evaluated on consumed calibration and regression
+cases before another blind test; improving prompt structure alone is not a
+semantic acceptance result.
