@@ -214,10 +214,13 @@ retrieval and exact-quotation checks.
 experiments. It accepts up to five excerpts and makes at most two completion
 calls. It does not alter the lexical service, retrieval defaults, or deployment.
 
-The first assessment decomposes the question into required facts, properties and
-relationships. Any missing, partial or contradicted requirement causes abstention.
+The code divides candidate text into bounded, overlapping, verbatim spans with
+stable IDs for that call. The model selects IDs rather than copying quotations;
+the code resolves selected IDs back to exact original text. The first assessment
+decomposes the question into required facts, properties and relationships. Any
+missing, partial or contradicted requirement causes abstention.
 For a proposed complete answer, a second check receives the original question
-and only the cited excerpts, without the first assessment's requirements or
+and only the selected spans, without the first assessment's requirements or
 verdict. It independently checks all requested parts, entity and time scope,
 units and precision. Equivalent wording, translations, headings and diagrams
 can supply explicit support; a related topic or a less precise value cannot.
@@ -226,8 +229,8 @@ Both calls may use the same model, so this is not independent model review.
 Only two fully supported assessments produce `answerable: true`. The result
 includes exact quoted evidence and both structured assessments. The module
 validates bounded JSON, schema and status values, unique requirement IDs, and
-exact source citations. The verifier can cite only text contained in a quote it
-was supplied. Malformed output or callback failure raises an error; neither is
+valid source-span selections. The verifier can select only spans it was supplied.
+Malformed output or callback failure raises an error; neither is
 a successful abstention. An empty candidate list returns an explicit missing
 result without a completion call.
 
