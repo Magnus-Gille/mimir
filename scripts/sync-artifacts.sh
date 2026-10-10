@@ -74,12 +74,12 @@ rmdir "$PENDING"
 # Step 2: Mirror laptop → NAS (laptop is source of truth)
 # Safety: abort if --delete would remove >20% of remote files
 echo "==> Pushing laptop → NAS (with --delete)..."
-DRY_OUTPUT=$(rsync -an --delete "$LOCAL" "$REMOTE" 2>/dev/null)
+DRY_OUTPUT=$(rsync -an --delete --filter='P /artifact-snapshots/***' --exclude='/artifact-snapshots' "$LOCAL" "$REMOTE" 2>/dev/null)
 DELETES=$(printf '%s\n' "$DRY_OUTPUT" | awk '/^deleting / { n++ } END { print n + 0 }')
 if [ "$DELETES" -gt 0 ]; then
   # Count the actual remote population, not rsync's changed-line output. A
   # delete mixed with many additions must not dilute the safety percentage.
-  REMOTE_POPULATION=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$NAS" "find '$REMOTE_ROOT' -mindepth 1 -printf .")
+  REMOTE_POPULATION=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$NAS" "find '$REMOTE_ROOT' -mindepth 1 -path '$REMOTE_ROOT/artifact-snapshots' -prune -o -printf .")
   REMOTE_TOTAL=${#REMOTE_POPULATION}
   if [ "$REMOTE_TOTAL" -gt 0 ]; then
     PCT=$(( DELETES * 100 / REMOTE_TOTAL ))
@@ -92,6 +92,7 @@ if [ "$DELETES" -gt 0 ]; then
     exit 1
   fi
 fi
-rsync -av --delete --max-delete="$MAX_DELETE" "$LOCAL" "$REMOTE"
+# NAS-owned snapshot output is neither replaced nor deleted by laptop sync.
+rsync -av --delete --max-delete="$MAX_DELETE" --filter='P /artifact-snapshots/***' --exclude='/artifact-snapshots' "$LOCAL" "$REMOTE"
 
 echo "==> Sync complete."

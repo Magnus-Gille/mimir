@@ -13,7 +13,7 @@ import uuid
 import zipfile
 
 MODULES = ('__init__.py', 'core.py', 'extract.py', 'snapshot.py', 'snapshot_delta.py',
-           'snapshot_http.py', 'runtime_index.py', 'runtime.py')
+           'snapshot_http.py', 'runtime_index.py', 'runtime.py', 'operations.py')
 SHA = re.compile(r'^[0-9a-f]{40}$')
 BOOT = '''import hashlib, json, os, sys, zipfile
 with zipfile.ZipFile(sys.argv[0]) as package:
@@ -22,7 +22,11 @@ expected = os.environ.get('MIMIR_SEARCH_RELEASE', '')
 if expected != release['release']:
     sys.exit('MIMIR_SEARCH_RELEASE must equal the approved immutable package release')
 os.environ['MIMIR_SEARCH_PACKAGE_SHA256'] = hashlib.sha256(open(sys.argv[0], 'rb').read()).hexdigest()
-from tools.artifact_search.runtime import main
+if sys.argv[1:2] == ['ops']:
+    del sys.argv[1]
+    from tools.artifact_search.operations import main
+else:
+    from tools.artifact_search.runtime import main
 raise SystemExit(main())
 '''
 

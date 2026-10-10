@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -133,6 +133,43 @@ function runSyncScript(
 }
 
 describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
+  it.skipIf(spawnSync("rsync", ["--version"]).status !== 0)("keeps NAS snapshots when the sender collides with any filesystem type", () => {
+    const source = readFileSync(join(REPO_ROOT, "scripts", script), "utf8");
+    const mirror = source.split("\n").find(line => line.includes("--delete --max-delete="))!;
+    const filters = [...mirror.matchAll(/(--(?:filter|exclude))='([^']+)'/g)].map(match => `${match[1]}=${match[2]}`);
+    expect(filters).toHaveLength(2);
+    for (const kind of ["file", "directory", "symlink"]) {
+      const root = tempDir();
+      const sender = join(root, "sender");
+      const receiver = join(root, "receiver");
+      mkdirSync(sender);
+      mkdirSync(join(receiver, "artifact-snapshots", "pilot"), { recursive: true });
+      const protectedFile = join(receiver, "artifact-snapshots", "pilot", "manifest.json");
+      writeFileSync(protectedFile, "NAS-owned");
+      writeFileSync(join(sender, "original.html"), "current original");
+      const collision = join(sender, "artifact-snapshots");
+      if (kind === "file") writeFileSync(collision, "sender file");
+      else if (kind === "symlink") symlinkSync(join(root, "elsewhere"), collision);
+      else {
+        mkdirSync(join(collision, "pilot"), { recursive: true });
+        writeFileSync(join(collision, "pilot", "manifest.json"), "sender replacement");
+      }
+      const result = spawnSync("rsync", ["-a", "--delete", ...filters, `${sender}/`, `${receiver}/`], { encoding: "utf8" });
+      expect(result.status, `${kind}: ${result.stderr}`).toBe(0);
+      expect(readFileSync(protectedFile, "utf8")).toBe("NAS-owned");
+      expect(readFileSync(join(receiver, "original.html"), "utf8")).toBe("current original");
+    }
+  });
+  it("protects NAS-owned snapshots in both delete preview and actual mirror", () => {
+    const { result, invocations } = runSyncScript(script);
+    expect(result.status, result.stderr).toBe(0);
+    const mirrors = invocations.split("\n").filter(line => line.startsWith("rsync ") && line.includes("--delete"));
+    expect(mirrors).toHaveLength(2);
+    for (const invocation of mirrors) {
+      expect(invocation).toContain("--filter=P /artifact-snapshots/***");
+      expect(invocation).toContain("--exclude=/artifact-snapshots");
+    }
+  });
   it("does not scan or mirror after an inbox import failure", () => {
     const { result, invocations } = runSyncScript(script, {
       MOCK_IMPORTED: "partial-secret.txt",
@@ -246,6 +283,7 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
     });
     expect(result.status, result.stderr).toBe(0);
     expect(invocations).toContain("--delete --max-delete=50");
+    expect(invocations).toContain("-path '/home/mimir/mimir/artifact-snapshots' -prune -o -printf .");
   });
 
   it("fails closed when the remote population cannot be measured", () => {

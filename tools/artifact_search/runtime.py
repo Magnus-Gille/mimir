@@ -107,7 +107,9 @@ def source_for(handoff):
     if handoff['kind'] == 'local':
         return LocalSnapshotSource(handoff['bundle'], handoff['snapshot_id'], handoff['source_id'])
     return HttpSnapshotSource(handoff['bundle'], handoff['snapshot_id'], handoff['source_id'],
-                              os.environ.get('MIMIR_API_KEY', ''))
+                              os.environ.get('MIMIR_API_KEY', ''),
+                              access_client_id=os.environ.get('MIMIR_CF_ACCESS_CLIENT_ID', ''),
+                              access_client_secret=os.environ.get('MIMIR_CF_ACCESS_CLIENT_SECRET', ''))
 
 
 class Runtime:
@@ -338,7 +340,7 @@ def _read_original(reader, url):
         time.sleep(max(0, 1.1 - (time.monotonic() - reader.last_request)))
     reader.last_request = time.monotonic()
     try:
-        request = Request(url, headers={'Authorization': 'Bearer ' + reader.api_key, 'Accept-Encoding': 'identity'})
+        request = Request(url, headers=reader.headers)
         with reader.opener.open(request, timeout=reader.timeout) as response:
             if response.status != 200 or response.headers.get('Content-Encoding', 'identity') != 'identity':
                 raise RuntimeErrorCode('original_unavailable')

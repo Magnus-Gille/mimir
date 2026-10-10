@@ -18,8 +18,28 @@ class _NoRedirect(HTTPRedirectHandler):
         raise SnapshotError('source_redirect_rejected')
 
 
+def source_headers(url, api_key, access_client_id='', access_client_secret=''):
+    """Only explicit owner credentials; never derive auth from URLs or responses."""
+    if (not isinstance(api_key, str) or not api_key or len(api_key) > 4096 or
+            any(ord(c) < 33 or ord(c) > 126 for c in api_key)):
+        raise SnapshotError('invalid_source_credential')
+    if (not all(isinstance(v, str) and len(v) <= 4096 and
+                all(33 <= ord(c) <= 126 for c in v)
+                for v in (access_client_id, access_client_secret)) or
+            bool(access_client_id) != bool(access_client_secret)):
+        raise SnapshotError('invalid_edge_credentials')
+    if access_client_id and urlsplit(url).scheme != 'https':
+        raise SnapshotError('edge_credentials_require_https')
+    headers = {'Authorization': 'Bearer ' + api_key, 'Accept-Encoding': 'identity'}
+    if access_client_id:
+        headers.update({'CF-Access-Client-Id': access_client_id,
+                        'CF-Access-Client-Secret': access_client_secret})
+    return headers
+
+
 class HttpSnapshotSource:
-    def __init__(self, base_url, expected_sha256, source_id, api_key, timeout=15, opener=None):
+    def __init__(self, base_url, expected_sha256, source_id, api_key, timeout=15, opener=None,
+                 *, access_client_id='', access_client_secret=''):
         _uuid(source_id)
         if not isinstance(expected_sha256, str) or not HEX.fullmatch(expected_sha256):
             raise SnapshotError('invalid_manifest_pin')
@@ -44,13 +64,12 @@ class HttpSnapshotSource:
             raise SnapshotError('source_requires_https')
         if address and (address.is_unspecified or address.is_multicast or address.is_link_local):
             raise SnapshotError('invalid_source_url')
-        if (not isinstance(api_key, str) or not api_key or len(api_key) > 4096 or
-                any(ord(c) < 33 or ord(c) > 126 for c in api_key)):
-            raise SnapshotError('invalid_source_credential')
+        headers = source_headers(base_url, api_key, access_client_id, access_client_secret)
         if type(timeout) not in {int, float} or not 0 < timeout <= 60:
             raise SnapshotError('invalid_source_timeout')
         self.base_url = base_url.rstrip('/')
         self.api_key = api_key
+        self.headers = headers
         self.timeout = timeout
         self.last_request = None
         self.opener = opener or build_opener(ProxyHandler({}), _NoRedirect())
@@ -61,14 +80,14 @@ class HttpSnapshotSource:
     @classmethod
     def from_env(cls, expected_sha256, source_id):
         return cls(os.environ.get('MIMIR_SNAPSHOT_URL', ''), expected_sha256, source_id,
-                   os.environ.get('MIMIR_API_KEY', ''))
+                   os.environ.get('MIMIR_API_KEY', ''),
+                   access_client_id=os.environ.get('MIMIR_CF_ACCESS_CLIENT_ID', ''),
+                   access_client_secret=os.environ.get('MIMIR_CF_ACCESS_CLIENT_SECRET', ''))
 
     def _get(self, relative, limit):
         if relative != 'manifest.json' and not re.fullmatch(r'objects/[0-9a-f]{64}', relative):
             raise SnapshotError('invalid_object_path')
-        request = Request(self.base_url + '/' + relative,
-                          headers={'Authorization': 'Bearer ' + self.api_key,
-                                   'Accept-Encoding': 'identity'})
+        request = Request(self.base_url + '/' + relative, headers=self.headers)
         # Leave margin under Mímir's default 60/IP/minute window, including
         # the manifest request. Shared-IP activity can still yield a fail-closed 429.
         if self.last_request is not None:
