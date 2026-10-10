@@ -59,6 +59,7 @@ def _reader(outcome, *, last_request=None):
     return SimpleNamespace(
         opener=opener,
         api_key="transport-test-key",
+        headers={"Authorization": "Bearer transport-test-key", "Accept-Encoding": "identity"},
         timeout=7,
         last_request=last_request,
     ), opener

@@ -158,6 +158,8 @@ private state directory and rebuild from a currently authorized snapshot; do not
 silently reuse an incompatible database. These procedures provide the package and
 acceptance contract; service installation, credential provisioning, trusted
 publisher wiring and a live M5 smoke test remain operational prerequisites.
+See [first-install preparation](artifact-search-operations.md) for the selected
+publisher, trusted refresher, edge authentication and user-unit renderer.
 
 ## Verification and quality status
 
@@ -166,4 +168,4 @@ resume, cancellation/retry, rebuild/recovery, source freshness, original changes
 authentication and provenance, package tampering and rollback acceptance. They do
 not constitute deployment verification or real-corpus relevance acceptance.
 See [artifact-search-evaluation.md](artifact-search-evaluation.md) for the held-out
-label workflow. Draft source-grounded questions require owner review before use.
+label workflow and independent source-audit alternative to owner review.

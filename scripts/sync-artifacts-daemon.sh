@@ -113,10 +113,10 @@ rmdir "$PENDING"
 # Step 2: Mirror laptop → NAS (laptop is source of truth)
 # Safety: abort if --delete would remove >20% of remote files
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Pushing laptop → NAS..."
-DRY_OUTPUT=$(rsync -an --delete "$LOCAL" "$REMOTE" 2>/dev/null)
+DRY_OUTPUT=$(rsync -an --delete --filter='P /artifact-snapshots/***' --exclude='/artifact-snapshots' "$LOCAL" "$REMOTE" 2>/dev/null)
 DELETES=$(printf '%s\n' "$DRY_OUTPUT" | awk '/^deleting / { n++ } END { print n + 0 }')
 if [ "$DELETES" -gt 0 ]; then
-  REMOTE_POPULATION=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$NAS" "find '$REMOTE_ROOT' -mindepth 1 -printf .")
+  REMOTE_POPULATION=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$NAS" "find '$REMOTE_ROOT' -mindepth 1 -path '$REMOTE_ROOT/artifact-snapshots' -prune -o -printf .")
   REMOTE_TOTAL=${#REMOTE_POPULATION}
   if [ "$REMOTE_TOTAL" -gt 0 ]; then
     PCT=$(( DELETES * 100 / REMOTE_TOTAL ))
@@ -128,7 +128,7 @@ if [ "$DELETES" -gt 0 ]; then
     exit 1
   fi
 fi
-if rsync -a --delete --max-delete="$MAX_DELETE" "$LOCAL" "$REMOTE"; then
+if rsync -a --delete --max-delete="$MAX_DELETE" --filter='P /artifact-snapshots/***' --exclude='/artifact-snapshots' "$LOCAL" "$REMOTE"; then
   # Publishes only a normalized UTC timestamp and state, outside the mirrored
   # tree. A restricted probe cannot traverse the archive or read artifacts.
   if ! publish_sync_freshness success; then

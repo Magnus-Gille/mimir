@@ -77,6 +77,12 @@
       "target": "docs/artifact-search-evaluation.md"
     },
     {
+      "id": "artifact-search-first-install",
+      "kind": "retrieval",
+      "prompt": "How do I prepare the selected source publisher, authenticated handoff refresh and user services while protecting NAS snapshots from laptop sync?",
+      "target": "docs/artifact-search-operations.md"
+    },
+    {
       "id": "secret-scan-quarantine-control",
       "kind": "control",
       "prompt": "If an inbox import contains a private key or other secret-looking token, what must happen before it can reach the NAS mirror?",
