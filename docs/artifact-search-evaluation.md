@@ -250,3 +250,17 @@ checks are separate from semantic correctness: valid JSON and matching quotes do
 not prove that a question was fully answered. Mocked unit tests establish the
 protocol behavior; real source-audited cases and independent evidence review are
 required to assess answer completeness.
+
+
+The calendar guard corrected the earlier month-only exact-date false positive:
+all 12 calibration cases and all 12 consumed regression cases passed. Replaying
+the same real model responses after deterministic parser corrections preserved
+all outcomes. These are calibration and regression evidence, not fresh acceptance.
+
+The first new 16-case precision test still failed: 7/8 positives, 2/2 distractors,
+and 6/8 misses. It exposed an unrecognized Swedish calendar-date wording, now
+covered by a regression test. A stronger independent source-only re-audit also
+excluded two negative labels as ambiguous. The frozen labels and failed report
+remain intact; neither relabeling nor replaying this consumed set establishes a
+passing held-out result. Replacement labels require a new source-only review
+before inference, with the same predeclared thresholds.
