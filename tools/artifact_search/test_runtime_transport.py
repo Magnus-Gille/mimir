@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from email.message import Message
 from pathlib import Path
 import os
@@ -179,7 +181,10 @@ class RuntimeStateTests(unittest.TestCase):
             handoff = self._local_handoff(directory)
             index_name = SNAPSHOT_ID + ".sqlite"
             job = state / "job.json"
-            _write_private(job, {"status": "failed", "index": index_name})
+            binding = json.loads(handoff.read_text())
+            _write_private(job, {"status": "failed", "index": index_name,
+                                 "snapshot_id": binding['snapshot_id'],
+                                 "source_id": binding['source_id'], "handoff": binding})
             sidecars = ("", "-journal", "-wal", "-shm")
             expected = {}
             for sidecar in sidecars:

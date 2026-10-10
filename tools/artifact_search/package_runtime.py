@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import time
+import uuid
 import zipfile
 
 MODULES = ('__init__.py', 'core.py', 'extract.py', 'snapshot.py', 'snapshot_delta.py',
@@ -48,7 +50,8 @@ def build(repo, revision):
     return output.getvalue()
 
 
-def verify(data, revision, sha256, health=None):
+def verify(data, revision, sha256, health=None, *, retrieval=None,
+           expected_snapshot=None, expected_source=None):
     if not SHA.fullmatch(revision) or hashlib.sha256(data).hexdigest() != sha256:
         raise ValueError('release_package_mismatch')
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
@@ -63,8 +66,32 @@ def verify(data, revision, sha256, health=None):
         for path, digest in files.items():
             if hashlib.sha256(archive.read(path)).hexdigest() != digest:
                 raise ValueError('package_content_mismatch')
-    if health is not None and (health.get('release') != revision or health.get('package_sha256') != sha256 or health.get('ready') is not True):
-        raise ValueError('deployment_not_accepted')
+    if health is not None:
+        if (not isinstance(health, dict) or not isinstance(retrieval, dict) or
+                not isinstance(expected_snapshot, str) or not re.fullmatch('[0-9a-f]{64}', expected_snapshot) or
+                not isinstance(expected_source, str) or str(uuid.UUID(expected_source)) != expected_source or
+                health.get('ready') is not True):
+            raise ValueError('retrieval_acceptance_required')
+        for receipt in (health, retrieval):
+            if any(receipt.get(key) != expected for key, expected in
+                   (('release', revision), ('package_sha256', sha256),
+                    ('snapshot_id', expected_snapshot), ('source_id', expected_source))):
+                raise ValueError('deployment_not_accepted')
+        now = time.time()
+        observed, expires, checked = (retrieval.get(key) for key in ('observed_at', 'expires_at', 'verified_at'))
+        if (type(observed) is not int or type(expires) is not int or type(checked) not in (int, float) or
+                not observed <= checked <= now < expires or not 0 <= now - checked <= 30 or
+                not 0 < expires - observed <= 3600 or
+                (observed, expires) != (health.get('observed_at'), health.get('expires_at'))):
+            raise ValueError('stale_retrieval_receipt')
+        hits = retrieval.get('results')
+        if (not isinstance(hits, list) or not 1 <= len(hits) <= 5 or
+                any(not isinstance(item, dict) or item.get('verification') != 'original_sha256_matched' or
+                    not isinstance(item.get('sha256'), str) or not re.fullmatch('[0-9a-f]{64}', item['sha256'])
+                    for item in hits)):
+            raise ValueError('successful_retrieval_required')
+    elif retrieval is not None:
+        raise ValueError('health_acceptance_required')
     return {'release': revision, 'sha256': sha256, 'verified': True,
             'deployment_accepted': health is not None}
 
@@ -77,6 +104,9 @@ def main(argv=None):
     parser.add_argument('--repo', type=Path, default=Path('.'))
     parser.add_argument('--sha256')
     parser.add_argument('--health-json', type=Path)
+    parser.add_argument('--retrieval-json', type=Path)
+    parser.add_argument('--snapshot-id')
+    parser.add_argument('--source-id')
     args = parser.parse_args(argv)
     try:
         if args.action == 'build':
@@ -87,7 +117,9 @@ def main(argv=None):
         else:
             data, sha = args.package.read_bytes(), args.sha256
         health = json.loads(args.health_json.read_text()) if args.health_json else None
-        print(json.dumps(verify(data, args.release, sha, health)))
+        retrieval = json.loads(args.retrieval_json.read_text()) if args.retrieval_json else None
+        print(json.dumps(verify(data, args.release, sha, health, retrieval=retrieval,
+                               expected_snapshot=args.snapshot_id, expected_source=args.source_id)))
     except (OSError, ValueError, KeyError, subprocess.CalledProcessError, zipfile.BadZipFile):
         print(json.dumps({'error': 'package_verification_failed'}))
         return 1

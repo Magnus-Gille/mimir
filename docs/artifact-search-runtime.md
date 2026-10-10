@@ -98,7 +98,9 @@ shell command or result URL. Only the exact loopback Host is accepted.
 
 - `GET /health` and `/index`: source/snapshot IDs, coverage counts, job state,
   observed/expiry times, readiness, package release and package checksum. HTTP 503
-  means not ready; authentication failures reveal no index metadata.
+  means not ready; authentication failures reveal no index metadata. Readiness
+  covers the index and trusted handoff only. It cannot certify every original;
+  originals are checked on retrieval and deployment acceptance also needs a probe.
 - `POST /search`: JSON `{"query":"...","top":5}`. Up to five results and 4,096
   query characters; the whole body is bounded to 8,192 bytes. No retrieval jobs,
   source URLs or mutable configuration are accepted through this API.
@@ -138,10 +140,16 @@ python3 -m tools.artifact_search.package_runtime verify \
 
 Run the approved package with `python3 /private/path/search.pyz serve ...` and the
 existing private environment. After an explicitly approved installation, save an
-authenticated health response privately and pass `--health-json <path>` to the
-same verifier. Acceptance requires ready=true plus the exact approved release and
-package checksum. Merely building, starting a process or seeing HTTP 200 is not
-deployment evidence. Development module runs are not release acceptance.
+authenticated health response and successful `/search` probe privately. The probe
+must retrieve at least one known original; no-hit queries cannot prove the source
+read path. Supply `--health-json <path> --retrieval-json <path> --snapshot-id <pin>
+--source-id <uuid>` to the same verifier, using the independently approved source
+and snapshot pins. Acceptance requires ready=true, the exact approved release and
+package checksum in both responses, matching fresh handoffs, and a successful
+original-hash verification no older than 30 seconds. It is point-in-time evidence,
+not a guarantee against subsequent source changes. Merely building, starting a
+process or seeing HTTP 200 is not deployment evidence. Development module runs
+are not release acceptance.
 
 Rollback uses the preserved previous package and its separately retained receipt,
 then the same exact-release verification and fresh health acceptance. Stop the

@@ -270,6 +270,7 @@ class Runtime:
         except (OSError, ValueError, sqlite3.DatabaseError):
             output['status'] = 'unavailable'
         output['ready'] = output['status'] == 'ready' and output['fresh']
+        output['readiness_scope'] = 'index_and_handoff; originals verified per retrieval'
         output['release'] = os.environ.get('MIMIR_SEARCH_RELEASE', 'development')
         output['package_sha256'] = os.environ.get('MIMIR_SEARCH_PACKAGE_SHA256')
         return output
@@ -322,6 +323,9 @@ class Runtime:
         return {'mode': 'lexical', 'decision': 'fts5_bm25', 'results': results,
                 'snapshot_id': job['snapshot_id'], 'source_id': job['source_id'],
                 'observed_at': current['observed_at'], 'expires_at': current['expires_at'],
+                'verified_at': self.clock(),
+                'release': os.environ.get('MIMIR_SEARCH_RELEASE', 'development'),
+                'package_sha256': os.environ.get('MIMIR_SEARCH_PACKAGE_SHA256'),
                 'abstained': not bool(results)}
 
 
