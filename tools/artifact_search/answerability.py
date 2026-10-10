@@ -164,7 +164,7 @@ _MONTH_DAY_DATE_RE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 _DATE_MODIFIER = r"(?:[A-Za-z][A-Za-z-]*(?:\s+[A-Za-z][A-Za-z-]*){0,1}\s+)?"
-_DATE_METADATA_SUFFIX = r"(?!\s+(?:format|formatting|source|location)\b)"
+_DATE_METADATA_SUFFIX = r"(?!\s+(?:format|formatting|source|location|field|label|syntax|column|type|pattern|representation|property|attribute|key)\b)"
 _DATE_REQUEST_RE = re.compile(
     r"(?:"
     rf"\b(?:what|which)\s+(?:(?:is|was)\s+)?(?:the\s+)?(?:exact\s+)?{_DATE_MODIFIER}date\b{_DATE_METADATA_SUFFIX}"

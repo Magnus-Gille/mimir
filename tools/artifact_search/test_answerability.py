@@ -95,11 +95,23 @@ class AnswerabilityTests(unittest.TestCase):
             "Why is an exact date missing?",
             "Where is the source for the exact date?",
             "What is the date format?",
+            "What is the date field called?",
+            "What is the date label?",
+            "What is the date syntax?",
             "What is the exact launch date formatting?",
             "Vilket datumformat används?",
         ):
             with self.subTest(question=question):
                 self.assertFalse(_requests_calendar_date(question))
+
+    def test_date_metadata_does_not_require_a_calendar_value(self) -> None:
+        candidate = [{"candidate_id": "C1", "text": "The date field is called launch_date."}]
+        def complete(_prompt: str, _payload: dict[str, object]) -> str:
+            return response(supported("the field name"))
+        result = check_answerability("What is the date field called?", candidate, complete)
+        self.assertTrue(result["answerable"])
+        self.assertEqual(len(result["checks"]), 2)
+        self.assertTrue(_requests_calendar_date("What is the date field called and what is the launch date?"))
 
     def test_calendar_date_suppresses_labeled_heading_numbers_only(self) -> None:
         for text in (

@@ -226,8 +226,17 @@ units and precision. Equivalent wording, translations, headings and diagrams
 can supply explicit support; a related topic or a less precise value cannot.
 Both calls may use the same model, so this is not independent model review.
 
-Only two fully supported assessments produce `answerable: true`. The result
-includes exact quoted evidence and both structured assessments. The module
+Two fully supported assessments are required for `answerable: true`. Recognized
+explicit Swedish and English calendar-date requests also require a valid full date in a
+selected source span. This conservative check recognizes common numeric dates
+and Swedish/English month names, validates calendar days and leap years, and
+does not combine fragments across spans. Unsupported formats abstain; this is
+not a universal date parser. A date elsewhere in the excerpt is not proof of
+its relationship to the question: the model assessments and independent evidence
+audit must still check that relationship.
+
+The result includes exact quoted evidence, both structured assessments and, when
+applicable, the calendar-precision check. The module
 validates bounded JSON, schema and status values, unique requirement IDs, and
 valid source-span selections. The verifier can select only spans it was supplied.
 Malformed output or callback failure raises an error; neither is
