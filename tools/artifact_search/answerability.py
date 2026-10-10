@@ -170,8 +170,8 @@ _DATE_REQUEST_RE = re.compile(
     rf"\b(?:what|which)\s+(?:(?:is|was)\s+)?(?:the\s+)?(?:exact\s+)?{_DATE_MODIFIER}date\b{_DATE_METADATA_SUFFIX}"
     r"|\bon\s+what\s+(?:exact\s+)?date\b"
     rf"|\b(?:give|provide|state|identify)\s+(?:the\s+)?(?:exact\s+)?{_DATE_MODIFIER}date\b{_DATE_METADATA_SUFFIX}"
-    r"|\bvilket\s+(?:(?:exakt|exakta)\s+)?datum(?:et)?\b"
-    r"|\bange\s+(?:(?:det\s+)?(?:exakt|exakta)\s+)?datum(?:et)?\b"
+    r"|\bvilket\s+(?:(?:exakt|exakta)\s+)?(?:kalender)?datum(?:et)?\b"
+    r"|\bange\s+(?:(?:det\s+)?(?:exakt|exakta)\s+)?(?:kalender)?datum(?:et)?\b"
     r")",
     re.IGNORECASE,
 )

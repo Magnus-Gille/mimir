@@ -87,6 +87,8 @@ class AnswerabilityTests(unittest.TestCase):
         self.assertTrue(_requests_calendar_date("Give the launch date."))
         self.assertTrue(_requests_calendar_date("On what date did it happen?"))
         self.assertTrue(_requests_calendar_date("Vilket exakt datum anges?"))
+        self.assertTrue(_requests_calendar_date("Vilket exakt kalenderdatum anges?"))
+        self.assertTrue(_requests_calendar_date("Ange kalenderdatumet."))
         self.assertTrue(_requests_calendar_date("Ange det exakta datumet."))
         self.assertTrue(_requests_calendar_date("What is the year and what is the exact date?"))
         for question in (
@@ -148,7 +150,7 @@ class AnswerabilityTests(unittest.TestCase):
         self.assertFalse(multipart["answerable"])
         self.assertEqual(multipart["status"], "partial")
 
-        for question in ("What is the exact launch date?", "Give the launch date."):
+        for question in ("What is the exact launch date?", "Give the launch date.", "Vilket exakt kalenderdatum hände det?"):
             with self.subTest(question=question):
                 guarded = check_answerability(question, candidate, complete)
                 self.assertFalse(guarded["answerable"])
