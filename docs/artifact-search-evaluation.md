@@ -181,3 +181,27 @@ prototype, not a deployed search runtime. After this run the fresh set is consum
 regression evidence; further tuning needs separate calibration and a new blind
 acceptance set. The next missing capability is evidence-based answer checking or
 abstention, evaluated separately from candidate relevance.
+
+### Separate quoted-evidence pilot
+
+A private experiment asked the existing M5 `qwen3-30b-instruct` route whether
+the five retrieved excerpts directly answered a question. It required strict
+JSON, a complete generation and an exact contiguous supporting quotation; cited
+sources were revalidated after the additional call. The API reported
+`Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf`; the chat-model artifact was not attested.
+This is an experiment, not an integrated runtime or a new default.
+
+The prompt first passed all eight answerable and four absent-answer calibration
+cases. It was then frozen and tested on a third, separately source-audited set
+whose twelve queries and answer locations were disjoint from both earlier sets
+and calibration. It retained all eight accepted answer locations, including both
+distractors, and correctly abstained on three of four misses. The remaining false
+positive accepted month-level evidence for an exact-date question. The quote was
+present in the source, but did not satisfy the requested precision.
+
+The predeclared all-misses gate therefore still **fails**. Quote matching checks
+source presence, not whether the evidence fully answers the question. No prompt
+or labels were changed after the test, no answer-checking feature is enabled by
+this result, and the consumed set is now regression evidence. A future integrated
+check needs tests for partial answers and requested precision, distinct from its
+retrieval and exact-quotation checks.
