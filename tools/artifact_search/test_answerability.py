@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from tools.artifact_search.answerability import AnswerabilityError, check_answerability
+from tools.artifact_search.answerability import AnswerabilityError, _segment_candidates, check_answerability
 
 
 SOURCE = "The launch happened on 14 March 2025 in Stockholm, Sweden."
@@ -14,12 +14,12 @@ def response(*requirements: dict[str, object]) -> str:
     return json.dumps({"requirements": list(requirements)})
 
 
-def supported(requirement: str = "the launch date", quote: str = SOURCE) -> dict[str, object]:
+def supported(requirement: str = "the launch date", span_id: str = "S1") -> dict[str, object]:
     return {
         "id": "R1",
         "requirement": requirement,
         "status": "supported",
-        "evidence": [{"candidate_id": "C1", "quote": quote}],
+        "evidence": [span_id],
     }
 
 
@@ -34,6 +34,20 @@ class AnswerabilityTests(unittest.TestCase):
         result = check_answerability("What happened?", [], complete)
         self.assertEqual(result, {"answerable": False, "status": "missing", "evidence": [], "checks": []})
         self.assertEqual(calls, [])
+
+    def test_spans_are_exact_overlapping_bounded_and_cover_sources(self) -> None:
+        text = "".join(f"token-{index:04d} " for index in range(500))
+        candidates = [{"candidate_id": "C1", "text": text}]
+        spans = _segment_candidates(candidates)
+        self.assertGreater(len(spans), 1)
+        self.assertEqual([span.span_id for span in spans], [f"S{index}" for index in range(1, len(spans) + 1)])
+        self.assertEqual(spans[0].start, 0)
+        self.assertEqual(spans[-1].end, len(text))
+        self.assertTrue(all(0 < span.end - span.start <= 1200 for span in spans))
+        self.assertTrue(all(text[span.start : span.end] == span.text for span in spans))
+        self.assertTrue(all(current.start <= previous.end for previous, current in zip(spans, spans[1:])))
+        many = _segment_candidates([{"candidate_id": str(index), "text": "x" * 10000} for index in range(5)])
+        self.assertLessEqual(len(many), 55)
 
     def test_partial_multipart_request_stops_after_first_check(self) -> None:
         calls = 0
@@ -64,7 +78,7 @@ class AnswerabilityTests(unittest.TestCase):
                     "id": "R1",
                     "requirement": "the exact launch date",
                     "status": "partial",
-                    "evidence": [{"candidate_id": "C1", "quote": "launch occurred in March 2025"}],
+                    "evidence": ["S1"],
                 }
             )
 
@@ -84,7 +98,7 @@ class AnswerabilityTests(unittest.TestCase):
                     "id": "R1",
                     "requirement": "the date and location",
                     "status": "partial",
-                    "evidence": [{"candidate_id": "C1", "quote": SOURCE}],
+                    "evidence": ["S1"],
                 }
             )
 
@@ -93,22 +107,23 @@ class AnswerabilityTests(unittest.TestCase):
         self.assertEqual(result["status"], "partial")
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[1][1]["question"], "Give the date and location.")
-        self.assertEqual(set(calls[1][1]), {"question", "sources"})
-        self.assertEqual(calls[1][1]["sources"], [{"candidate_id": "C1", "quote": SOURCE}])
+        self.assertEqual(set(calls[0][1]), {"question", "spans"})
+        self.assertEqual(set(calls[1][1]), {"question", "spans"})
+        self.assertEqual(calls[1][1]["spans"], [{"span_id": "S1", "candidate_id": "C1", "text": SOURCE}])
 
-    def test_verifier_cannot_cite_unsupplied_original_text(self) -> None:
+    def test_verifier_cannot_cite_unsupplied_span(self) -> None:
         calls = 0
-        first_quote = "launch happened on 14 March 2025"
+        candidate = [{"candidate_id": "C1", "text": "A" * 1300}]
 
         def complete(_prompt: str, _payload: dict[str, object]) -> str:
             nonlocal calls
             calls += 1
             if calls == 1:
-                return response(supported("the launch date", first_quote))
-            return response(supported("the launch date", "Stockholm, Sweden"))
+                return response(supported("the launch date", "S1"))
+            return response(supported("the launch date", "S2"))
 
         with self.assertRaisesRegex(AnswerabilityError, "invalid_evidence"):
-            check_answerability("What is the launch date?", CANDIDATES, complete)
+            check_answerability("What is the launch date?", candidate, complete)
 
     def test_false_premise_is_contradicted(self) -> None:
         calls = 0
@@ -121,7 +136,7 @@ class AnswerabilityTests(unittest.TestCase):
                     "id": "R1",
                     "requirement": "the claimed launch date",
                     "status": "contradicted",
-                    "evidence": [{"candidate_id": "C1", "quote": SOURCE}],
+                    "evidence": ["S1"],
                 }
             )
 
@@ -144,10 +159,28 @@ class AnswerabilityTests(unittest.TestCase):
         self.assertEqual(result["evidence"], [{"candidate_id": "C1", "quote": SOURCE}])
         self.assertEqual(len(result["checks"]), 2)
         self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][1]["spans"], calls[1][1]["spans"])
 
-    def test_fabricated_quote_is_rejected(self) -> None:
+    def test_tiny_source_span_is_resolved_verbatim(self) -> None:
+        candidate = [{"candidate_id": "C1", "text": "tiny"}]
+
         def complete(_prompt: str, _payload: dict[str, object]) -> str:
-            return response(supported(quote="This quote is not in the source."))
+            return response(supported("the tiny fact", "S1"))
+
+        result = check_answerability("What is the tiny fact?", candidate, complete)
+        self.assertTrue(result["answerable"])
+        self.assertEqual(result["evidence"], [{"candidate_id": "C1", "quote": "tiny"}])
+
+    def test_attempted_quote_fabrication_is_rejected(self) -> None:
+        def complete(_prompt: str, _payload: dict[str, object]) -> str:
+            return response(
+                {
+                    "id": "R1",
+                    "requirement": "the date",
+                    "status": "supported",
+                    "evidence": [{"candidate_id": "C1", "quote": SOURCE}],
+                }
+            )
 
         with self.assertRaisesRegex(AnswerabilityError, "invalid_evidence"):
             check_answerability("What is the date?", CANDIDATES, complete)
@@ -159,7 +192,7 @@ class AnswerabilityTests(unittest.TestCase):
                     "id": "R1",
                     "requirement": "the date",
                     "status": "missing",
-                    "evidence": [{"candidate_id": "C9", "quote": SOURCE}],
+                    "evidence": ["S9"],
                 }
             )
 
