@@ -229,6 +229,16 @@ class RuntimeContractTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeErrorCode, 'index_provenance_mismatch'):
             runtime.search('north star', top=1)
 
+    def test_malformed_job_cannot_redirect_rebuild_or_break_health(self) -> None:
+        runtime, _root, _result, _bundle, _handoff = self._runtime()
+        self._complete(runtime)
+        original = runtime.job()
+        for value in ([], {'status': 'ready'}, {**original, 'index': '../outside.sqlite'}):
+            runtime.save(value)
+            self.assertFalse(runtime.health()['ready'])
+            with self.assertRaises(ValueError):
+                runtime.control('rebuild')
+
     def test_missing_or_changed_original_rejects_all_content(self) -> None:
         for failure in ("missing", "changed"):
             with self.subTest(failure=failure):

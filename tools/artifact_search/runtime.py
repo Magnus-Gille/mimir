@@ -127,7 +127,26 @@ class Runtime:
 
     def job(self):
         path = self.state / 'job.json'
-        return private_json(path) if path.exists() else {'status': 'empty'}
+        value = private_json(path) if path.exists() else {'status': 'empty'}
+        if (not isinstance(value, dict) or value.get('status') not in
+                {'empty', 'pending', 'ready', 'failed', 'cancelled'}):
+            raise RuntimeErrorCode('invalid_job_state')
+        if 'snapshot_id' in value:
+            pin = value['snapshot_id']
+            if (not isinstance(pin, str) or not HEX.fullmatch(pin) or
+                    value.get('index') != pin + '.sqlite' or
+                    not isinstance(value.get('handoff'), dict)):
+                raise RuntimeErrorCode('invalid_job_state')
+            _uuid(value.get('source_id'))
+            old = value['handoff']
+            if (not {'source_id', 'kind', 'original', 'mimir_origin', 'original_prefix',
+                     'observed_at', 'snapshot_id'} <= set(old) or
+                    type(old['observed_at']) is not int or old['snapshot_id'] != pin or
+                    old['source_id'] != value['source_id']):
+                raise RuntimeErrorCode('invalid_job_state')
+        elif any(key in value for key in ('index', 'source_id', 'handoff')) or value['status'] == 'ready':
+            raise RuntimeErrorCode('invalid_job_state')
+        return value
 
     def save(self, job):
         atomic_json(self.state / 'job.json', job)
