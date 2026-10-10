@@ -32,6 +32,13 @@ def supported(requirement: str = "the launch date", span_id: str = "S1") -> dict
 
 
 class AnswerabilityTests(unittest.TestCase):
+    def test_status_before_answer_is_rejected(self) -> None:
+        item = supported()
+        wrong_order = {"status": item.pop("status"), **item}
+        with self.assertRaisesRegex(AnswerabilityError, "invalid_requirement"):
+            check_answerability("What is the launch date?", CANDIDATES,
+                                lambda _prompt, _payload: response(wrong_order))
+
     def test_empty_candidates_are_structured_missing_without_callback(self) -> None:
         calls: list[object] = []
 

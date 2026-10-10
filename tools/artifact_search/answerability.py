@@ -119,7 +119,7 @@ class _Span:
 
 
 _STATUSES = frozenset({"supported", "partial", "missing", "contradicted"})
-_REQUIREMENT_KEYS = frozenset({"id", "requirement", "evidence", "answer", "justification", "status"})
+_REQUIREMENT_KEYS = ("id", "requirement", "evidence", "answer", "justification", "status")
 _MAX_JSON_BYTES = 64 * 1024
 _MAX_REQUIREMENT_TEXT = 4000
 _MAX_ANSWER_TEXT = 2000
@@ -336,7 +336,7 @@ def _parse_completion(raw: str, spans: dict[str, _Span]) -> list[dict[str, Any]]
     result: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for item in requirements:
-        if not isinstance(item, dict) or set(item) != _REQUIREMENT_KEYS:
+        if not isinstance(item, dict) or tuple(item) != _REQUIREMENT_KEYS:
             _fail("invalid_requirement")
         requirement_id = item["id"]
         requirement_text = item["requirement"]
