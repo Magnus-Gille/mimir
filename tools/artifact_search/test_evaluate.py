@@ -4,6 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from tools.artifact_search.evaluate import evaluate
+
 
 class EvaluateTests(unittest.TestCase):
     def _core(self, search):
@@ -69,6 +71,45 @@ class EvaluateTests(unittest.TestCase):
         self.assertFalse(report["results"][0]["hit"])
         self.assertIsNone(report["results"][0]["rank"])
         self.assertEqual(report["positive_case_count"], 1)
+
+    def test_expected_sha256_rejects_stale_and_missing_hit_hashes(self):
+        def search(_db, query, _top):
+            hit = {"path": "same.pdf", "locator": {"kind": "page", "number": 2}}
+            if query == "stale":
+                hit["sha256"] = "b" * 64
+            return [hit]
+
+        cases = [
+            {
+                "label": "stale",
+                "query": "stale",
+                "expected": [{"path": "same.pdf", "kind": "page", "number": 2, "sha256": "a" * 64}],
+            },
+            {
+                "label": "missing",
+                "query": "missing",
+                "expected": [{"path": "same.pdf", "kind": "page", "number": 2, "sha256": "a" * 64}],
+            },
+        ]
+        report = evaluate(Path("index.db"), cases, search_fn=search)
+
+        self.assertEqual(report["hit_at_k"], 0.0)
+        self.assertEqual(report["mean_reciprocal_rank"], 0.0)
+        self.assertFalse(report["results"][0]["hit"])
+        self.assertFalse(report["results"][1]["hit"])
+        self.assertIsNone(report["results"][0]["rank"])
+        self.assertIsNone(report["results"][1]["rank"])
+
+    def test_legacy_expected_without_sha256_still_matches(self):
+        def search(_db, _query, _top):
+            return [{"path": "same.pdf", "locator": {"kind": "page", "number": 2}}]
+
+        report = evaluate(
+            Path("index.db"),
+            [{"label": "legacy", "query": "q", "expected": [{"path": "same.pdf", "kind": "page", "number": 2}]}],
+            search_fn=search,
+        )
+        self.assertEqual(report["hit_at_k"], 1.0)
 
     def test_empty_and_invalid_inputs_raise_value_error(self):
         from tools.artifact_search.evaluate import evaluate

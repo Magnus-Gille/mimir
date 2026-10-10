@@ -47,6 +47,14 @@ a 1-based integer number, and a lowercase SHA-256. Every expected path and
 hash must occur in the complete snapshot manifest with the same hash.
 Provenance contains nonempty `source_task` and `evidence` strings.
 
+When a case contains `sha256`, the evaluator requires the returned hit to carry
+the same exact artifact hash as well as the path and locator. A stale or
+hash-less hit does not satisfy the label. Legacy evaluator cases may omit
+`sha256` and retain their path/locator-only behavior; held-out labels always
+include it. Search hits may also omit optional source or snapshot identifiers in
+legacy retrieval modes, so this harness does not claim source-ID attestation
+beyond the path/hash binding above.
+
 Draft files are useful for preparation and validation. A held-out run requires
 `status: "approved"`, a nonempty `frozen_at`, and a reviewer whose identity is
 different from the author. Approval is a process assertion recorded in the

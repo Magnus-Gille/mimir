@@ -142,8 +142,8 @@ class HeldoutTests(unittest.TestCase):
 
         def search(_db: Path, query: str, _top: int) -> dict:
             if query == "private answer question":
-                return {"results": [{"path": "answer.txt", "locator": {"kind": "page", "number": 1}}], "mode": "lexical"}
-            return {"results": [{"path": "distractor.txt", "locator": {"kind": "page", "number": 1}}], "mode": "lexical"} if "distractor" in query or "missing" in query else {"results": [], "mode": "lexical"}
+                return {"results": [{"path": "answer.txt", "sha256": hashes["answer.txt"], "locator": {"kind": "page", "number": 1}}], "mode": "lexical"}
+            return {"results": [{"path": "distractor.txt", "sha256": hashes["distractor.txt"], "locator": {"kind": "page", "number": 1}}], "mode": "lexical"} if "distractor" in query or "missing" in query else {"results": [], "mode": "lexical"}
 
         report = run_heldout(
             heldout_path,
@@ -177,7 +177,7 @@ class HeldoutTests(unittest.TestCase):
 
         def missing_distractor(_db: Path, query: str, _top: int) -> dict:
             if "answer question" in query:
-                return {"results": [{"path": "answer.txt", "locator": {"kind": "page", "number": 1}}], "mode": "lexical"}
+                return {"results": [{"path": "answer.txt", "sha256": hashes["answer.txt"], "locator": {"kind": "page", "number": 1}}], "mode": "lexical"}
             return {"results": [], "mode": "lexical"}
 
         missing_report = run_heldout(
