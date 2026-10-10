@@ -40,12 +40,19 @@ or measured value. Explicit dates or values written in headings can be evidence.
 Do not combine unrelated numbers with a nearby month or unit to invent the
 requested value; the source must express that value and its relationship.
 
-For every requirement, assign exactly one status: supported, partial, missing,
-or contradicted. Select exact source span IDs as evidence; never copy or invent
-quote text and never invent span IDs. Return only strict JSON with this shape:
-{"requirements":[{"id":"R1","requirement":"...","status":"supported|partial|missing|contradicted","evidence":["S1"]}]}
-Use 1 to 8 unique requirements, nonempty bounded requirement text, and 1 to 3
-span IDs for supported requirements. Other statuses may have 0 to 3 span IDs.
+Before choosing a status, produce a concrete answer or partial answer for every
+requested fact at the requested precision; do not merely restate the question.
+Also give a short source-grounding or missing-information justification. Do not
+treat a link label as a URL, map an item in an unrelated list to the requested
+entity or list, or turn source ambiguity into support; ambiguity is partial or
+missing. Assign exactly one status: supported, partial, missing, or contradicted.
+Select exact source span IDs as evidence; never copy or invent quote text and
+never invent span IDs. Return only strict JSON with this shape and field order:
+{"requirements":[{"id":"R1","requirement":"...","evidence":["S1"],"answer":"...","justification":"...","status":"supported|partial|missing|contradicted"}]}
+Use 1 to 8 unique requirements, nonempty bounded requirement text, answer and
+justification strings of at most 2000 characters, and 1 to 3 span IDs for
+supported requirements. Other statuses may have a blank answer but must have a
+nonempty justification and may have 0 to 3 span IDs.
 Every selected span is an exact contiguous source excerpt supplied in the
 input. Do not add keys or prose outside the JSON object. The response must end
 at the final closing brace."""
@@ -76,11 +83,19 @@ or measured value. Explicit dates or values written in headings can be evidence.
 Do not combine unrelated numbers with a nearby month or unit to invent the
 requested value; the source must express that value and its relationship.
 
-Select exact source span IDs as evidence; never copy or invent quote text and
-never invent span IDs. Return only strict JSON with this shape:
-{"requirements":[{"id":"R1","requirement":"...","status":"supported|partial|missing|contradicted","evidence":["S1"]}]}
-Use 1 to 8 unique requirements, nonempty bounded requirement text, and 1 to 3
-span IDs for supported requirements. Other statuses may have 0 to 3 span IDs.
+Before choosing a status, produce a concrete answer or partial answer for every
+requested fact at the requested precision; do not merely restate the question.
+Also give a short source-grounding or missing-information justification. Do not
+treat a link label as a URL, map an item in an unrelated list to the requested
+entity or list, or turn source ambiguity into support; ambiguity is partial or
+missing. Select exact source span IDs as evidence; never copy or invent quote
+text and never invent span IDs. Return only strict JSON with this shape and field
+order:
+{"requirements":[{"id":"R1","requirement":"...","evidence":["S1"],"answer":"...","justification":"...","status":"supported|partial|missing|contradicted"}]}
+Use 1 to 8 unique requirements, nonempty bounded requirement text, answer and
+justification strings of at most 2000 characters, and 1 to 3 span IDs for
+supported requirements. Other statuses may have a blank answer but must have a
+nonempty justification and may have 0 to 3 span IDs.
 Every selected span is one of the exact source spans supplied in this call. Do
 not add keys or prose outside the JSON object. The response must end at the
 final closing brace."""
@@ -104,9 +119,10 @@ class _Span:
 
 
 _STATUSES = frozenset({"supported", "partial", "missing", "contradicted"})
-_REQUIREMENT_KEYS = frozenset({"id", "requirement", "status", "evidence"})
+_REQUIREMENT_KEYS = frozenset({"id", "requirement", "evidence", "answer", "justification", "status"})
 _MAX_JSON_BYTES = 64 * 1024
 _MAX_REQUIREMENT_TEXT = 4000
+_MAX_ANSWER_TEXT = 2000
 _MAX_ID_LENGTH = 64
 _MAX_SPAN_LENGTH = 1200
 _SPAN_OVERLAP = 160
@@ -324,8 +340,10 @@ def _parse_completion(raw: str, spans: dict[str, _Span]) -> list[dict[str, Any]]
             _fail("invalid_requirement")
         requirement_id = item["id"]
         requirement_text = item["requirement"]
-        status = item["status"]
         evidence = item["evidence"]
+        answer = item["answer"]
+        justification = item["justification"]
+        status = item["status"]
         if (
             not isinstance(requirement_id, str)
             or not requirement_id.strip()
@@ -334,11 +352,17 @@ def _parse_completion(raw: str, spans: dict[str, _Span]) -> list[dict[str, Any]]
             or not isinstance(requirement_text, str)
             or not requirement_text.strip()
             or len(requirement_text) > _MAX_REQUIREMENT_TEXT
+            or not isinstance(answer, str)
+            or len(answer) > _MAX_ANSWER_TEXT
+            or not isinstance(justification, str)
+            or not justification.strip()
+            or len(justification) > _MAX_ANSWER_TEXT
             or not isinstance(status, str)
             or status not in _STATUSES
             or not isinstance(evidence, list)
             or len(evidence) > 3
             or (status == "supported" and not 1 <= len(evidence) <= 3)
+            or (status == "supported" and not answer.strip())
         ):
             _fail("invalid_requirement")
         seen_ids.add(requirement_id)
@@ -352,8 +376,10 @@ def _parse_completion(raw: str, spans: dict[str, _Span]) -> list[dict[str, Any]]
             {
                 "id": requirement_id,
                 "requirement": requirement_text,
-                "status": status,
                 "evidence": span_ids,
+                "answer": answer,
+                "justification": justification,
+                "status": status,
             }
         )
     return result
@@ -366,11 +392,13 @@ def _resolve_requirements(requirements: list[dict[str, Any]], spans: dict[str, _
             {
                 "id": requirement["id"],
                 "requirement": requirement["requirement"],
-                "status": requirement["status"],
                 "evidence": [
                     {"candidate_id": spans[span_id].candidate_id, "quote": spans[span_id].text}
                     for span_id in requirement["evidence"]
                 ],
+                "answer": requirement["answer"],
+                "justification": requirement["justification"],
+                "status": requirement["status"],
             }
         )
     return resolved
@@ -454,11 +482,21 @@ def check_answerability(
         precision_requirement = {
             "id": "R_DATE_PRECISION",
             "requirement": "a valid full calendar date",
-            "status": "supported" if date_spans else "partial",
             "evidence": [
                 {"candidate_id": span.candidate_id, "quote": span.text}
                 for span in date_spans[:3]
             ],
+            "answer": (
+                "A valid full calendar date is present in the selected spans."
+                if date_spans
+                else "No valid full calendar date is present in the selected spans."
+            ),
+            "justification": (
+                "The selected source span contains a recognized real calendar date."
+                if date_spans
+                else "The selected source spans contain no recognized real calendar date."
+            ),
+            "status": "supported" if date_spans else "partial",
         }
         checks.append({"stage": "precision", "requirements": [precision_requirement]})
         if not date_spans:

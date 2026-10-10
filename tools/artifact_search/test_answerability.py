@@ -24,8 +24,10 @@ def supported(requirement: str = "the launch date", span_id: str = "S1") -> dict
     return {
         "id": "R1",
         "requirement": requirement,
-        "status": "supported",
         "evidence": [span_id],
+        "answer": "The launch occurred on 14 March 2025.",
+        "justification": "The selected source span states the date explicitly.",
+        "status": "supported",
     }
 
 
@@ -173,8 +175,10 @@ class AnswerabilityTests(unittest.TestCase):
                 {
                     "id": "R1",
                     "requirement": "the date and location",
-                    "status": "partial",
                     "evidence": [],
+                    "answer": "The date is present but the location is incomplete.",
+                    "justification": "The source does not establish every requested part.",
+                    "status": "partial",
                 }
             )
 
@@ -191,8 +195,10 @@ class AnswerabilityTests(unittest.TestCase):
                 {
                     "id": "R1",
                     "requirement": "the exact launch date",
-                    "status": "partial",
                     "evidence": ["S1"],
+                    "answer": "March 2025 is given, but the exact day is absent.",
+                    "justification": "The source supplies only month and year.",
+                    "status": "partial",
                 }
             )
 
@@ -211,8 +217,10 @@ class AnswerabilityTests(unittest.TestCase):
                 {
                     "id": "R1",
                     "requirement": "the date and location",
-                    "status": "partial",
                     "evidence": ["S1"],
+                    "answer": "The date is stated, but the requested location is not established.",
+                    "justification": "The independent check identifies an omitted requested clause.",
+                    "status": "partial",
                 }
             )
 
@@ -249,8 +257,10 @@ class AnswerabilityTests(unittest.TestCase):
                 {
                     "id": "R1",
                     "requirement": "the claimed launch date",
-                    "status": "contradicted",
                     "evidence": ["S1"],
+                    "answer": "The claimed launch premise is contradicted by the source.",
+                    "justification": "The source conflicts with the requested premise.",
+                    "status": "contradicted",
                 }
             )
 
@@ -276,6 +286,13 @@ class AnswerabilityTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["spans"], calls[1][1]["spans"])
         self.assertEqual(result["checks"][-1]["stage"], "precision")
         self.assertEqual(result["checks"][-1]["requirements"][0]["status"], "supported")
+        requirement_record = result["checks"][0]["requirements"][0]
+        self.assertEqual(
+            list(requirement_record),
+            ["id", "requirement", "evidence", "answer", "justification", "status"],
+        )
+        self.assertTrue(requirement_record["answer"])
+        self.assertTrue(requirement_record["justification"])
 
     def test_tiny_source_span_is_resolved_verbatim(self) -> None:
         candidate = [{"candidate_id": "C1", "text": "tiny"}]
@@ -293,8 +310,10 @@ class AnswerabilityTests(unittest.TestCase):
                 {
                     "id": "R1",
                     "requirement": "the date",
-                    "status": "supported",
                     "evidence": [{"candidate_id": "C1", "quote": SOURCE}],
+                    "answer": "The date is supported.",
+                    "justification": "The source quote is presented as evidence.",
+                    "status": "supported",
                 }
             )
 
@@ -307,8 +326,10 @@ class AnswerabilityTests(unittest.TestCase):
                 {
                     "id": "R1",
                     "requirement": "the date",
-                    "status": "missing",
                     "evidence": ["S9"],
+                    "answer": "",
+                    "justification": "The cited span ID is not supplied.",
+                    "status": "missing",
                 }
             )
 
@@ -326,12 +347,42 @@ class AnswerabilityTests(unittest.TestCase):
             {
                 "id": "R1",
                 "requirement": "the date",
-                "status": True,
                 "evidence": [],
+                "answer": "",
+                "justification": "The status type is invalid.",
+                "status": True,
             }
         )
         with self.assertRaisesRegex(AnswerabilityError, "invalid_requirement"):
             check_answerability("What is the date?", CANDIDATES, lambda *_: raw)
+
+    def test_answer_and_justification_are_required_and_bounded(self) -> None:
+        base = {
+            "id": "R1",
+            "requirement": "the date",
+            "evidence": [],
+            "answer": "",
+            "justification": "The date is absent.",
+            "status": "missing",
+        }
+        supported_without_answer = dict(base, evidence=["S1"], answer="", status="supported")
+        with self.assertRaisesRegex(AnswerabilityError, "invalid_requirement"):
+            check_answerability("What is the date?", CANDIDATES, lambda *_: response(supported_without_answer))
+        without_justification = dict(base, justification="")
+        with self.assertRaisesRegex(AnswerabilityError, "invalid_requirement"):
+            check_answerability("What is the date?", CANDIDATES, lambda *_: response(without_justification))
+        oversized_answer = dict(base, answer="x" * 2001)
+        with self.assertRaisesRegex(AnswerabilityError, "invalid_requirement"):
+            check_answerability("What is the date?", CANDIDATES, lambda *_: response(oversized_answer))
+        oversized_justification = dict(base, justification="x" * 2001)
+        with self.assertRaisesRegex(AnswerabilityError, "invalid_requirement"):
+            check_answerability("What is the date?", CANDIDATES, lambda *_: response(oversized_justification))
+
+    def test_unknown_requirement_fields_are_rejected(self) -> None:
+        item = supported()
+        item["unexpected"] = "value"
+        with self.assertRaisesRegex(AnswerabilityError, "invalid_requirement"):
+            check_answerability("What is the date?", CANDIDATES, lambda *_: response(item))
 
     def test_duplicate_keys_and_duplicate_requirement_ids_are_rejected(self) -> None:
         duplicate_key = '{"requirements":[{"id":"R1","requirement":"date","status":"missing","status":"partial","evidence":[]}]}'
@@ -341,14 +392,18 @@ class AnswerabilityTests(unittest.TestCase):
             {
                 "id": "R1",
                 "requirement": "date",
-                "status": "missing",
                 "evidence": [],
+                "answer": "",
+                "justification": "The date is absent.",
+                "status": "missing",
             },
             {
                 "id": "R1",
                 "requirement": "city",
-                "status": "missing",
                 "evidence": [],
+                "answer": "",
+                "justification": "The city is absent.",
+                "status": "missing",
             },
         )
         with self.assertRaisesRegex(AnswerabilityError, "invalid_requirement"):
