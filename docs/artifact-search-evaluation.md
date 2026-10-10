@@ -55,13 +55,39 @@ include it. Search hits may also omit optional source or snapshot identifiers in
 legacy retrieval modes, so this harness does not claim source-ID attestation
 beyond the path/hash binding above.
 
-Draft files are useful for preparation and validation. A held-out run requires
-`status: "approved"`, a nonempty `frozen_at`, and a reviewer whose identity is
-different from the author. Approval is a process assertion recorded in the
-label; this harness does not independently verify a person's identity. A
-source-grounded curator draft remains proposed and pending owner review until
-that review is recorded; the harness must not be used to call it an
-independently approved benchmark.
+Draft files are useful for preparation and validation. Before any held-out
+ranking or result is produced, an approved label set must complete one of two
+review paths:
+
+1. An independent human review by a reviewer whose identity is different from
+   the author.
+2. A separate, source-grounded automated audit against the frozen snapshot.
+   The audit records its auditor identity, requested model or rule revision,
+   runtime-observed model or revision when available, and evidence for every
+   case. Ambiguous cases are excluded from the approved set rather than being
+   guessed.
+
+Both paths require a nonempty `frozen_at` and a reviewer identity distinct from
+the author. The `reviewer` and `status: "approved"` fields record that this
+process review happened; the harness does not independently verify a person's
+identity or an automated auditor's claims. This is a process option only: the
+code gate still requires approved, frozen labels and does not autoapprove
+drafts.
+
+An automated source-audited benchmark is curated evidence, not human approval
+or evidence from actual user queries. It cannot, by itself, establish broad
+retrieval quality. Its source-audit receipt must be separate from ranking and
+calibration work, and the calibration split remains disjoint from the held-out
+queries.
+
+For an automated audit, retain a concise evidence receipt containing:
+
+- the complete source snapshot identifier and SHA-256;
+- one verdict per case, with alternate valid locators where applicable;
+- a full-corpus check for miss cases, rather than a partial-corpus absence;
+- excluded or ambiguous cases and the reason for each exclusion; and
+- the requested model or revision and the runtime-observed model or revision,
+  with unknown values recorded as unknown rather than inferred.
 
 ## Calibration and held-out separation
 
