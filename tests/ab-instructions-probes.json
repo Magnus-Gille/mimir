@@ -41,6 +41,30 @@
       ]
     },
     {
+      "id": "local-artifact-search-prototype",
+      "kind": "retrieval",
+      "prompt": "How do I run the local artifact-search prototype and detect stale slide or PDF page references without changing the archive?",
+      "target": "docs/artifact-search-poc.md"
+    },
+    {
+      "id": "artifact-search-placement",
+      "kind": "retrieval",
+      "prompt": "Where should artifact extraction, index and embeddings run, and how does search work while the laptop is off?",
+      "target": "docs/artifact-search-architecture.md"
+    },
+    {
+      "id": "artifact-search-followups",
+      "kind": "retrieval",
+      "prompt": "Which bounded implementation issue drafts follow the artifact-search spike, and which repository owns them?",
+      "target": "docs/artifact-search-followups.md"
+    },
+    {
+      "id": "artifact-source-snapshots",
+      "kind": "retrieval",
+      "prompt": "How does the artifact source adapter publish and acquire a complete hash-pinned snapshot without treating a failed inventory as deletions?",
+      "target": "docs/artifact-source-snapshots.md"
+    },
+    {
       "id": "secret-scan-quarantine-control",
       "kind": "control",
       "prompt": "If an inbox import contains a private key or other secret-looking token, what must happen before it can reach the NAS mirror?",

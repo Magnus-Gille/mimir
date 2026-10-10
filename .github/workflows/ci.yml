@@ -21,3 +21,7 @@ jobs:
       - run: npm run lint
       - run: npm run build
       - run: npm test
+      - name: Install PDF text extraction for artifact-search tests
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+      - name: Test standalone artifact search and source snapshots
+        run: python3 -m unittest discover -s tools/artifact_search -p 'test_*.py'

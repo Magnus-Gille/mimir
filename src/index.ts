@@ -5,6 +5,7 @@ import { constants, realpathSync } from "node:fs";
 import { lookup } from "mime-types";
 import contentDisposition from "content-disposition";
 import { timingSafeEqual } from "node:crypto";
+import { pipeline } from "node:stream/promises";
 import { validateToken } from "./share-token.js";
 import { startHeimdallReporter } from "./heimdall-report.js";
 
@@ -137,7 +138,6 @@ async function serveFile(
     // the stat -> createReadStream race where a concurrent rsync deletion could
     // otherwise emit an unhandled ReadStream error and terminate the server.
     const file = await open(resolved, SAFE_OPEN_FLAGS);
-    let streamOwnsFile = false;
     try {
       const stats = await file.stat();
       if (stats.isDirectory()) {
@@ -175,9 +175,7 @@ async function serveFile(
           res.setHeader("Content-Type", contentType);
           res.setHeader("Last-Modified", stats.mtime.toUTCString());
           const stream = file.createReadStream({ start, end, autoClose: true });
-          streamOwnsFile = true;
-          stream.on("error", (err) => res.destroy(err));
-          stream.pipe(res);
+          await pipeline(stream, res);
           return;
         }
       }
@@ -187,11 +185,11 @@ async function serveFile(
       res.setHeader("Accept-Ranges", "bytes");
       res.setHeader("Last-Modified", stats.mtime.toUTCString());
       const stream = file.createReadStream({ autoClose: true });
-      streamOwnsFile = true;
-      stream.on("error", (err) => res.destroy(err));
-      stream.pipe(res);
+      await pipeline(stream, res);
     } finally {
-      if (!streamOwnsFile) await file.close();
+      // Retain the handle until streaming settles, including disconnects/errors.
+      // Closing an already auto-closed handle is safe and keeps GC out of cleanup.
+      await file.close();
     }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
