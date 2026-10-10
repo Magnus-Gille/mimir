@@ -205,3 +205,36 @@ or labels were changed after the test, no answer-checking feature is enabled by
 this result, and the consumed set is now regression evidence. A future integrated
 check needs tests for partial answers and requested precision, distinct from its
 retrieval and exact-quotation checks.
+
+
+### Offline completeness and precision check
+
+`tools/artifact_search/answerability.py` provides an opt-in, transport-independent
+`check_answerability(question, candidates, complete)` function for offline
+experiments. It accepts up to five excerpts and makes at most two completion
+calls. It does not alter the lexical service, retrieval defaults, or deployment.
+
+The first assessment decomposes the question into required facts, properties and
+relationships. Any missing, partial or contradicted requirement causes abstention.
+For a proposed complete answer, a second check receives the original question
+and only the cited excerpts, without the first assessment's requirements or
+verdict. It independently checks all requested parts, entity and time scope,
+units and precision. Equivalent wording, translations, headings and diagrams
+can supply explicit support; a related topic or a less precise value cannot.
+Both calls may use the same model, so this is not independent model review.
+
+Only two fully supported assessments produce `answerable: true`. The result
+includes exact quoted evidence and both structured assessments. The module
+validates bounded JSON, schema and status values, unique requirement IDs, and
+exact source citations. The verifier can cite only text contained in a quote it
+was supplied. Malformed output or callback failure raises an error; neither is
+a successful abstention. An empty candidate list returns an explicit missing
+result without a completion call.
+
+The callback is responsible for transport, model identity, generation completion
+and structured-output settings. The evaluation caller must also bind the excerpts
+to the retrieved originals and revalidate their freshness after inference. These
+checks are separate from semantic correctness: valid JSON and matching quotes do
+not prove that a question was fully answered. Mocked unit tests establish the
+protocol behavior; real source-audited cases and independent evidence review are
+required to assess answer completeness.
