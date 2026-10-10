@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date
+import re
 from typing import Any
 
 
@@ -108,6 +110,69 @@ _MAX_REQUIREMENT_TEXT = 4000
 _MAX_ID_LENGTH = 64
 _MAX_SPAN_LENGTH = 1200
 _SPAN_OVERLAP = 160
+_MONTHS = {
+    "january": 1,
+    "januari": 1,
+    "jan": 1,
+    "february": 2,
+    "februari": 2,
+    "feb": 2,
+    "march": 3,
+    "mars": 3,
+    "mar": 3,
+    "april": 4,
+    "apr": 4,
+    "may": 5,
+    "maj": 5,
+    "june": 6,
+    "juni": 6,
+    "jun": 6,
+    "july": 7,
+    "juli": 7,
+    "jul": 7,
+    "august": 8,
+    "augusti": 8,
+    "aug": 8,
+    "september": 9,
+    "sep": 9,
+    "sept": 9,
+    "oktober": 10,
+    "october": 10,
+    "okt": 10,
+    "oct": 10,
+    "november": 11,
+    "nov": 11,
+    "december": 12,
+    "dec": 12,
+}
+_MONTH_PATTERN = "(?:" + "|".join(sorted(_MONTHS, key=len, reverse=True)) + ")"
+_DAY_PATTERN = r"(?:0?[1-9]|[12]\d|3[01])"
+_ORDINAL_PATTERN = r"(?:st|nd|rd|th|:a|:e)?"
+_ISO_DATE_RE = re.compile(r"(?<!\w)(?P<year>\d{4})-(?P<month>\d{1,2})-(?P<day>\d{1,2})(?!\w)")
+_NUMERIC_DATE_RE = re.compile(
+    r"(?<!\w)(?P<day>\d{1,2})(?P<separator>[./-])(?P<month>\d{1,2})"
+    r"(?P=separator)(?P<year>\d{4})(?!\w)"
+)
+_DAY_MONTH_DATE_RE = re.compile(
+    rf"(?<!\w)(?P<day>{_DAY_PATTERN}){_ORDINAL_PATTERN}\.?"
+    rf"(?:\s+|[.,/-]\s*) (?P<month>{_MONTH_PATTERN})(?:\s+|[.,/-]\s*) (?P<year>\d{{4}})(?!\w)",
+    re.IGNORECASE | re.VERBOSE,
+)
+_MONTH_DAY_DATE_RE = re.compile(
+    rf"(?<!\w)(?P<month>{_MONTH_PATTERN})(?:\s+|[.,/-]\s*) (?P<day>{_DAY_PATTERN})"
+    rf"{_ORDINAL_PATTERN}\.?(?:\s+|[.,/-]\s*) (?P<year>\d{{4}})(?!\w)",
+    re.IGNORECASE | re.VERBOSE,
+)
+_DATE_REQUEST_RE = re.compile(
+    r"(?:"
+    r"\b(?:what|which)\s+(?:(?:is|was)\s+)?(?:the\s+)?(?:exact\s+)?date\b"
+    r"|\bon\s+what\s+(?:exact\s+)?date\b"
+    r"|\b(?:give|provide|state|identify)\s+(?:the\s+)?(?:exact\s+)?date\b"
+    r"|\bvilket\s+(?:(?:exakt|exakta)\s+)?datum(?:et)?\b"
+    r"|\bange\s+(?:(?:det\s+)?(?:exakt|exakta)\s+)?datum(?:et)?\b"
+    r")",
+    re.IGNORECASE,
+)
 
 
 def _fail(code: str) -> None:
@@ -169,6 +234,41 @@ def _segment_candidates(candidates: list[dict[str, str]]) -> list[_Span]:
 
 def _span_payload(spans: list[_Span]) -> list[dict[str, str]]:
     return [{"span_id": span.span_id, "candidate_id": span.candidate_id, "text": span.text} for span in spans]
+
+
+def _requests_calendar_date(question: str) -> bool:
+    """Return whether the question explicitly asks for a date value."""
+
+    return bool(_DATE_REQUEST_RE.search(question))
+
+
+def _valid_calendar_date(year: int, month: int, day: int) -> bool:
+    try:
+        date(year, month, day)
+    except ValueError:
+        return False
+    return True
+
+
+def _has_calendar_date(text: str) -> bool:
+    """Recognize only tightly contiguous, real calendar dates.
+
+    This intentionally supports common numeric and English/Swedish month
+    forms only. It is not a universal natural-language date parser.
+    """
+
+    for match in _ISO_DATE_RE.finditer(text):
+        if _valid_calendar_date(int(match["year"]), int(match["month"]), int(match["day"])):
+            return True
+    for match in _NUMERIC_DATE_RE.finditer(text):
+        if _valid_calendar_date(int(match["year"]), int(match["month"]), int(match["day"])):
+            return True
+    for pattern in (_DAY_MONTH_DATE_RE, _MONTH_DAY_DATE_RE):
+        for match in pattern.finditer(text):
+            month = _MONTHS[match["month"].lower()]
+            if _valid_calendar_date(int(match["year"]), month, int(match["day"])):
+                return True
+    return False
 
 
 def _object_no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -333,6 +433,25 @@ def check_answerability(
             "evidence": [],
             "checks": checks,
         }
+    if _requests_calendar_date(question):
+        date_spans = [span for span in selected_spans if _has_calendar_date(span.text)]
+        precision_requirement = {
+            "id": "R_DATE_PRECISION",
+            "requirement": "a valid full calendar date",
+            "status": "supported" if date_spans else "partial",
+            "evidence": [
+                {"candidate_id": span.candidate_id, "quote": span.text}
+                for span in date_spans[:3]
+            ],
+        }
+        checks.append({"stage": "precision", "requirements": [precision_requirement]})
+        if not date_spans:
+            return {
+                "answerable": False,
+                "status": "partial",
+                "evidence": [],
+                "checks": checks,
+            }
     return {
         "answerable": True,
         "status": "complete",

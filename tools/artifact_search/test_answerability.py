@@ -3,7 +3,13 @@ from __future__ import annotations
 import json
 import unittest
 
-from tools.artifact_search.answerability import AnswerabilityError, _segment_candidates, check_answerability
+from tools.artifact_search.answerability import (
+    AnswerabilityError,
+    _has_calendar_date,
+    _requests_calendar_date,
+    _segment_candidates,
+    check_answerability,
+)
 
 
 SOURCE = "The launch happened on 14 March 2025 in Stockholm, Sweden."
@@ -48,6 +54,71 @@ class AnswerabilityTests(unittest.TestCase):
         self.assertTrue(all(current.start <= previous.end for previous, current in zip(spans, spans[1:])))
         many = _segment_candidates([{"candidate_id": str(index), "text": "x" * 10000} for index in range(5)])
         self.assertLessEqual(len(many), 55)
+
+    def test_calendar_date_parser_is_conservative_and_validates_real_dates(self) -> None:
+        positives = [
+            "Release date — 3 February 2026",
+            "Date: 3rd February 2026",
+            "Date: February 3, 2026",
+            "Datum: 3:e februari 2026",
+            "Date: 2026-02-03",
+            "Date: 03/02/2026",
+            "Date: 29 February 2024",
+        ]
+        for text in positives:
+            with self.subTest(text=text):
+                self.assertTrue(_has_calendar_date(text))
+        negatives = [
+            "03 — Overview, Feb 2026",
+            "Date: 29 February 2025",
+            "Date: 3 February",
+            "Date: third of February, two thousand twenty-six",
+            "Date: 3 February — 2026",
+        ]
+        for text in negatives:
+            with self.subTest(text=text):
+                self.assertFalse(_has_calendar_date(text))
+        self.assertFalse(_has_calendar_date("3 February"))
+        self.assertFalse(_has_calendar_date("2026"))
+
+    def test_calendar_request_detection_excludes_year_month_meta_and_source_queries(self) -> None:
+        self.assertTrue(_requests_calendar_date("What is the exact date?"))
+        self.assertTrue(_requests_calendar_date("On what date did it happen?"))
+        self.assertTrue(_requests_calendar_date("Vilket exakt datum anges?"))
+        self.assertTrue(_requests_calendar_date("Ange det exakta datumet."))
+        self.assertTrue(_requests_calendar_date("What is the year and what is the exact date?"))
+        for question in (
+            "What is the year?",
+            "What is the month?",
+            "Why is an exact date missing?",
+            "Where is the source for the exact date?",
+        ):
+            with self.subTest(question=question):
+                self.assertFalse(_requests_calendar_date(question))
+
+    def test_full_date_guard_abstains_for_heading_number_and_month_year(self) -> None:
+        candidate = [{"candidate_id": "C1", "text": "03 — Overview, Feb 2026"}]
+
+        def complete(_prompt: str, _payload: dict[str, object]) -> str:
+            return response(supported("the exact date"))
+
+        result = check_answerability("What is the exact date?", candidate, complete)
+        self.assertFalse(result["answerable"])
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["evidence"], [])
+        self.assertEqual(result["checks"][-1]["stage"], "precision")
+        self.assertEqual(result["checks"][-1]["requirements"][0]["status"], "partial")
+
+        multipart = check_answerability("What is the year and what is the exact date?", candidate, complete)
+        self.assertFalse(multipart["answerable"])
+        self.assertEqual(multipart["status"], "partial")
+
+        year_only = check_answerability("What is the launch year?", candidate, complete)
+        self.assertTrue(year_only["answerable"])
+        self.assertEqual(len(year_only["checks"]), 2)
+        meta = check_answerability("Why is an exact date missing?", candidate, complete)
+        self.assertTrue(meta["answerable"])
+        self.assertEqual(len(meta["checks"]), 2)
 
     def test_partial_multipart_request_stops_after_first_check(self) -> None:
         calls = 0
@@ -157,9 +228,11 @@ class AnswerabilityTests(unittest.TestCase):
         self.assertTrue(result["answerable"])
         self.assertEqual(result["status"], "complete")
         self.assertEqual(result["evidence"], [{"candidate_id": "C1", "quote": SOURCE}])
-        self.assertEqual(len(result["checks"]), 2)
+        self.assertEqual(len(result["checks"]), 3)
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0][1]["spans"], calls[1][1]["spans"])
+        self.assertEqual(result["checks"][-1]["stage"], "precision")
+        self.assertEqual(result["checks"][-1]["requirements"][0]["status"], "supported")
 
     def test_tiny_source_span_is_resolved_verbatim(self) -> None:
         candidate = [{"candidate_id": "C1", "text": "tiny"}]
