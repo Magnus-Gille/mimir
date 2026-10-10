@@ -54,6 +54,10 @@ requested value; the source must express that value and its relationship.
 
 Before choosing a status, produce a concrete answer or partial answer for every
 requested fact at the requested precision; do not merely restate the question.
+Prefer concise answers using the source wording for technical names, measures,
+numbers and units. Preserve a technical term when its translation is uncertain.
+Include only requested facts; do not add relationships between separate metrics
+that the source does not express.
 Also give a short source-grounding or missing-information justification. Do not
 treat a link label as a URL, map an item in an unrelated list to the requested
 entity or list, or turn source ambiguity into support; ambiguity is partial or
@@ -109,6 +113,10 @@ requested value; the source must express that value and its relationship.
 
 Before choosing a status, produce a concrete answer or partial answer for every
 requested fact at the requested precision; do not merely restate the question.
+Prefer concise answers using the source wording for technical names, measures,
+numbers and units. Preserve a technical term when its translation is uncertain.
+Include only requested facts; do not add relationships between separate metrics
+that the source does not express.
 Also give a short source-grounding or missing-information justification. Do not
 treat a link label as a URL, map an item in an unrelated list to the requested
 entity or list, or turn source ambiguity into support; ambiguity is partial or
