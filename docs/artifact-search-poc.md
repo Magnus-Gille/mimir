@@ -80,8 +80,14 @@ is not sent to a public provider, proxy or redirect. Credentials stay in memory.
 Long Retry-After delays stop the command with bounded status/delay diagnostics;
 short (at most two-second) delays allow one retry. Do not retry before that delay.
 
-`vector` uses maximum segment cosine per original unit; `hybrid` uses fixed RRF60
-over BM25 and vector ranks. Hybrid explicitly falls back to lexical on a model
+`vector` uses maximum segment cosine per original unit. `hybrid` uses equal-weight
+RRF60 over the first `max(top, 5)` current candidates in each channel after
+source validation; the vector channel also applies its cosine floor before the
+window, while `min_score` does not filter lexical candidates. This keeps long
+weak tails from crowding out strong single-channel evidence.
+Its normal response includes the integer `candidate_window` diagnostic; this is
+the configured maximum per channel, not the number of returned candidates.
+Hybrid explicitly falls back to lexical on a model
 outage or when no usable vectors are cached for the selected identity, with a
 distinct warning for each case. `--min-score` is an optional cosine floor (default zero), not calibrated
 answerability. Vector search can return irrelevant results for an absent topic.
@@ -202,11 +208,12 @@ reused for the new paraphrases; many math locations are revisions/copies.
 | --- | --- | --- | --- |
 | Lexical | 10/14 (71.4%) | 0.631 | 1/2 |
 | Vector, 256 dimensions | 11/14 (78.6%) | 0.631 | 0/2 |
-| Hybrid, fixed RRF60 | 10/14 (71.4%) | 0.679 | 0/2 |
+| Hybrid, fixed RRF60 (pre-bounded) | 10/14 (71.4%) | 0.679 | 0/2 |
 
 Vector ranking recovered two newly added paraphrases that lexical search missed,
-but missed one positive that lexical found. Fixed hybrid fusion did not preserve
-those two semantic gains. Both semantic modes returned candidates for both
+but missed one positive that lexical found. The recorded fixed hybrid run did not
+preserve those two semantic gains; it predates the bounded candidate window.
+Both semantic modes returned candidates for both
 negative queries at the preselected zero cosine floor. Therefore retain lexical
 as the CLI default, and expose semantic/hybrid as explicitly selected modes.
 Do not present these scores as an adequate production ranking/abstention policy.

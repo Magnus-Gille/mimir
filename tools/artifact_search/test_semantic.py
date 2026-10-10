@@ -130,15 +130,16 @@ class SemanticArtifactSearchTests(unittest.TestCase):
 
     @staticmethod
     def _assert_result_shape(test: unittest.TestCase, payload: dict) -> None:
-        test.assertEqual(
-            set(payload),
-            {
-                "results",
-                "stale_candidates",
-                "unavailable_candidates",
-                "mode",
-            },
-        )
+        expected = {
+            "results",
+            "stale_candidates",
+            "unavailable_candidates",
+            "mode",
+        }
+        if payload["mode"] == "hybrid":
+            expected.add("candidate_window")
+            test.assertIsInstance(payload["candidate_window"], int)
+        test.assertEqual(set(payload), expected)
         test.assertIsInstance(payload["results"], list)
         for result in payload["results"]:
             test.assertEqual(
@@ -295,11 +296,81 @@ class SemanticArtifactSearchTests(unittest.TestCase):
         payload = semantic_search(self.db, "orchard quantum", embedder, identity, mode="hybrid", top=2)
         self._assert_result_shape(self, payload)
         self.assertEqual(payload["mode"], "hybrid")
+        self.assertEqual(payload["candidate_window"], 5)
         self.assertEqual(len(payload["results"]), 2)
         self.assertEqual({entry["locator"]["number"] for entry in payload["results"]}, {1, 2})
         for top in (0, 101):
             with self.assertRaises(ValueError):
                 semantic_search(self.db, "orchard", embedder, identity, top=top)
+
+    def test_hybrid_bounds_each_channel_before_fusing_tail_overlap(self) -> None:
+        class RankedEmbedder(FakeEmbedder):
+            @staticmethod
+            def _vector(value: str) -> list[float]:
+                lowered = value.casefold()
+                vector = [0.0] * 128
+                if lowered.startswith("task: search result") or "vector-only" in lowered:
+                    vector[0] = 1.0
+                elif "vector filler" in lowered:
+                    vector[0] = 0.98
+                    vector[1] = 0.198997
+                elif "weak overlap" in lowered:
+                    vector[0] = 0.99
+                    vector[1] = 0.141067
+                else:
+                    vector[2] = 1.0
+                return vector
+
+            def embed(self, inputs: list[str]) -> list[list[float]]:
+                self.inputs.extend(inputs)
+                return [self._vector(value) for value in inputs]
+
+        self._write(
+            "vector-only.html",
+            self._slides((1, "Vector target", "vector-only evidence")),
+        )
+        self._write(
+            "lexical-only.html",
+            self._slides((1, "fusiontoken fusiontoken lexical target", "fusiontoken evidence")),
+        )
+        self._write(
+            "lexical-filler.html",
+            self._slides((1, "fusiontoken lexical filler", "fusiontoken filler evidence")),
+        )
+        self._write(
+            "vector-filler.html",
+            self._slides((1, "Vector filler", "vector filler evidence")),
+        )
+        for number in range(12):
+            self._write(
+                f"weak-{number:02d}.html",
+                self._slides((1, f"Weak overlap {number:02d}", f"fusiontoken weak overlap {number:02d}")),
+            )
+        index_corpus(
+            self.root,
+            self.db,
+            ["vector-only.html", "lexical-only.html", "lexical-filler.html", "vector-filler.html"]
+            + [f"weak-{number:02d}.html" for number in range(12)],
+        )
+        build_vectors, semantic_search, _ = self._semantic()
+        identity = self._identity()
+        embedder = RankedEmbedder(identity)
+        build_vectors(self.db, embedder, identity)
+
+        payload = semantic_search(
+            self.db,
+            "fusiontoken",
+            RankedEmbedder(identity),
+            identity,
+            top=5,
+            mode="hybrid",
+        )
+
+        paths = [entry["path"] for entry in payload["results"]]
+        self.assertIn("vector-only.html", paths)
+        self.assertIn("lexical-only.html", paths)
+        self.assertEqual(len(paths), 5)
+        self.assertEqual(payload["candidate_window"], 5)
 
     def test_invalid_normalized_response_is_not_cached(self) -> None:
         self._write("invalid.html", self._slides((1, "Orchard", "orchard strawberries")))
@@ -353,6 +424,33 @@ class SemanticArtifactSearchTests(unittest.TestCase):
         )
         self.assertEqual(payload["results"], [])
         self.assertGreaterEqual(payload["unavailable_candidates"] + payload["stale_candidates"], 1)
+
+    def test_hybrid_window_skips_stale_fts_rows_before_counting_current_candidates(self) -> None:
+        stale = self._write("stale.html", self._slides((1, "Orchard", "orchard stale")))
+        valid_paths = []
+        for number in range(5):
+            relative = f"valid-{number}.html"
+            valid_paths.append(relative)
+            self._write(relative, self._slides((1, "Orchard", f"orchard valid {number}")))
+        index_corpus(self.root, self.db, ["stale.html"] + valid_paths)
+        build_vectors, semantic_search, _ = self._semantic()
+        identity = self._identity()
+        build_vectors(self.db, FakeEmbedder(identity), identity)
+
+        stale.write_text(self._slides((1, "Glacier", "glacier replacement")), encoding="utf-8")
+        payload = semantic_search(
+            self.db,
+            "orchard",
+            FakeEmbedder(identity),
+            identity,
+            top=5,
+            mode="hybrid",
+            min_score=1.0,
+        )
+
+        self.assertEqual(payload["candidate_window"], 5)
+        self.assertEqual({entry["path"] for entry in payload["results"]}, set(valid_paths))
+        self.assertGreaterEqual(payload["stale_candidates"], 1)
 
     def test_secret_filtered_chunks_never_reach_embedder(self) -> None:
         synthetic_key = "AKIA" + ("0" * 16)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from itertools import islice
 import math
 from pathlib import Path
 import sqlite3
@@ -131,6 +132,7 @@ def semantic_search(db, query, embedder, identity, top=5, base_url=None, mode='v
     try:
         rows, counters = _current_rows(conn, root)
         output = dict(results=[], **counters, mode=mode)
+        candidate_window = max(top, 5)
         exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='artifact_vectors'").fetchone()
         candidates = []
         if exists:
@@ -157,11 +159,22 @@ def semantic_search(db, query, embedder, identity, top=5, base_url=None, mode='v
         vector_order = sorted(scores, key=lambda identifier: (-scores[identifier], stable(identifier)))
         order = vector_order
         if mode == 'hybrid':
+            # Fuse only the configured per-channel window.  The source checks above
+            # happen before this scan so stale/unavailable FTS rows do not consume it.
+            output['candidate_window'] = candidate_window
             match = core._match_query(query)
             lexical = []
             if match:
-                lexical = [row[0] for row in conn.execute('SELECT rowid FROM text_index WHERE text_index MATCH ? ORDER BY bm25(text_index,3.0,1.0),rowid', (match,)) if row[0] in by_id]
-            fused = reciprocal_rank_fusion(lexical, vector_order)
+                ranked_rows = (row[0] for row in conn.execute(
+                    'SELECT rowid FROM text_index WHERE text_index MATCH ? '
+                    'ORDER BY bm25(text_index,3.0,1.0),rowid',
+                    (match,),
+                ))
+                lexical = list(islice(filter(by_id.__contains__, ranked_rows), candidate_window))
+            fused = reciprocal_rank_fusion(
+                lexical,
+                list(islice(vector_order, candidate_window)),
+            )
             order = sorted(fused, key=lambda identifier: (-fused[identifier], stable(identifier)))
         # Validate bytes again after the network call; a source may change while embedding.
         fresh, _ = _current_rows(conn, root)
