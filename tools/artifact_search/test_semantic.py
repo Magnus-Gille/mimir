@@ -452,6 +452,38 @@ class SemanticArtifactSearchTests(unittest.TestCase):
         self.assertEqual({entry["path"] for entry in payload["results"]}, set(valid_paths))
         self.assertGreaterEqual(payload["stale_candidates"], 1)
 
+    def test_hybrid_revalidates_before_window_so_query_race_does_not_block_backfill(self) -> None:
+        changed = self._write(
+            "changed.html",
+            self._slides((1, "orchard orchard orchard changed", "orchard changed evidence")),
+        )
+        valid_paths = []
+        for number in range(5):
+            relative = f"current-{number}.html"
+            valid_paths.append(relative)
+            self._write(relative, self._slides((1, "Orchard", f"orchard current {number}")))
+        index_corpus(self.root, self.db, ["changed.html"] + valid_paths)
+        build_vectors, semantic_search, _ = self._semantic()
+        identity = self._identity()
+        build_vectors(self.db, FakeEmbedder(identity), identity)
+
+        def change_source(_inputs: list[str]) -> None:
+            changed.write_text(self._slides((1, "Glacier", "glacier replacement")), encoding="utf-8")
+
+        payload = semantic_search(
+            self.db,
+            "orchard",
+            FakeEmbedder(identity, callback=change_source),
+            identity,
+            top=5,
+            mode="hybrid",
+            min_score=1.0,
+        )
+
+        self.assertEqual({entry["path"] for entry in payload["results"]}, set(valid_paths))
+        self.assertNotIn("changed.html", {entry["path"] for entry in payload["results"]})
+        self.assertGreaterEqual(payload["stale_candidates"], 1)
+
     def test_secret_filtered_chunks_never_reach_embedder(self) -> None:
         synthetic_key = "AKIA" + ("0" * 16)
         self._write("safe.html", self._slides((1, "Safe", "orchard strawberries")))

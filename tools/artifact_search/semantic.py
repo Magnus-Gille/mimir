@@ -158,10 +158,26 @@ def semantic_search(db, query, embedder, identity, top=5, base_url=None, mode='v
         stable = lambda identifier: (by_id[identifier]['path'], by_id[identifier]['number'], identifier)
         vector_order = sorted(scores, key=lambda identifier: (-scores[identifier], stable(identifier)))
         order = vector_order
+        fresh_rows = None
         if mode == 'hybrid':
-            # Fuse only the configured per-channel window.  The source checks above
-            # happen before this scan so stale/unavailable FTS rows do not consume it.
+            # Fuse only the configured per-channel window.  Post-network source
+            # checks happen before this scan so stale/unavailable rows do not consume it.
             output['candidate_window'] = candidate_window
+            fresh, _ = _current_rows(conn, root)
+            fresh_rows = {row['id']: row for row in fresh}
+            fields = ('path', 'sha256', 'extractor_version', 'kind', 'number', 'anchor', 'title', 'text')
+            freshness = {}
+
+            def is_current(identifier):
+                if identifier not in freshness:
+                    old = by_id[identifier]
+                    latest = fresh_rows.get(identifier)
+                    freshness[identifier] = latest is not None and all(old[field] == latest[field] for field in fields)
+                    if not freshness[identifier]:
+                        output['stale_candidates'] += 1
+                return freshness[identifier]
+
+            vector_order = list(islice(filter(is_current, vector_order), candidate_window))
             match = core._match_query(query)
             lexical = []
             if match:
@@ -170,23 +186,28 @@ def semantic_search(db, query, embedder, identity, top=5, base_url=None, mode='v
                     'ORDER BY bm25(text_index,3.0,1.0),rowid',
                     (match,),
                 ))
-                lexical = list(islice(filter(by_id.__contains__, ranked_rows), candidate_window))
+                lexical = list(islice(
+                    filter(lambda identifier: identifier in by_id and is_current(identifier), ranked_rows),
+                    candidate_window,
+                ))
             fused = reciprocal_rank_fusion(
                 lexical,
-                list(islice(vector_order, candidate_window)),
+                vector_order,
             )
             order = sorted(fused, key=lambda identifier: (-fused[identifier], stable(identifier)))
         # Validate bytes again after the network call; a source may change while embedding.
-        fresh, _ = _current_rows(conn, root)
-        fresh_rows = {row['id']: row for row in fresh}
+        if mode != 'hybrid':
+            fresh, _ = _current_rows(conn, root)
+            fresh_rows = {row['id']: row for row in fresh}
         for identifier in order:
-            old = by_id[identifier]
-            latest = fresh_rows.get(identifier)
-            # SQLite can reuse an ID during reindex; ID equality is not provenance.
-            fields = ('path', 'sha256', 'extractor_version', 'kind', 'number', 'anchor', 'title', 'text')
-            if latest is None or any(old[field] != latest[field] for field in fields):
-                output['stale_candidates'] += 1
-                continue
+            if mode != 'hybrid':
+                old = by_id[identifier]
+                latest = fresh_rows.get(identifier)
+                # SQLite can reuse an ID during reindex; ID equality is not provenance.
+                fields = ('path', 'sha256', 'extractor_version', 'kind', 'number', 'anchor', 'title', 'text')
+                if latest is None or any(old[field] != latest[field] for field in fields):
+                    output['stale_candidates'] += 1
+                    continue
             row = by_id[identifier]
             output['results'].append(dict(path=row['path'], sha256=row['sha256'],
                 locator=dict(kind=row['kind'], number=row['number'], anchor=row['anchor']),
