@@ -287,3 +287,49 @@ The caller now supplies verified document/locator provenance separately from
 excerpt text. Model selection is evaluated on consumed calibration and regression
 cases before another blind test; improving prompt structure alone is not a
 semantic acceptance result.
+
+### Scoped native-callback acceptance
+
+Auditing concrete answers exposed errors that matching quotations alone missed:
+incorrect entity/value pairings, omitted source locations, and changed technical
+terms. Gemma and the smaller native callback failed semantic or regression
+checks. Those results remain preserved; they are not accepted retrospectively.
+The prompts now require concrete location answers, preserve source terminology,
+and prohibit unsupported relationships between neighboring metrics.
+
+At code revision `99ae4032456ba29c0febd7b940659b3a46690c8d`, separate native agent
+contexts were requested with `gpt-6-sol/high` for assessment and verification.
+The verifier received only the original question and selected source spans.
+An independent source/answer auditor was requested with `gpt-6.1-sol/high`.
+The harness does not expose the actual model or effort, so these are requested
+routes, not runtime identity or model-weight attestations.
+
+| Set | Answerable cases passed | Misses correctly declined | Distractor subset passed |
+| --- | ---: | ---: | ---: |
+| Calibration | 8/8 | 4/4 | — |
+| Consumed regression | 8/8 | 4/4 | 2/2 |
+| New frozen blind test | 8/8 | 8/8 | 2/2 |
+
+The blind test had no schema or execution errors. Independent audits found all
+24 accepted answers across these sets complete and supported in both stages.
+The unchanged gate required at least 7/8 blind positives, both distractors,
+all eight misses, and complete independent answer/evidence review. It passes
+for this offline native-callback experiment. All 168 Python tests pass.
+
+The new questions and expected locations were disjoint from earlier sets and
+were independently source-audited before inference. The pinned corpus contains
+87 extracted text units from four decks; fresh positive cases cover the three
+decks with unused eligible locations. The misses include incomplete multipart
+answers, insufficient precision, wrong premises, and absent facts. This is a
+curated text benchmark, not historical user-query evidence, human approval, or
+an assessment of all original HTML metadata and visuals.
+
+Private request/response files bind the exact prompts, source excerpts, labels,
+code and scoring protocol by hash. The offline bridge replays the real callback
+contract, rechecks every retrieved source including abstentions, and scores
+only final accepted evidence. Failed output is never a successful abstention.
+The asynchronous native workflow provides no serving-latency measurement.
+Qwen/Gemma on M5 remain unaccepted for this answer-checking policy; M5 supplies
+the existing embeddings. No answerability endpoint, runtime default, original
+archive, or deployment was changed. Production integration and broader
+independent evaluation remain separate work.
