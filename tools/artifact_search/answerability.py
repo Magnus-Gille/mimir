@@ -33,6 +33,10 @@ SUPPORTED means the requested information is fully present; PARTIAL means a
 specific requested component or level of precision is absent; MISSING means no
 answer is supplied; CONTRADICTED means the source conflicts with the premise.
 Do not label an answer partial merely because the source uses different words.
+A number used to label a heading, section, page or slide is not itself a date
+or measured value. Explicit dates or values written in headings can be evidence.
+Do not combine unrelated numbers with a nearby month or unit to invent the
+requested value; the source must express that value and its relationship.
 
 For every requirement, assign exactly one status: supported, partial, missing,
 or contradicted. Select exact source span IDs as evidence; never copy or invent
@@ -65,6 +69,10 @@ SUPPORTED means the requested information is fully present; PARTIAL means a
 specific requested component or level of precision is absent; MISSING means no
 answer is supplied; CONTRADICTED means the source conflicts with the premise.
 Do not label an answer partial merely because the source uses different words.
+A number used to label a heading, section, page or slide is not itself a date
+or measured value. Explicit dates or values written in headings can be evidence.
+Do not combine unrelated numbers with a nearby month or unit to invent the
+requested value; the source must express that value and its relationship.
 
 Select exact source span IDs as evidence; never copy or invent quote text and
 never invent span IDs. Return only strict JSON with this shape:
