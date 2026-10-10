@@ -88,6 +88,16 @@ pass rate, distractor pass rate, and per-case `case_id`, rank, pass state, and
 mode. It deliberately
 omits query text, expected paths, source text, and snippets.
 
+The reproducible JSON entry point is `python -m tools.artifact_search.heldout_cli`
+with `--labels`, `--snapshot-manifest`, `--calibration`,
+`--expected-label-sha256`, and `--db`. It accepts `--top` and
+`--mode lexical|vector|hybrid`; vector and hybrid additionally require the existing
+`--embedding-revision` and may set `--dimensions` and `--min-score`. The
+output preserves the aggregate report, adds `requested_mode`, and exposes an
+`effective_modes` mapping by case ID so hybrid lexical fallback remains
+visible. The callback and M5 client are created lazily only after the held-out
+preflight has accepted the approved, frozen, digest-pinned split.
+
 Positive Hit@k and MRR include both `positive` and `distractor` cases because
 both have accepted targets. Distractor pass rate reports that subset. Negative
 pass rate covers `miss` cases and uses the evaluator's negative result: a miss
