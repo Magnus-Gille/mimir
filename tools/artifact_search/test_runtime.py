@@ -6,6 +6,7 @@ from contextlib import contextmanager
 import http.client
 import json
 import os
+import sqlite3
 from pathlib import Path
 import tempfile
 import threading
@@ -192,7 +193,8 @@ class RuntimeContractTests(unittest.TestCase):
 
         clock.value = 170
         new_root, new_result, new_bundle = self._snapshot("new")
-        self._handoff(handoff, new_root, new_result, new_bundle, observed_at=160, expires_at=260)
+        # New snapshot observation keeps the trusted original scope binding.
+        self._handoff(handoff, old_root, new_result, new_bundle, observed_at=160, expires_at=260)
         with self.assertRaisesRegex(RuntimeErrorCode, "index_unavailable"):
             runtime.search("north star")
 
@@ -218,6 +220,14 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(item["snapshot_id"], result["snapshot_id"])
         self.assertEqual(item["verification"], "original_sha256_matched")
         self.assertNotIn("@", item["mimir_url"])
+
+    def test_index_provenance_must_match_pinned_manifest(self) -> None:
+        runtime, _root, _result, _bundle, _handoff_path = self._runtime()
+        self._complete(runtime)
+        with sqlite3.connect(runtime.state / runtime.job()['index']) as connection:
+            connection.execute("UPDATE units SET artifact_id='unrelated-identity'")
+        with self.assertRaisesRegex(RuntimeErrorCode, 'index_provenance_mismatch'):
+            runtime.search('north star', top=1)
 
     def test_missing_or_changed_original_rejects_all_content(self) -> None:
         for failure in ("missing", "changed"):

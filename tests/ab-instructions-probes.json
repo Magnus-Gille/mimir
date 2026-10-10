@@ -65,6 +65,18 @@
       "target": "docs/artifact-source-snapshots.md"
     },
     {
+      "id": "artifact-search-runtime",
+      "kind": "retrieval",
+      "prompt": "How does the standalone search service reject stale sources, recover a corrupted index and verify an exact release package?",
+      "target": "docs/artifact-search-runtime.md"
+    },
+    {
+      "id": "artifact-search-heldout-evaluation",
+      "kind": "retrieval",
+      "prompt": "How are proposed search questions approved and frozen before measuring positive, distractor and miss retrieval quality?",
+      "target": "docs/artifact-search-evaluation.md"
+    },
+    {
       "id": "secret-scan-quarantine-control",
       "kind": "control",
       "prompt": "If an inbox import contains a private key or other secret-looking token, what must happen before it can reach the NAS mirror?",

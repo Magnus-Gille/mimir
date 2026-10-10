@@ -39,12 +39,13 @@ noncanonical bytes are rejected. The top-level schema is
 
 `type` is one of `positive`, `miss`, or `distractor`. A positive case must
 have at least one expected location. A miss must have an empty `expected`
-array. Distractors are retained as a separate label class and may be empty or
-carry explicitly recorded expected locations, but are never silently relabeled
-as positives. Expected locations use only `slide`, `page`, or `section`, a
-1-based integer number, and a lowercase SHA-256. Every expected path and hash
-must occur in the complete snapshot manifest with the same hash. Provenance
-contains nonempty `source_task` and `evidence` strings.
+array. A distractor is a difficult positive query surrounded by similar but
+irrelevant candidates, so it must also have at least one accepted expected
+location and is scored with the positive targets. It remains a separate label
+class for reporting. Expected locations use only `slide`, `page`, or `section`,
+a 1-based integer number, and a lowercase SHA-256. Every expected path and
+hash must occur in the complete snapshot manifest with the same hash.
+Provenance contains nonempty `source_task` and `evidence` strings.
 
 Draft files are useful for preparation and validation. A held-out run requires
 `status: "approved"`, a nonempty `frozen_at`, and a reviewer whose identity is
@@ -58,9 +59,10 @@ independently approved benchmark.
 
 Calibration and held-out files are supplied separately to `validate_split` and
 `run_heldout`. The harness rejects the same file, equal byte hashes, and any
-overlapping case IDs. This is a procedural independence control: separate files
-and IDs reduce accidental tuning leakage, but they are not a cryptographic
-guarantee that a person did not inspect or reuse a query.
+overlapping case IDs or normalized queries (case-folded with repeated
+whitespace collapsed). This is a procedural independence control: separate
+files, IDs, and query text reduce accidental tuning leakage, but they are not a
+cryptographic guarantee that a person did not inspect or reuse a query.
 
 The expected held-out label SHA-256 is supplied out of band to
 `run_heldout(expected_label_sha256=...)`. The runner compares it with the exact
@@ -74,12 +76,15 @@ fails before search runs.
 existing `evaluate()` function and requires a callable `search_fn`; it performs
 no network or default search import. The report contains the exact label byte
 SHA, snapshot ID, source ID, aggregate mode, positive Hit@k and MRR, negative
-pass rate, and per-case `case_id`, rank, pass state, and mode. It deliberately
+pass rate, distractor pass rate, and per-case `case_id`, rank, pass state, and
+mode. It deliberately
 omits query text, expected paths, source text, and snippets.
 
-Positive metrics include only `type: "positive"`. Negative pass rate covers
-`miss` and `distractor` cases and counts a case as passing when no expected
-location is returned. No quality threshold is chosen here. Semantic quality
+Positive Hit@k and MRR include both `positive` and `distractor` cases because
+both have accepted targets. Distractor pass rate reports that subset. Negative
+pass rate covers `miss` cases and uses the evaluator's negative result: a miss
+passes only when the search returns no result at all. An unrelated hit therefore
+fails the miss case. No quality threshold is chosen here. Semantic quality
 gates, answerability thresholds, and claims about real-corpus relevance remain
 unapproved until an owner-curated evaluation has been reviewed independently.
 

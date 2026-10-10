@@ -173,6 +173,8 @@ def _validate_cases(cases: object) -> tuple[list[dict[str, Any]], set[str]]:
             raise _error("miss_has_answers")
         if case_type == "positive" and not expected:
             raise _error("positive_has_no_answers")
+        if case_type == "distractor" and not expected:
+            raise _error("distractor_has_no_answers")
         provenance = case.get("provenance")
         if not isinstance(provenance, dict) or set(provenance) != _PROVENANCE_FIELDS:
             raise _error("invalid_provenance")
@@ -318,10 +320,15 @@ def validate_split(calibration_path: Path, heldout_path: Path) -> dict[str, Any]
     heldout, heldout_sha = read_evaluation(heldout_path)
     if calibration_sha == heldout_sha:
         raise _error("calibration_heldout_same_hash")
-    _, calibration_ids = _validate_cases(calibration["cases"])
-    _, heldout_ids = _validate_cases(heldout["cases"])
+    calibration_cases, calibration_ids = _validate_cases(calibration["cases"])
+    heldout_cases, heldout_ids = _validate_cases(heldout["cases"])
     if calibration_ids & heldout_ids:
         raise _error("calibration_heldout_case_overlap")
+    normalize_query = lambda value: " ".join(value.split()).casefold()
+    calibration_queries = {normalize_query(case["query"]) for case in calibration_cases}
+    heldout_queries = {normalize_query(case["query"]) for case in heldout_cases}
+    if calibration_queries & heldout_queries:
+        raise _error("calibration_heldout_query_overlap")
     return {
         "calibration_sha256": calibration_sha,
         "heldout_sha256": heldout_sha,
@@ -372,9 +379,11 @@ def run_heldout(
     raw_report = evaluate(db, normalized_cases, top=top, search_fn=search_fn)
     by_id = {case["id"]: case for case in validated["cases"]}
     results: list[dict[str, Any]] = []
-    positive_ranks: list[int] = []
-    negative_count = 0
-    negative_passes = 0
+    target_ranks: list[int] = []
+    miss_count = 0
+    miss_passes = 0
+    distractor_count = 0
+    distractor_passes = 0
     modes: list[str] = []
     for item in raw_report["results"]:
         case = by_id[item["label"]]
@@ -382,16 +391,20 @@ def run_heldout(
         mode = candidate_mode if candidate_mode in REPORT_MODES else "unknown"
         modes.append(mode)
         rank = item.get("rank")
-        passed = rank is not None if case["type"] == "positive" else rank is None
-        if case["type"] == "positive":
+        passed = bool(item["hit"])
+        if case["type"] in {"positive", "distractor"}:
             if rank is not None:
-                positive_ranks.append(rank)
-        else:
-            negative_count += 1
+                target_ranks.append(rank)
+            if case["type"] == "distractor":
+                distractor_count += 1
+                if passed:
+                    distractor_passes += 1
+        else:  # miss: evaluate() sets hit only when the result list is empty.
+            miss_count += 1
             if passed:
-                negative_passes += 1
+                miss_passes += 1
         results.append({"case_id": case["id"], "rank": rank, "pass": passed, "mode": mode})
-    positive_count = sum(case["type"] == "positive" for case in validated["cases"])
+    positive_count = sum(case["type"] in {"positive", "distractor"} for case in validated["cases"])
     mode = modes[0] if modes and all(item == modes[0] for item in modes) else "mixed"
     return {
         "schema": REPORT_SCHEMA,
@@ -402,12 +415,16 @@ def run_heldout(
         "top": raw_report["top"],
         "case_count": len(results),
         "positive_case_count": positive_count,
-        "hit_at_k": len(positive_ranks) / positive_count if positive_count else 0.0,
-        "positive_hit_at_k": len(positive_ranks) / positive_count if positive_count else 0.0,
-        "mean_reciprocal_rank": sum(1.0 / rank for rank in positive_ranks) / positive_count if positive_count else 0.0,
-        "positive_mrr": sum(1.0 / rank for rank in positive_ranks) / positive_count if positive_count else 0.0,
-        "negative_case_count": negative_count,
-        "negative_pass_rate": negative_passes / negative_count if negative_count else None,
+        "hit_at_k": len(target_ranks) / positive_count if positive_count else 0.0,
+        "positive_hit_at_k": len(target_ranks) / positive_count if positive_count else 0.0,
+        "mean_reciprocal_rank": sum(1.0 / rank for rank in target_ranks) / positive_count if positive_count else 0.0,
+        "positive_mrr": sum(1.0 / rank for rank in target_ranks) / positive_count if positive_count else 0.0,
+        "negative_case_count": miss_count,
+        "negative_pass_rate": miss_passes / miss_count if miss_count else None,
+        "miss_case_count": miss_count,
+        "miss_pass_rate": miss_passes / miss_count if miss_count else None,
+        "distractor_case_count": distractor_count,
+        "distractor_pass_rate": distractor_passes / distractor_count if distractor_count else None,
         "calibration_sha256": split["calibration_sha256"],
         "results": results,
     }

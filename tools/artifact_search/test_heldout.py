@@ -80,7 +80,7 @@ class HeldoutTests(unittest.TestCase):
             snapshot_id,
             [
                 case("positive", "where answer", "positive", [locator("answer.txt", hashes["answer.txt"])]),
-                case("distractor", "where answer", "distractor", []),
+                case("distractor", "where answer", "distractor", [locator("distractor.txt", hashes["distractor.txt"])]),
                 case("miss", "absent topic", "miss", []),
             ],
             status="draft",
@@ -100,6 +100,7 @@ class HeldoutTests(unittest.TestCase):
             [case("unknown", "question", "other", [])],
             [case("miss-answer", "question", "miss", [locator("answer.txt", hashes["answer.txt"])] )],
             [case("positive-empty", "question", "positive", [])],
+            [case("distractor-empty", "question", "distractor", [])],
             [case("bad-locator", "question", "positive", [locator("answer.txt", "not-a-hash")])],
             [case("bad-kind", "question", "positive", [locator("answer.txt", hashes["answer.txt"], kind="chapter")])],
         ]
@@ -131,7 +132,7 @@ class HeldoutTests(unittest.TestCase):
             snapshot_id,
             [
                 case("positive-case", "private answer question", "positive", [locator("answer.txt", hashes["answer.txt"])]),
-                case("distractor-case", "private distractor question", "distractor", []),
+                case("distractor-case", "private distractor question", "distractor", [locator("distractor.txt", hashes["distractor.txt"])]),
                 case("miss-case", "private missing question", "miss", []),
             ],
         )
@@ -142,7 +143,7 @@ class HeldoutTests(unittest.TestCase):
         def search(_db: Path, query: str, _top: int) -> dict:
             if query == "private answer question":
                 return {"results": [{"path": "answer.txt", "locator": {"kind": "page", "number": 1}}], "mode": "lexical"}
-            return {"results": [{"path": "distractor.txt", "locator": {"kind": "page", "number": 1}}], "mode": "lexical"} if "distractor" in query else {"results": [], "mode": "lexical"}
+            return {"results": [{"path": "distractor.txt", "locator": {"kind": "page", "number": 1}}], "mode": "lexical"} if "distractor" in query or "missing" in query else {"results": [], "mode": "lexical"}
 
         report = run_heldout(
             heldout_path,
@@ -158,7 +159,8 @@ class HeldoutTests(unittest.TestCase):
         self.assertEqual(report["mode"], "lexical")
         self.assertEqual(report["hit_at_k"], 1.0)
         self.assertEqual(report["mean_reciprocal_rank"], 1.0)
-        self.assertEqual(report["negative_pass_rate"], 1.0)
+        self.assertEqual(report["negative_pass_rate"], 0.0)
+        self.assertEqual(report["distractor_pass_rate"], 1.0)
         self.assertEqual([item["case_id"] for item in report["results"]], ["positive-case", "distractor-case", "miss-case"])
         rendered = repr(report)
         for secret_text in ("private answer question", "answer.txt", "distractor.txt"):
@@ -173,6 +175,23 @@ class HeldoutTests(unittest.TestCase):
                 search_fn=search,
             )
 
+        def missing_distractor(_db: Path, query: str, _top: int) -> dict:
+            if "answer question" in query:
+                return {"results": [{"path": "answer.txt", "locator": {"kind": "page", "number": 1}}], "mode": "lexical"}
+            return {"results": [], "mode": "lexical"}
+
+        missing_report = run_heldout(
+            heldout_path,
+            manifest_path,
+            Path(workspace.name) / "index.db",
+            calibration_path=calibration_path,
+            expected_label_sha256=heldout_sha,
+            search_fn=missing_distractor,
+            top=1,
+        )
+        self.assertFalse(missing_report["results"][1]["pass"])
+        self.assertEqual(missing_report["distractor_pass_rate"], 0.0)
+
     def test_split_rejects_same_hash_and_case_overlap(self) -> None:
         workspace, _manifest_path, snapshot_id, _hashes = self._snapshot()
         self.addCleanup(workspace.cleanup)
@@ -183,6 +202,12 @@ class HeldoutTests(unittest.TestCase):
         self._write(first, first_value)
         self._write(second, second_value)
         with self.assertRaisesRegex(HeldoutError, "calibration_heldout_case_overlap"):
+            validate_split(first, second)
+        second_value = labels(snapshot_id, [case("different-id", "  Q ", "miss", [])], status="draft", reviewer=None)
+        first_value = labels(snapshot_id, [case("first-id", "q", "miss", [])], status="draft", reviewer=None)
+        self._write(first, first_value)
+        self._write(second, second_value)
+        with self.assertRaisesRegex(HeldoutError, "calibration_heldout_query_overlap"):
             validate_split(first, second)
         self._write(second, first_value)
         with self.assertRaisesRegex(HeldoutError, "calibration_heldout_same_hash"):
