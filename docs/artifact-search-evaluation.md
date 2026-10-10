@@ -136,3 +136,48 @@ Synthetic tests in `tools/artifact_search/test_heldout.py` cover duplicate IDs,
 distractor and miss cases, empty and unknown labels, unsupported locators,
 approval and reviewer failures, label digest mismatch, snapshot mismatch, and
 calibration/held-out overlap.
+
+## Source-audited comparison, 2026-10-10
+
+A separate curator proposed twelve new questions from four event presentations
+(87 extracted units); a separate source-only reviewer checked every question,
+alternate answers and corpus-wide misses before labels were frozen. Eight cases
+have answers, including two distractors, and four have no answer in the selected
+corpus. Answer locations and queries are disjoint from the earlier consumed set
+and calibration labels. Neither curator nor reviewer saw retrieval results.
+The conductor kept the new question details blind until the retrieval policy was
+locked. This is automated source review, not human review or a historical query
+sample. The private corpus, labels, audit receipts and query-level reports are
+excluded from Git.
+
+Calibration used a separate eight-positive/four-miss set. With 256-dimensional
+EmbeddingGemma 2, the old hybrid's unbounded RRF ranked weak shared-tail matches
+above strong single-channel results. Limiting each channel to `max(top, 5)` before
+equal-weight RRF60 raised calibration Hit@5 from 5/8 to 8/8. No global cosine
+floor separated the calibration misses from valid matches: one absent-answer
+query scored above most valid answers. The zero floor was therefore retained as
+a retrieval baseline, without an answerability claim.
+
+The settings and engineering gate were recorded before the fresh test: top 5,
+256 dimensions, zero cosine floor, equal-weight RRF60, bounded window as above;
+at least 7/8 positive hits, MRR at least 0.75, both distractors, all four misses,
+and no lost positives relative to the old hybrid. A single shared cache supplied
+the same twelve query embeddings to vector and both hybrid implementations.
+The gateway release was checked around each call; the model artifact checksum
+was verified read-only on the host and remains an operator pin, not API attestation.
+
+| Fresh test mode | Positive Hit@5 | MRR | Distractors | Misses |
+| --- | --- | --- | --- | --- |
+| Lexical | 5/8 | 0.5250 | 2/2 | 0/4 |
+| Vector | 8/8 | 0.9375 | 2/2 | 0/4 |
+| Previous unbounded hybrid | 5/8 | 0.6250 | 2/2 | 0/4 |
+| Bounded hybrid | 8/8 | 0.8750 | 2/2 | 0/4 |
+
+The bounded hybrid lost no previously passing cases. Its engineering gate still
+**fails** on absent-answer cases; neither semantic mode is accepted as an
+answerability policy, and lexical remains the default. Returning a related source
+is not evidence that it answers the question. These measurements cover the local
+prototype, not a deployed search runtime. After this run the fresh set is consumed
+regression evidence; further tuning needs separate calibration and a new blind
+acceptance set. The next missing capability is evidence-based answer checking or
+abstention, evaluated separately from candidate relevance.
