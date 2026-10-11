@@ -40,6 +40,7 @@ def _profile(**overrides):
         "ssh_host": "search-host",
         "source_id": SOURCE_ID,
         "mimir_origin": ORIGIN,
+        "original_prefix": "",
         "release": RELEASE,
         "package_sha256": PACKAGE_SHA256,
     }
@@ -96,6 +97,10 @@ class ClientInputAndReceiptTests(unittest.TestCase):
             {"mimir_origin": "https://user@files.example.test"},
             {"release": "A" * 40},
             {"package_sha256": "c" * 63},
+            {"original_prefix": "../outside"},
+            {"original_prefix": "/absolute"},
+            {"original_prefix": "a//b"},
+            {"original_prefix": "a\\b"},
         )
         for override in cases:
             with self.subTest(override=override):
@@ -176,6 +181,28 @@ def _receipt(profile, now, *, results=True):
 
 
 class ClientRemoteIntegrationTests(unittest.TestCase):
+    def test_non_ascii_query_preserves_request_byte_limit(self):
+        with _serve(self.runtime) as server:
+            with patch.object(client_remote, 'KEY_PATH', self.key_path), patch.object(client_remote, 'PORT', server.server_port):
+                response = client_remote.execute({'query': 'é' * 1500, 'top': 5})
+                self.assertEqual(response['results'], [])
+
+    def test_pinned_original_prefix_matches_runtime_urls(self):
+        runtime, root, snapshot, bundle, handoff = self.fixture._runtime('prefixed', clock=_Clock(self.now))
+        self.fixture._handoff(handoff, root, snapshot, bundle, observed_at=self.now - 10, expires_at=self.now + 300)
+        binding = json.loads(handoff.read_text())
+        binding['original_prefix'] = 'presentations'
+        handoff.write_text(json.dumps(binding))
+        self.fixture._complete(runtime)
+        with _serve(runtime) as server:
+            with patch.object(client_remote, 'KEY_PATH', self.key_path), patch.object(client_remote, 'PORT', server.server_port):
+                value = client_remote.execute({'query': 'north star', 'top': 5})
+        profile = _profile(original_prefix='presentations')
+        self.assertEqual(client.validate_receipt(value, profile, 5, now=self.now), value)
+        self.assertEqual(value['results'][0]['mimir_url'], ORIGIN + '/files/presentations/docs/alpha.txt')
+        with self.assertRaises(client.ClientError):
+            client.validate_receipt(value, _profile(), 5, now=self.now)
+
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.workspace = Path(self.tempdir.name)

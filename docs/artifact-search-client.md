@@ -19,6 +19,7 @@ receipt. The profile contains no API key. Example placeholders:
   "ssh_host": "search-host",
   "source_id": "22222222-2222-4222-8222-222222222222",
   "mimir_origin": "https://files.example.test",
+  "original_prefix": "",
   "release": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "package_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 }
@@ -27,7 +28,9 @@ receipt. The profile contains no API key. Example placeholders:
 `release` and `package_sha256` pin the **server**, not this client's commit.
 The snapshot may change during normal refresh, but its identity must agree
 throughout each response. A reviewed runtime upgrade requires updating these
-two pins; an unexpected revision is rejected.
+two pins; an unexpected revision is rejected. `original_prefix` pins the optional
+relative directory between `/files/` and the snapshot-relative result path; use
+an empty string for an archive-root collection.
 
 The SSH alias must already work noninteractively with a verified host key.
 Unknown host keys, password prompts and failed connections are not accepted.

@@ -64,7 +64,10 @@ def execute(request):
         raise RemoteError('credential_unavailable') from None
     connection = http.client.HTTPConnection('127.0.0.1', PORT, timeout=30)
     try:
-        connection.request('POST', '/search', json.dumps(request, allow_nan=False).encode(),
+        payload = json.dumps(request, ensure_ascii=False, allow_nan=False).encode('utf-8')
+        if len(payload) > 8192:
+            raise RemoteError('invalid_request')
+        connection.request('POST', '/search', payload,
                            {'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json',
                             'Accept-Encoding': 'identity'})
         response = connection.getresponse()

@@ -48,7 +48,7 @@ def load_profile(path=None):
     path = Path(path) if path is not None else Path.home() / '.config/mimir-search/client.json'
     try:
         profile = decode(private_bytes(path, 8192))
-        _require(isinstance(profile, dict) and set(profile) == {'schema', 'ssh_host', 'source_id', 'mimir_origin', 'release', 'package_sha256'})
+        _require(isinstance(profile, dict) and set(profile) == {'schema', 'ssh_host', 'source_id', 'mimir_origin', 'original_prefix', 'release', 'package_sha256'})
         _require(profile['schema'] == 'mimir-search-client-v1')
         _require(isinstance(profile['ssh_host'], str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,252}', profile['ssh_host']))
         _require(str(uuid.UUID(profile['source_id'])) == profile['source_id'])
@@ -57,6 +57,9 @@ def load_profile(path=None):
         parsed = urlsplit(origin)
         _require(parsed.scheme == 'https' and parsed.hostname and not parsed.username and not parsed.password and not parsed.query and not parsed.fragment and parsed.path in ('', '/') and '\\' not in origin)
         _require(_hex(profile['release'], 40) and _hex(profile['package_sha256'], 64))
+        prefix = profile['original_prefix']
+        _require(_text(prefix, 2048) and '\\' not in prefix)
+        _require(not prefix or (not prefix.startswith('/') and str(PurePosixPath(prefix)) == prefix and all(part and not part.startswith('.') for part in prefix.split('/'))))
         return profile
     except (OSError, ValueError, TypeError, AttributeError, UnicodeError, RecursionError):
         raise ClientError('invalid_profile') from None
@@ -91,7 +94,8 @@ def validate_receipt(value, profile, top, *, now=None):
             _require(isinstance(locator, dict) and set(locator) == {'kind', 'number', 'anchor'})
             _require(locator['kind'] in ('page', 'slide', 'section') and type(locator['number']) is int and locator['number'] > 0)
             _require(locator['anchor'] is None or _text(locator['anchor'], 2048))
-            expected = profile['mimir_origin'].rstrip('/') + '/files/' + quote(path, safe='/')
+            full_path = '/'.join(part for part in (profile['original_prefix'], path) if part)
+            expected = profile['mimir_origin'].rstrip('/') + '/files/' + quote(full_path, safe='/')
             if locator['kind'] == 'page':
                 expected += '#page=' + str(locator['number'])
             elif locator['anchor']:
