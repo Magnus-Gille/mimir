@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import base64
 from contextlib import contextmanager
 import http.client
 import json
 import os
 from pathlib import Path
-import base64
+import shlex
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -355,6 +358,98 @@ class ClientRemoteIntegrationTests(unittest.TestCase):
             with self.assertRaises(client.ClientError) as raised:
                 client._transport(_profile(), b'{"query":"north star","top":5}')
         self.assertEqual(raised.exception.code, "transport_unavailable")
+
+    def test_full_cli_process_over_fake_ssh_executes_embedded_remote_payload(self):
+        home = self.workspace / "synthetic-home"
+        config_dir = home / ".config" / "mimir-search"
+        profile_path = config_dir / "client.json"
+        runtime_key_path = config_dir / "runtime.env"
+        _write_private(profile_path, json.dumps(_profile()).encode())
+        _write_private(runtime_key_path, f"MIMIR_SEARCH_API_KEY={SYNTHETIC_KEY}\n".encode())
+
+        shim_dir = self.workspace / "e2e-bin"
+        shim_dir.mkdir()
+        audit_path = self.workspace / "ssh-argv-audit.jsonl"
+        with _serve(self.runtime) as server:
+            shim = """#!{python}
+import json, shlex, sys
+args = sys.argv[1:]
+split = args.index('--')
+host = args[split + 1]
+command = args[split + 2]
+assert len(args) == split + 3
+assert host == 'search-host'
+parts = shlex.split(command)
+assert len(parts) == 4 and parts[:3] == ['python3', '-I', '-c']
+assert 'PORT = 8791' in parts[3]
+with open({audit!r}, 'a', encoding='utf-8') as stream:
+    stream.write(json.dumps(args) + '\\n')
+source = parts[3].replace('PORT = 8791', 'PORT = {port}', 1)
+exec(compile(source, 'client_remote.py', 'exec'), {{'__name__': '__main__'}})
+""".format(python=sys.executable, audit=str(audit_path), port=server.server_port)
+            ssh_path = shim_dir / "ssh"
+            ssh_path.write_text(shim, encoding="utf-8")
+            ssh_path.chmod(0o700)
+
+            script = Path(__file__).resolve().parents[2] / "scripts" / "mimir-search"
+            env = {
+                "PATH": str(shim_dir),
+                "HOME": str(home),
+                "USER": "synthetic-test",
+                "LOGNAME": "synthetic-test",
+                "LANG": "C.UTF-8",
+            }
+
+            def invoke(query):
+                return subprocess.run(
+                    [sys.executable, str(script), "--tool", "--config", str(profile_path)],
+                    input=json.dumps({"query": query, "top": 1}).encode(),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=env,
+                    timeout=20,
+                    check=False,
+                )
+
+            hit_process = invoke("north star")
+            self.assertEqual(hit_process.returncode, 0, hit_process.stderr.decode(errors="replace"))
+            hit = json.loads(hit_process.stdout)
+            self.assertEqual(hit["status"], "ok")
+            evidence = hit["evidence"]
+            self.assertEqual(evidence["release"], RELEASE)
+            self.assertEqual(evidence["package_sha256"], PACKAGE_SHA256)
+            self.assertEqual(evidence["source_id"], SOURCE_ID)
+            self.assertEqual(evidence["results"][0]["sha256"], self._original_hash())
+            self.assertEqual(evidence["results"][0]["verification"], "original_sha256_matched")
+            self.assertNotIn(SYNTHETIC_KEY, hit_process.stdout.decode())
+
+            nohit_process = invoke("volcano")
+            self.assertEqual(nohit_process.returncode, 0, nohit_process.stderr.decode(errors="replace"))
+            nohit = json.loads(nohit_process.stdout)
+            self.assertEqual(nohit["status"], "no_results")
+            self.assertEqual(nohit["evidence"]["results"], [])
+            self.assertTrue(nohit["evidence"]["abstained"])
+            self.assertNotIn(SYNTHETIC_KEY, nohit_process.stdout.decode())
+
+            _write_private(runtime_key_path, b"MIMIR_SEARCH_API_KEY=wrong-synthetic-key\n")
+            denied_process = invoke("north star")
+            self.assertEqual(denied_process.returncode, 1)
+            denied = json.loads(denied_process.stdout)
+            self.assertEqual(denied["status"], "unavailable")
+            self.assertEqual(denied["error"]["code"], "unauthorized")
+            self.assertNotIn(SYNTHETIC_KEY, denied_process.stdout.decode())
+            self.assertNotIn("wrong-synthetic-key", denied_process.stdout.decode())
+
+        audited_argv = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(audited_argv), 3)
+        for argv in audited_argv:
+            joined = " ".join(argv)
+            self.assertNotIn("north star", joined)
+            self.assertNotIn("volcano", joined)
+            self.assertNotIn(SYNTHETIC_KEY, joined)
+            self.assertNotIn("wrong-synthetic-key", joined)
+            self.assertIn("ForwardAgent=no", argv)
+            self.assertIn("ClearAllForwardings=yes", argv)
 
     def _profile_file(self):
         path = self.workspace / "client.json"
