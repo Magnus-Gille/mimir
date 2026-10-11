@@ -49,6 +49,10 @@ def _failure(status: str, code: str) -> dict[str, Any]:
 def _validate(query: Any, top: Any) -> str | None:
     if not isinstance(query, str) or not query.strip() or len(query) > 4096:
         return "invalid_query"
+    try:
+        query.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        return "invalid_query"
     if isinstance(top, bool) or not isinstance(top, int) or not 1 <= top <= 5:
         return "invalid_top"
     return None

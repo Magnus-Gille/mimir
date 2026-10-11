@@ -51,11 +51,31 @@ def _human(receipt: dict) -> str:
 
 
 def _parse_tool_json(raw: str):
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate field")
+            value[key] = item
+        return value
+
     try:
-        value = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
+        value = json.loads(raw, object_pairs_hook=unique_object)
+    except (json.JSONDecodeError, TypeError, ValueError, RecursionError):
         return None
     return value
+
+
+def _stdin_bytes(limit: int) -> bytes | None:
+    """Read a strict byte bound from real stdin, with a text-stream test fallback."""
+    stream = getattr(sys.stdin, "buffer", None)
+    if stream is not None:
+        return stream.read(limit + 1)
+    text = sys.stdin.read(limit + 1)
+    try:
+        return text.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        return None
 
 
 def main(argv=None) -> int:
@@ -82,12 +102,16 @@ def main(argv=None) -> int:
         return 0
 
     if args.tool:
-        if args.query is not None or args.top is not None or args.config is not None or args.json:
+        if args.query is not None or args.top is not None or args.json:
             print(json.dumps(_error("invalid_request", "invalid_request")))
             return 2
-        raw = sys.stdin.read(8193)
-        request = _parse_tool_json(raw) if len(raw) <= 8192 else None
-        response = handle_tool_input(request)
+        raw_bytes = _stdin_bytes(8192)
+        try:
+            raw = raw_bytes.decode("utf-8", errors="strict") if raw_bytes is not None and len(raw_bytes) <= 8192 else None
+        except UnicodeDecodeError:
+            raw = None
+        request = _parse_tool_json(raw) if raw is not None else None
+        response = handle_tool_input(request, profile_path=args.config)
         print(json.dumps(response, ensure_ascii=False))
         if response["status"] == "invalid_request":
             return 2
@@ -106,8 +130,12 @@ def main(argv=None) -> int:
         print(json.dumps(_error("invalid_request", "invalid_top")))
         return 2
     if args.query_stdin:
-        query = sys.stdin.read(4097)
-        if len(query) > 4096:
+        raw_bytes = _stdin_bytes(16386)
+        try:
+            query = raw_bytes.decode("utf-8", errors="strict") if raw_bytes is not None and len(raw_bytes) <= 16386 else None
+        except UnicodeDecodeError:
+            query = None
+        if query is None or len(query) > 4096:
             print(json.dumps(_error("invalid_request", "invalid_query")))
             return 2
         query = query.rstrip("\r\n")
