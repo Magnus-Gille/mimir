@@ -378,8 +378,11 @@ class RuntimeContractTests(unittest.TestCase):
             job = runtime.job()
             job["retry_after"] = clock.value + 10 ** 9
             runtime.save(job)
-        # A far-future backoff (clock jump or corruption) waits at most the cap.
-        clock.value += runtime_module.MAX_RETRY_SECONDS
+        # A wait beyond the cap (clock jump or corruption) is not honoured:
+        # the very next step does work without advancing the clock.
+        before = runtime.job().get("counts")
+        self.assertEqual(runtime.step(), "pending")
+        self.assertNotEqual(runtime.job().get("counts"), before)
         self._complete(runtime)
         for bad in ("Infinity", "NaN", "\"soon\""):
             with self.subTest(bad=bad):
