@@ -318,7 +318,8 @@ class SemanticRuntimeTests(unittest.TestCase):
         self._ready(runtime)
         for block in ({"status": []}, {"status": {}}, [], "x",
                       {"status": "unavailable", "retry_after": 10 ** 400, "failures": 1},
-                      {"status": "unavailable", "retry_after": 1.0, "failures": True}):
+                      {"status": "unavailable", "retry_after": 1.0, "failures": True},
+                      {"status": "pending", "failures": []}, {"status": "complete", "failures": "2"}):
             with self.subTest(block=repr(block)[:40]):
                 job = runtime.job()
                 job["vectors"] = block
@@ -328,6 +329,17 @@ class SemanticRuntimeTests(unittest.TestCase):
                 self.assertEqual(runtime.search("north star")["mode"], "lexical")
                 runtime.control("retry")
                 self._ready(runtime)
+
+    def test_failure_count_is_reused_only_from_a_backoff_block(self):
+        runtime = self._runtime(_config())
+        while runtime.step() != "ready":
+            pass
+        job = runtime.job()
+        job["vectors"] = {"status": "pending", "identity": _config().tag, "failures": 7}
+        runtime.save(job)
+        self.failure = EmbedderUnavailable("embedding_http_error", 503, None)
+        self.assertEqual(runtime.step(), "ready")
+        self.assertEqual(runtime.job()["vectors"]["failures"], 1)
 
     def test_watchdog_bounds_a_stalled_gateway_during_build_and_query(self):
         import time as real_time

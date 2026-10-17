@@ -153,11 +153,12 @@ def valid_state(value):
             return False
         if value['status'] not in VECTOR_STATES:
             return False
+        failures = value.get('failures')
+        if 'failures' in value and (type(failures) is not int or failures < 1):
+            return False
         if value['status'] == 'unavailable':
-            retry, failures = value.get('retry_after'), value.get('failures')
-            if type(retry) not in (int, float) or not math.isfinite(float(retry)):
-                return False
-            if type(failures) is not int or failures < 1:
+            retry = value.get('retry_after')
+            if type(retry) not in (int, float) or not math.isfinite(float(retry)) or failures is None:
                 return False
         return True
     except (TypeError, ValueError, OverflowError):

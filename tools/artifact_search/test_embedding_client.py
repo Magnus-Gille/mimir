@@ -110,3 +110,27 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(EmbedderUnavailable) as caught:
             client.embed(['x'])
         self.assertEqual(str(caught.exception), 'embedding_invalid_response')
+
+    def test_trickled_response_body_cannot_outlive_the_deadline(self):
+        from tools.artifact_search.embedding_client import M5Embedder, EmbedderUnavailable
+        now = [0.0]
+        body = json.dumps(self.release()).encode()
+
+        class Trickle(io.BytesIO):
+            def read1(self, size=-1):
+                now[0] += 1.0  # one byte per (sub-timeout) second, as a slow peer would send
+                return super().read1(1)
+
+            def read(self, size=-1):
+                raise AssertionError('body must be read incrementally against the deadline')
+
+        class Opener:
+            def open(self, request, timeout):
+                return Trickle(body)
+
+        client = M5Embedder(self.identity(), 'http://localhost/v1', 'synthetic-key', timeout=8,
+                            opener=Opener(), deadline=5.0, clock=lambda: now[0])
+        with self.assertRaises(EmbedderUnavailable) as caught:
+            client.embed(['x'])
+        self.assertEqual(str(caught.exception), 'embedding_deadline_exceeded')
+        self.assertLessEqual(now[0], 6.0)

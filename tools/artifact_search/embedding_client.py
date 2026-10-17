@@ -83,7 +83,7 @@ class M5Embedder:
                                    'Content-Type': 'application/json', 'User-Agent': 'mimir-artifact-search/1'})
             try:
                 with self.opener.open(req, timeout=self._remaining()) as response:
-                    raw = response.read(4*1024*1024 + 1)
+                    raw = self._read_body(response, 4*1024*1024 + 1)
                 if len(raw) > 4*1024*1024:
                     raise EmbedderUnavailable('embedding_response_too_large')
                 return json.loads(raw)
@@ -105,6 +105,25 @@ class M5Embedder:
                 raise EmbedderUnavailable('embedding_transport_error') from error
             except (ValueError, UnicodeError) as error:
                 raise EmbedderUnavailable('embedding_invalid_json') from error
+
+    def _read_body(self, response, limit):
+        """Read incrementally so a trickled body cannot outlive the absolute deadline.
+
+        Socket timeouts apply per read; checking the deadline between bounded
+        reads caps the overrun at one read timeout without relying on signals.
+        """
+        reader = getattr(response, 'read1', None)
+        if self.deadline is None or reader is None:
+            return response.read(limit)
+        chunks, size = [], 0
+        while size < limit:
+            self._remaining()
+            chunk = reader(min(65536, limit - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        return b''.join(chunks)
 
     def _verify_release(self):
         body = self._request(self.base_url[:-3] + '/portal/me')

@@ -378,7 +378,8 @@ class Runtime:
                        'units': result['units'], 'covered': result['covered']}
         except runtime_vectors.EmbedderUnavailable as error:
             if runtime_vectors.transient(error):
-                failures = previous.get('failures', 0) + 1
+                # Back-off only continues from a validated back-off block.
+                failures = (previous['failures'] if previous.get('status') == 'unavailable' else 0) + 1
                 vectors = {'status': 'unavailable', 'identity': config.tag, 'failures': failures,
                            'error': runtime_vectors.error_code(error, 'embedding_unavailable'),
                            'retry_after': now + runtime_vectors.retry_delay(failures)}
