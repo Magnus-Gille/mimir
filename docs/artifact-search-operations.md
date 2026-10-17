@@ -101,3 +101,89 @@ units/timers, preserving state, packages and receipts. Existing file/inference
 services remain untouched. Deletion and credential revocation require explicit
 scope. Later upgrades retain a known-good package/receipt and repeat the same
 fresh acceptance checks after rollback.
+
+## Gateway revision drift
+
+The reader pins `MIMIR_SEARCH_EMBEDDING_REVISION=<gateway SHA>:<model SHA-256>`
+and checks the gateway release through `/portal/me` before every embedding
+call. **Every gille-inference gateway deploy changes the gateway SHA.** Semantic
+retrieval then fails closed with `embedding_gateway_revision_mismatch`: queries
+return `lexical_fallback` / `embedding_unavailable`, and the vector cache may
+still look `complete`. The fail-closed behaviour is intended. The re-pin below
+is an explicit operator step after each gateway deploy, never automatic.
+
+### Alert
+
+The reader role renders `mimir-search-semantic-check.service` and a five-minute
+`.timer`. `search.pyz ops semantic-check --port 8791` does three things:
+
+1. It reads the serving runtime's loopback `/health` with `MIMIR_SEARCH_API_KEY`.
+   This is the pin the running process actually loaded.
+2. It reads the live gateway revision through `/portal/me` with the reader's own
+   `M5_API_KEY`.
+3. It classifies `semantic.error`, the vector state and the comparison.
+
+| Result | State |
+| --- | --- |
+| `semantic_disabled`, `embedding_gateway_revision_current`, `vectors_complete`, `vectors_building` | `pass` |
+| `embedding_unavailable` (transient gateway failure), `vectors_not_started`, `vectors_identity_stale`, an `unavailable` vector error | `warn` |
+| `embedding_gateway_revision_mismatch`, a `semantic.error` code, `embedding_route_unavailable`, `runtime_health_unavailable`, a `failed` vector error | `fail` |
+
+Each run pushes one `mimir/search-semantic` Heimdall status panel when
+`HEIMDALL_HUB_URL` and `HEIMDALL_FLEET_TOKEN` are set. Keep them in the optional
+`~/.config/mimir-search/heimdall.env` (`0600`), not in `runtime.env`. Without a hub,
+a non-pass result logs `[mimir-search] ALERT …` to the journal. A `fail` always
+exits non-zero, so the unit shows as failed. Output holds bounded codes and counts
+only: no credentials, route URLs or response bodies.
+
+```bash
+journalctl --user -u mimir-search-semantic-check.service -n 5
+```
+
+### Re-pin after a gateway deploy
+
+The package entrypoint needs `MIMIR_SEARCH_RELEASE` set to the installed
+release, as the units do. Run it on the reader host as the reader user.
+
+1. Dry run (the default). It prints `old_revision` and `new_revision` and writes nothing:
+
+   ```bash
+   MIMIR_SEARCH_RELEASE=<release> python3 ~/.local/share/mimir-search/releases/<release>/search.pyz \
+     ops repin-embedding --env-file ~/.config/mimir-search/runtime.env --model-file <installed GGUF>
+   ```
+
+   The command reads `M5_OPENAI_BASE_URL` and `M5_API_KEY` from the env file in
+   process. It refuses a non-private route, a symlinked or non-`0600` env file,
+   and duplicate pin or route keys. It parses only single-line `KEY=value`
+   assignments, unquoted or fully quoted, and no backslash anywhere in the file,
+   comments included. Anything that
+   systemd might read differently, such as whitespace before `=`, multiline
+   quotes, escapes, control characters or non-LF line separators, is refused
+   with `unsupported_env_syntax`. Before any network call, it hashes the
+   installed GGUF and refuses `model_sha256_mismatch` if the model changed.
+2. Compare `new_revision` with the gateway deploy receipt, such as the deploy
+   marker or the merged gille-inference SHA. Do not apply a revision you cannot
+   attribute to an approved deploy.
+3. Apply exactly that revision:
+
+   ```bash
+   … ops repin-embedding --env-file … --model-file … --apply --expect-gateway <40-hex SHA from step 2>
+   ```
+
+   The command refuses `gateway_revision_unexpected` if the live gateway no longer
+   reports that SHA. It writes `runtime.env.pre-repin-<UTC>` (`0600`, exclusive)
+   next to the env file, or in `--backup-dir`. It then replaces `runtime.env`
+   atomically and changes only the gateway half of the pin line. A lock
+   (`.runtime.env.repin.lock`) held from the read to the replace refuses a
+   concurrent re-pin with `repin_in_progress`. A hand edit made during the run
+   aborts it with `env_file_changed`. Don't edit the file by hand while
+   applying: an edit in the instant before the replace can still be lost.
+4. Restart the runtime with `systemctl --user restart mimir-search.service`. The
+   vector cache rebuilds under the new identity. The old cache is inert and
+   is kept. The next `semantic-check` run should report
+   `embedding_gateway_revision_current`, then `vectors_complete`.
+
+Rollback: copy the backup back over `runtime.env` (keep `0600`) and restart. A
+**model** change is out of scope for this command. It needs a newly
+operator-verified SHA-256 and a deliberate pin edit, which also gives the vector
+cache a new identity.

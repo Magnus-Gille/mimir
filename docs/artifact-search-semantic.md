@@ -181,6 +181,24 @@ error code under `semantic.error`. The `semantic` block in `/health` reports the
 flag, default mode, identity, thresholds and vector build state. It never
 includes credentials, and it does not affect `ready`.
 
+### Gateway revision pin
+
+The gateway half of `MIMIR_SEARCH_EMBEDDING_REVISION` changes with every
+gille-inference gateway deploy. After that, every embedding call fails closed
+with `embedding_gateway_revision_mismatch`. A cache that was already complete
+keeps reporting `complete`, while queries quietly return `lexical_fallback`.
+`/health` alone therefore does not reveal drift. The reader's
+`mimir-search-semantic-check` timer compares the running pin with the live
+`/portal/me` every five minutes. It raises a `fail` Heimdall panel, or a loud
+journal alert, on mismatch.
+
+The operator then runs `ops repin-embedding`: a dry run first, then `--apply
+--expect-gateway <sha>`. It backs up `runtime.env`, rewrites only the gateway
+half and refuses any model change. The model SHA-256 stays an operator pin.
+Because the cache identity hashes the whole revision, a re-pin, and any model
+change, always builds a fresh cache. See
+[operations](artifact-search-operations.md#gateway-revision-drift).
+
 ## Evaluation plan (fresh blind cases)
 
 Every earlier query set is consumed. That covers the 2026-10-09 feasibility
@@ -261,7 +279,8 @@ fresh set may be impossible until the corpus is widened (owner decision 1).
 - A `--mode` option in the `mimir-search` client (`Magnus-Gille/claude-skills`),
   so agents can request `hybrid` explicitly once it is enabled.
 - An attested model fingerprint from the gateway; the checksum is still an
-  operator pin.
+  operator pin. Gateway revision drift is now detected and re-pinned
+  explicitly ([#54](https://github.com/Magnus-Gille/mimir/issues/54)).
 - Integrating an evidence-based answer check as a second abstention stage, once
   an M5-hosted model passes it.
 - A packed float cache, if the corpus outgrows the 5,000-unit semantic ceiling.
