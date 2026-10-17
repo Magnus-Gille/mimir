@@ -74,7 +74,8 @@ equivalent enforced memory cap here: input, unit, extracted-text, process count
 and duration caps still apply. Only one request and one index child run at once.
 Snapshot limits remain 20 MiB/file, 256 MiB/corpus and 10,000 entries. Index limits
 include 50,000 units and one million extracted characters per artifact. State over
-512 MiB blocks further job work; pruning is explicit and never deletes originals.
+512 MiB, excluding the separately capped 128 MiB of optional vector caches, blocks
+further job work. Pruning is explicit and never deletes originals.
 HTTP pulls retain no-redirect/no-proxy behavior and source request pacing.
 
 Transient source conditions — `source_unavailable`, HTTP 408/429/5xx and a lapsed

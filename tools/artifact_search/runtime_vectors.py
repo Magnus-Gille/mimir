@@ -8,6 +8,7 @@ snapshot index and every returned original is still verified by the runtime.
 """
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 import hashlib
 import json
@@ -15,8 +16,10 @@ import math
 import os
 from pathlib import Path
 import re
+import signal
 import sqlite3
 import stat
+import threading
 import time
 
 from .core import PIPELINE_VERSION, has_secret
@@ -40,10 +43,11 @@ HARD_STEP_SECONDS = 60
 BUILD_TIMEOUT = 8
 QUERY_TIMEOUT = 3
 QUERY_SECONDS = 4
-# All vector caches together, and headroom kept free for lexical index work.
+# All vector caches together: a quota separate from (and never counted in) the
+# runtime's 512 MiB lexical state budget.
 MAX_VECTOR_BYTES = MAX_CACHE_PAGES * 4096
-LEXICAL_RESERVE_BYTES = 32 * 1024 * 1024
 MIN_VECTOR_GROWTH = 1024 * 1024
+VECTOR_STATES = frozenset({'pending', 'complete', 'unavailable', 'failed'})
 BREAKER_SECONDS = 30
 MIN_ZSCORE_UNITS = 8
 MIN_RETRY_SECONDS = 5
@@ -140,6 +144,65 @@ def identity_tag(identity):
                           'segmentation': SEGMENTATION_VERSION, 'pipeline': PIPELINE_VERSION},
                          sort_keys=True, separators=(',', ':')).encode()
     return '%dd-%s' % (identity.dimensions, hashlib.sha256(payload).hexdigest()[:16])
+
+
+def valid_state(value):
+    """Total check of a persisted ``vectors`` job block over any JSON value."""
+    try:
+        if not isinstance(value, dict) or not isinstance(value.get('status'), str):
+            return False
+        if value['status'] not in VECTOR_STATES:
+            return False
+        if value['status'] == 'unavailable':
+            retry, failures = value.get('retry_after'), value.get('failures')
+            if type(retry) not in (int, float) or not math.isfinite(float(retry)):
+                return False
+            if type(failures) is not int or failures < 1:
+                return False
+        return True
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+@contextlib.contextmanager
+def wall_clock_limit(deadline):
+    """Absolute wall-clock bound for one blocking model call.
+
+    Socket timeouts apply per read, so a gateway that trickles bytes can outlive
+    any per-call timeout.  In the main thread (the step child and the serve
+    loop) a real-time timer interrupts the call at ``deadline``.  Elsewhere the
+    embedder's own deadline is the only bound.
+    """
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise EmbedderUnavailable('embedding_deadline_exceeded')
+    if threading.current_thread() is not threading.main_thread() or not hasattr(signal, 'setitimer'):
+        yield
+        return
+
+    def expire(_signum, _frame):
+        raise EmbedderUnavailable('embedding_deadline_exceeded')
+
+    previous = signal.signal(signal.SIGALRM, expire)
+    signal.setitimer(signal.ITIMER_REAL, remaining)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+class Watched:
+    """Embedder wrapper that applies :func:`wall_clock_limit` to every call."""
+
+    def __init__(self, embedder, deadline):
+        self.embedder = embedder
+        self.identity = embedder.identity
+        self.deadline = deadline
+
+    def embed(self, inputs):
+        with wall_clock_limit(self.deadline):
+            return self.embedder.embed(inputs)
 
 
 def transient(error):

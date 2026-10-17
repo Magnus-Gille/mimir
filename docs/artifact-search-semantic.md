@@ -34,8 +34,10 @@ are regression evidence only.
   delays, fails or cancels lexical readiness. Unexpected vector-step errors are
   recorded as `vector_step_failed` instead of crashing the child, and an invalid
   `vectors` job field is dropped rather than making `job.json` unreadable.
-  Residual risk: socket timeouts apply per read, so a gateway that trickles bytes
-  could still stretch a call.
+  Socket timeouts apply per read, so a gateway that trickles bytes could
+  outlive them. Every model call in the step child and in the serve loop
+  therefore also runs under a real-time `SIGALRM` watchdog set to the same
+  absolute deadline.
 - **Cached in the runtime state directory.** Each embedding identity gets one
   private (`0600`) SQLite file, `vectors-<dims>d-<identity-hash>.sqlite`. The
   identity hash covers the cache schema, model, gateway revision and
@@ -48,11 +50,12 @@ are regression evidence only.
   that row, semantic modes are unavailable and queries fall back to lexical.
   A new snapshot starts with no coverage. A changed configuration produces a
   different file, so the old cache is never reused.
-- **Bounded.** All vector caches together are capped at 128 MiB. Before each
-  step, the runtime also keeps 32 MiB of the 512 MiB state budget free for
-  lexical work, enforced through SQLite `max_page_count`. Exhausting either
-  limit fails the vector state with `vector_budget_exceeded`; it can never trip
-  the lexical job's `state_budget_exceeded`. Caches for old identities are kept
+- **Bounded.** All vector caches together have their own 128 MiB quota,
+  enforced through SQLite `max_page_count`. The quota is separate from the
+  512 MiB lexical state budget, which no longer counts `vectors-*` files. The
+  state directory can therefore reach 640 MiB in total. Exhausting the vector
+  quota fails the vector state with `vector_budget_exceeded`; vector files can
+  never trip the lexical job's `state_budget_exceeded`. Caches for old identities are kept
   until an operator prunes them, with normal deletion authorization. Semantic
   modes handle at most 5,000 eligible units; a larger corpus is reported as a
   failed vector state. 256 dimensions is the default. 768 dimensions are accepted,
@@ -76,7 +79,8 @@ A missing route is reported as `embedding_route_unavailable`, and lexical
 retrieval keeps serving.
 
 Interactive queries use a 3 s per-call timeout inside a 4 s absolute budget per
-query, so the single-request server is never blocked for long. After any
+query, enforced by the same watchdog, so the single-request server is never
+blocked for long. After any
 query-embedding failure, a 30 s in-process breaker sends queries straight to
 lexical without waiting. Index-time
 failures are classified as follows:

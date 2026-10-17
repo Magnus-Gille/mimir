@@ -162,17 +162,10 @@ class Runtime:
                 raise RuntimeErrorCode('invalid_job_state')
         elif any(key in value for key in ('index', 'source_id', 'handoff')) or value['status'] == 'ready':
             raise RuntimeErrorCode('invalid_job_state')
-        vectors = value.get('vectors')
         # Derived semantic state is validated on its own: an invalid block is
         # dropped (and rebuilt by the next step), never allowed to make the
         # lexical job unreadable.
-        if vectors is not None and (
-                not isinstance(vectors, dict) or
-                vectors.get('status') not in {'pending', 'complete', 'unavailable', 'failed'} or
-                vectors['status'] == 'unavailable' and (
-                    type(vectors.get('retry_after')) not in (int, float) or
-                    not math.isfinite(vectors['retry_after']) or
-                    type(vectors.get('failures')) is not int or vectors['failures'] < 1)):
+        if 'vectors' in value and not runtime_vectors.valid_state(value['vectors']):
             del value['vectors']
         if 'retry_after' in value or 'transient_failures' in value:
             if (value['status'] != 'pending' or type(value.get('retry_after')) not in (int, float) or
@@ -210,7 +203,8 @@ class Runtime:
         total = 0
         for path in self.state.iterdir():
             info = path.lstat()
-            if stat.S_ISREG(info.st_mode):
+            # Vector caches have their own quota and never block lexical work.
+            if stat.S_ISREG(info.st_mode) and not path.name.startswith('vectors-'):
                 total += info.st_size
         if total > MAX_STATE_BYTES:
             raise RuntimeErrorCode('state_budget_exceeded')
@@ -373,7 +367,8 @@ class Runtime:
             if previous.get('status') == 'complete' and store.covered(job['snapshot_id']) == len(runtime_vectors.eligible(units)):
                 return
             try:
-                embedder = self.embedder_factory(config.identity, runtime_vectors.BUILD_TIMEOUT, hard)
+                embedder = runtime_vectors.Watched(
+                    self.embedder_factory(config.identity, runtime_vectors.BUILD_TIMEOUT, hard), hard)
             except (ValueError, TypeError):
                 raise runtime_vectors.VectorError('embedding_route_unavailable') from None
             soft = min(time.monotonic() + runtime_vectors.STEP_SECONDS, hard)
@@ -407,25 +402,23 @@ class Runtime:
         self.save(job)
 
     def _vector_allowance(self, tag):
-        """Bytes this identity's cache may reach without endangering lexical state.
+        """Bytes this identity's cache may reach within the separate vector quota.
 
-        All vector caches share one cap, and the whole state directory keeps a
-        reserve below the job budget, so vector growth can stop vector work but
-        never trip ``state_budget_exceeded`` for the lexical job.
+        All vector caches share one cap that is excluded from the lexical state
+        budget, so vector storage can stop vector work but never trip
+        ``state_budget_exceeded`` for the lexical job.
         """
         own_prefix = 'vectors-%s.sqlite' % tag
-        total = own = other = 0
+        own = other = 0
         for path in self.state.iterdir():
             info = path.lstat()
-            if not stat.S_ISREG(info.st_mode):
+            if not stat.S_ISREG(info.st_mode) or not path.name.startswith('vectors-'):
                 continue
-            total += info.st_size
             if path.name.startswith(own_prefix):
                 own += info.st_size
-            elif path.name.startswith('vectors-'):
+            else:
                 other += info.st_size
-        allowance = min(runtime_vectors.MAX_VECTOR_BYTES - other,
-                        MAX_STATE_BYTES - runtime_vectors.LEXICAL_RESERVE_BYTES - (total - own))
+        allowance = runtime_vectors.MAX_VECTOR_BYTES - other
         if allowance < own + runtime_vectors.MIN_VECTOR_GROWTH:
             raise runtime_vectors.VectorError('vector_budget_exceeded')
         return allowance
@@ -530,9 +523,10 @@ class Runtime:
             elif time.monotonic() < self._breaker_until:
                 reason = 'embedding_unavailable'
         if reason is None:
+            deadline = time.monotonic() + runtime_vectors.QUERY_SECONDS
             try:
-                embedder = self.embedder_factory(config.identity, runtime_vectors.QUERY_TIMEOUT,
-                                                 time.monotonic() + runtime_vectors.QUERY_SECONDS)
+                embedder = runtime_vectors.Watched(
+                    self.embedder_factory(config.identity, runtime_vectors.QUERY_TIMEOUT, deadline), deadline)
             except (ValueError, TypeError):
                 reason = 'embedding_route_unavailable'
         if reason is None:

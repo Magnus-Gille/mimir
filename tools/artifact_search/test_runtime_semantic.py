@@ -293,13 +293,68 @@ class SemanticRuntimeTests(unittest.TestCase):
         runtime = self._runtime(_config())
         while runtime.step() != "ready":
             pass
-        used = sum(path.stat().st_size for path in self.state.iterdir() if path.is_file())
-        with mock.patch.object(runtime_module, "MAX_STATE_BYTES", used + 1024):
+        with mock.patch.object(runtime_module.runtime_vectors, "MAX_VECTOR_BYTES", 1024):
             self.assertEqual(runtime.step(), "ready")
             self.assertEqual(runtime.job()["vectors"]["error"], "vector_budget_exceeded")
             self.assertEqual(runtime.step(), "ready")
         self.assertEqual(self.calls, [])
         self.assertTrue(runtime.health()["ready"])
+
+    def test_retained_vectors_never_count_against_the_lexical_budget(self):
+        runtime = self._runtime(_config())
+        self._ready(runtime)
+        lexical = sum(path.stat().st_size for path in self.state.iterdir()
+                      if path.is_file() and not path.name.startswith("vectors-"))
+        with (self.state / "vectors-768d-0000000000000000.sqlite").open("wb") as stream:
+            stream.truncate(64 * 1024 * 1024)  # an old identity's cache, sparse
+        os.chmod(self.state / "vectors-768d-0000000000000000.sqlite", 0o600)
+        with mock.patch.object(runtime_module, "MAX_STATE_BYTES", lexical + 1024 * 1024):
+            self.assertEqual(runtime.step(), "ready")
+            self.assertTrue(runtime.health()["ready"])
+            self.assertEqual(runtime.search("north star")["mode"], "lexical")
+
+    def test_non_json_shaped_vector_metadata_is_dropped(self):
+        runtime = self._runtime(_config())
+        self._ready(runtime)
+        for block in ({"status": []}, {"status": {}}, [], "x",
+                      {"status": "unavailable", "retry_after": 10 ** 400, "failures": 1},
+                      {"status": "unavailable", "retry_after": 1.0, "failures": True}):
+            with self.subTest(block=repr(block)[:40]):
+                job = runtime.job()
+                job["vectors"] = block
+                runtime.save(job)
+                self.assertNotIn("vectors", runtime.job())
+                self.assertTrue(runtime.health()["ready"])
+                self.assertEqual(runtime.search("north star")["mode"], "lexical")
+                runtime.control("retry")
+                self._ready(runtime)
+
+    def test_watchdog_bounds_a_stalled_gateway_during_build_and_query(self):
+        import time as real_time
+        runtime = self._runtime(_config())
+        while runtime.step() != "ready":
+            pass
+
+        class Stalled(FakeEmbedder):
+            def embed(self, inputs):
+                real_time.sleep(5)  # e.g. a body trickled one byte per socket timeout
+                return super().embed(inputs)
+
+        runtime.embedder_factory = lambda identity, timeout, deadline=None: Stalled(identity, self.calls)
+        with mock.patch.object(runtime_module.runtime_vectors, "HARD_STEP_SECONDS", 0.3):
+            started = real_time.monotonic()
+            self.assertEqual(runtime.step(), "ready")
+            self.assertLess(real_time.monotonic() - started, 2)
+        self.assertIn(runtime.job()["vectors"]["status"], {"pending", "unavailable"})
+        self.assertTrue(runtime.health()["ready"])
+        runtime.embedder_factory = self.factory
+        self._ready(runtime)
+        runtime.embedder_factory = lambda identity, timeout, deadline=None: Stalled(identity, self.calls)
+        with mock.patch.object(runtime_module.runtime_vectors, "QUERY_SECONDS", 0.3):
+            started = real_time.monotonic()
+            response = runtime.search("north star", mode="hybrid")
+            self.assertLess(real_time.monotonic() - started, 2)
+        self.assertEqual((response["mode"], response["fallback_reason"]), ("lexical_fallback", "embedding_unavailable"))
 
     def test_vector_step_and_queries_carry_absolute_deadlines(self):
         runtime = self._runtime(_config())
