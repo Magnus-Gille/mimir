@@ -137,6 +137,35 @@ class ModeRequestTests(unittest.TestCase):
             self._search(_extended(self.profile, self.now, "lexical"))
         self.assertEqual(raised.exception.code, "invalid_response")
 
+    def test_advertised_semantic_server_default_is_accepted_without_a_mode(self):
+        for default in ("hybrid", "vector"):
+            with self.subTest(default=default):
+                self.payloads.clear()
+                receipt = _with_abstention(_extended(self.profile, self.now, default), policy="score")
+                self.assertIs(self._search(receipt), receipt)
+                self.assertEqual(self.payloads, [{"query": "north star", "top": 5}])
+                fallback = _with(_extended(self.profile, self.now, default, "lexical_fallback"),
+                                 fallback_reason="vectors_incomplete")
+                self.assertIs(self._search(fallback), fallback)
+
+    def test_server_default_cannot_weaken_lexical_or_abstention(self):
+        hybrid = _extended(self.profile, self.now, "hybrid")
+        cases = (
+            # The runtime refuses a semantic default without an abstention policy.
+            ("semantic default without abstention policy", hybrid),
+            ("unknown advertised mode", _with(hybrid, requested_mode="semantic", mode="semantic")),
+            ("advertised mode not a string", _with(hybrid, requested_mode=["hybrid"])),
+            ("lexical is always v1 without a mode", _extended(self.profile, self.now, "lexical")),
+            ("lexical fallback must name a semantic request",
+             _with(_extended(self.profile, self.now, "hybrid", "lexical_fallback"), requested_mode="lexical")),
+            ("served mode differs from advertised", _with_abstention(_with(hybrid, requested_mode="vector"), policy="score")),
+        )
+        for label, receipt in cases:
+            with self.subTest(case=label):
+                with self.assertRaises(client.ClientError) as raised:
+                    self._search(receipt)
+                self.assertEqual(raised.exception.code, "invalid_response")
+
 
 class ExtendedReceiptTests(unittest.TestCase):
     def setUp(self):
@@ -224,6 +253,8 @@ class ExtendedReceiptTests(unittest.TestCase):
             ("window float", _with(receipt, candidate_window=5.0)),
             ("score kind cosine", _with_result(receipt, score_kind="cosine")),
             ("rrf score zero", _with_result(receipt, score=0)),
+            ("rrf score below one contribution", _with_result(receipt, score=1e-300)),
+            ("rrf score just below 1/65", _with_result(receipt, score=1 / 66)),
             ("rrf score above two channels", _with_result(receipt, score=0.5)),
             ("cosine missing", _without_result_key(receipt, "cosine")),
         ), "hybrid")
@@ -264,6 +295,10 @@ class ExtendedReceiptTests(unittest.TestCase):
             ("zscore negative", _with_signal(receipt, zscore=-0.5)),
             ("zscore infinite", _with_signal(receipt, zscore=float("inf"))),
             ("no vectors with units", _with_abstention(withheld, reason="no_vectors")),
+            ("too few units with a zscore", _with_abstention(withheld, reason="too_few_units_for_margin",
+                                                             signal=_signal(8, 0.75, 2.5))),
+            ("margin reason without a zscore", _with_abstention(withheld, reason="below_score_margin",
+                                                                signal=_signal(7, 0.75, None))),
         ), "hybrid")
 
     def test_embedding_identity(self):
@@ -360,6 +395,56 @@ class RuntimeModeContractTests(unittest.TestCase):
         runtime = self.runtime(test_runtime_semantic._config())
         self.fixture.failure = test_runtime_semantic.EmbedderUnavailable("embedding_http_error", 503, None)
         self.assertEqual(self.check(runtime, "north star", "vector")["fallback_reason"], "embedding_unavailable")
+
+    def test_client_accepts_advertised_server_default(self):
+        runtime = self.runtime(test_runtime_semantic._config(
+            MIMIR_SEARCH_DEFAULT_MODE="hybrid", MIMIR_SEARCH_ABSTAIN_MIN_COSINE="0.1"))
+        response = self.check(runtime, "polaris breeze", None)
+        self.assertEqual((response["mode"], response["requested_mode"]), ("hybrid", "hybrid"))
+        self.assertEqual(response["abstention"]["policy"], "score")
+        self.assertTrue(response["results"])
+        self.fixture.failure = test_runtime_semantic.EmbedderUnavailable("embedding_http_error", 503, None)
+        response = self.check(runtime, "north star", None)
+        self.assertEqual((response["mode"], response["requested_mode"]), ("lexical_fallback", "hybrid"))
+
+    def test_every_field_of_real_runtime_receipts_is_required_and_closed(self):
+        runtime = self.runtime(test_runtime_semantic._config())
+        receipts = [(mode, runtime.search("north star" if mode == "lexical" else "polaris breeze", 5, mode=mode))
+                    for mode in client.MODES]
+        receipts.append(("hybrid", self.runtime().search("north star", 5, mode="hybrid")))
+        self.assertEqual([r["mode"] for _, r in receipts], ["lexical", "hybrid", "vector", "lexical_fallback"])
+        now = self.fixture.clock.value
+
+        def rejected(value, mode):
+            with self.assertRaises(client.ClientError):
+                client.validate_receipt(value, self.profile, 5, mode=mode, now=now)
+
+        for mode, receipt in receipts:
+            client.validate_receipt(receipt, self.profile, 5, mode=mode, now=now)
+            self.assertTrue(receipt["results"])
+            paths = [()] + [("results", 0)] + [(key,) for key in ("abstention", "embedding") if key in receipt]
+            if "abstention" in receipt:
+                paths.append(("abstention", "signal"))
+            for path in paths:
+                target = receipt
+                for step in path:
+                    target = target[step]
+                for key in list(target) + ["unexpected"]:
+                    with self.subTest(mode=receipt["mode"], path=path, key=key):
+                        mutated = copy.deepcopy(receipt)
+                        node = mutated
+                        for step in path:
+                            node = node[step]
+                        if key in node:
+                            del node[key]
+                        else:
+                            node[key] = None
+                        rejected(mutated, mode)
+            for other in (None, *client.MODES):
+                # A semantic server default may legitimately answer with a fallback.
+                if other != mode and not (other is None and receipt["mode"] == "lexical_fallback"):
+                    with self.subTest(mode=receipt["mode"], validated_as=other):
+                        rejected(receipt, other)
 
     def test_config_error_codes_are_known_fallback_reasons(self):
         on = {"MIMIR_SEARCH_SEMANTIC": "on", "MIMIR_SEARCH_EMBEDDING_REVISION": test_runtime_semantic.REVISION}

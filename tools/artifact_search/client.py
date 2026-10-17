@@ -95,6 +95,9 @@ def _abstention(value, results):
     _require(type(units) is int and units >= len(results) and (reason == 'no_vectors') == (units == 0))
     _require(top_cosine is None if units == 0 else _cosine(top_cosine))
     _require(zscore is None if units < MIN_ZSCORE_UNITS else _number(zscore) and zscore >= 0)
+    # Each threshold reason needs the signal it was computed from.
+    _require(reason != 'too_few_units_for_margin' or 0 < units < MIN_ZSCORE_UNITS)
+    _require(reason != 'below_score_margin' or zscore is not None)
 
 
 def _embedding(value):
@@ -107,12 +110,18 @@ def _embedding(value):
 def _shape(value, mode, top):
     """Expected (top-level extras, result extras, score kind) for the served mode.
 
-    Without ``mode`` only the exact v1 lexical receipt is valid. An explicit
-    mode opts into the extended receipt, whose fields depend on what was served.
+    An explicit mode opts into the extended receipt, whose fields depend on
+    what was served. Without ``mode`` the receipt is exact v1 lexical, unless
+    it advertises a semantic server default through ``requested_mode``.
     """
     if mode is None:
-        _require(value.get('mode') == 'lexical' and value.get('decision') == 'fts5_bm25')
-        return set(), set(), None
+        if 'requested_mode' not in value:
+            _require(value.get('mode') == 'lexical' and value.get('decision') == 'fts5_bm25')
+            return set(), set(), None
+        # A lexical default is always answered in v1, so only a semantic one
+        # may be advertised.
+        mode = value['requested_mode']
+        _require(isinstance(mode, str) and mode in ('hybrid', 'vector'))
     _require(mode in MODES and value.get('requested_mode') == mode)
     served = value.get('mode')
     if served == 'lexical' and mode == 'lexical' or served == 'lexical_fallback' and mode != 'lexical':
@@ -150,6 +159,8 @@ def validate_receipt(value, profile, top, *, mode=None, now=None):
         _require(isinstance(results, list) and len(results) <= top and type(value['abstained']) is bool and value['abstained'] == (not results))
         if 'abstention' in extras:
             _abstention(value['abstention'], results)
+            # The runtime refuses a semantic default without an abstention policy.
+            _require(mode is not None or value['abstention']['policy'] == 'score')
             _embedding(value['embedding'])
         result_fields = {'path', 'artifact_id', 'sha256', 'locator', 'title', 'snippet', 'score', 'mimir_url', 'source_id', 'snapshot_id', 'verification'} | result_extras
         for result in results:
@@ -179,8 +190,9 @@ def validate_receipt(value, profile, top, *, mode=None, now=None):
             if score_kind == 'cosine':
                 _require(_cosine(result['cosine']) and result['score'] == result['cosine'])
             elif score_kind == 'rrf':
-                # Equal-weight RRF60 over two channels: each adds at most 1/61.
-                _require(_cosine(result['cosine']) and 0 < result['score'] <= 2 / 61)
+                # Equal-weight RRF60 over two windowed channels: a result gets one
+                # or two contributions, each between 1/(60 + window) and 1/61.
+                _require(_cosine(result['cosine']) and 1 / (60 + max(top, 5)) <= result['score'] <= 2 / 61)
         return value
     except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
         raise ClientError('invalid_response') from None

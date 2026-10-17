@@ -57,9 +57,12 @@ and the extended receipt is validated: `requested_mode`, a per-result `score_kin
 and, for semantic modes, `cosine`, `abstention` and `embedding` (plus
 `candidate_window` for `hybrid`). If the semantic request is served lexically the
 receipt has `mode: lexical_fallback` with a `fallback_reason`, and human output
-says so first. Semantic modes do not abstain until thresholds are calibrated, so
-a semantic hit does not show that the archive answers the question. Scores are
-ranking values, not confidence. `--mode` cannot be combined with `--tool` or
+says so first. Semantic modes abstain only when the operator has configured a
+threshold (`abstention.policy` `score`); none is calibrated yet, so with policy
+`none` a semantic hit does not show that the archive answers the question. A
+receipt without a sent mode is extended only when the server advertises a
+semantic default through `requested_mode`; the client then requires policy
+`score`, and lexical stays exact v1. Scores are ranking values, not confidence. `--mode` cannot be combined with `--tool` or
 `--tool-schema`.
 
 Use stdin for private queries: a positional query is visible in local process
