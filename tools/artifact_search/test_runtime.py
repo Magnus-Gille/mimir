@@ -350,6 +350,47 @@ class RuntimeContractTests(unittest.TestCase):
                 self.assertEqual(runtime.job()["status"], "failed")
                 self.assertEqual(runtime.step(), "failed")
 
+    def test_control_actions_on_backed_off_job_keep_state_readable(self) -> None:
+        for action in ("cancel", "retry", "rebuild"):
+            with self.subTest(action=action):
+                runtime, _root, _result, _bundle, _handoff_path = self._runtime("control-" + action)
+                patch, _calls = self._flaky_source("source_http_502")
+                with patch:
+                    self.assertEqual(runtime.step(), "pending")
+                runtime.control(action)
+                job = runtime.job()
+                self.assertNotIn("retry_after", job)
+                self.assertNotIn("transient_failures", job)
+                self.assertIn("status", runtime.health())
+                if action == "cancel":
+                    self.assertEqual(runtime.step(), "cancelled")
+                    runtime.control("retry")
+                self._complete(runtime)
+
+    def test_retry_after_is_bounded_and_finite(self) -> None:
+        clock = _Clock(150)
+        runtime, root, result, bundle, handoff_path = self._runtime(clock=clock)
+        self._handoff(handoff_path, root, result, bundle, observed_at=100, expires_at=3700)
+        patch, _calls = self._flaky_source("source_http_502")
+        with patch:
+            self.assertEqual(runtime.step(), "pending")
+        with runtime.locked():
+            job = runtime.job()
+            job["retry_after"] = clock.value + 10 ** 9
+            runtime.save(job)
+        # A far-future backoff (clock jump or corruption) waits at most the cap.
+        clock.value += runtime_module.MAX_RETRY_SECONDS
+        self._complete(runtime)
+        for bad in ("Infinity", "NaN", "\"soon\""):
+            with self.subTest(bad=bad):
+                path = runtime.state / "job.json"
+                job = json.loads(path.read_text(encoding="utf-8"))
+                job.update(status="pending", transient_failures=1, error="source_http_502")
+                text = json.dumps(job).replace('"error"', '"retry_after": %s, "error"' % bad, 1)
+                path.write_text(text, encoding="utf-8")
+                with self.assertRaises(RuntimeErrorCode):
+                    runtime.job()
+
     def test_legacy_failed_job_with_transient_error_recovers(self) -> None:
         runtime, _root, _result, _bundle, _handoff_path = self._runtime()
         self._complete(runtime)

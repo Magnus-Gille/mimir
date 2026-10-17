@@ -90,7 +90,7 @@ Use the same `--state` and `--handoff` for these local control commands:
 - `status`: bounded health JSON; no content or credentials.
 - `cancel`: stop at the next artifact boundary; retain committed work.
 - `retry`: resume a failed/cancelled job after the underlying cause is fixed;
-  it also clears any transient backoff.
+  it also clears any transient backoff, as `cancel` and `rebuild` do.
 - `rebuild`: preserve the prior database under a `.saved-*` name and rebuild from
   the pinned source. This is also missing/corrupt-index recovery and full restore.
 

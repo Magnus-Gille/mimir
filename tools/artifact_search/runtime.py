@@ -6,6 +6,7 @@ import contextlib
 import fcntl
 import hmac
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -156,6 +157,7 @@ class Runtime:
             raise RuntimeErrorCode('invalid_job_state')
         if 'retry_after' in value or 'transient_failures' in value:
             if (value['status'] != 'pending' or type(value.get('retry_after')) not in (int, float) or
+                    not math.isfinite(value['retry_after']) or
                     type(value.get('transient_failures')) is not int or value['transient_failures'] < 1):
                 raise RuntimeErrorCode('invalid_job_state')
         return value
@@ -203,7 +205,9 @@ class Runtime:
                 job['status'] = 'pending'
             if job['status'] in {'failed', 'cancelled'}:
                 return job['status']
-            if job['status'] == 'pending' and job.get('retry_after', 0) > self.clock():
+            now = self.clock()
+            # A wait beyond the cap means a clock jump or corruption: try now.
+            if job['status'] == 'pending' and now < job.get('retry_after', now) <= now + MAX_RETRY_SECONDS:
                 return 'pending'
             try:
                 self._budget()
@@ -273,6 +277,7 @@ class Runtime:
     def control(self, action):
         with self.locked():
             job = self.job()
+            self._clear_retry(job)
             if action == 'cancel':
                 job['status'] = 'cancelled'
             elif action in {'retry', 'rebuild'}:
@@ -283,7 +288,6 @@ class Runtime:
                         if old.exists():
                             os.rename(old, self.state / (job['index'] + suffix + sidecar))
                 job['status'], job['error'] = 'pending', None
-                self._clear_retry(job)
             else:
                 raise RuntimeErrorCode('invalid_action')
             self.save(job)
