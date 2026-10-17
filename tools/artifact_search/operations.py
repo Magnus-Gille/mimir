@@ -12,11 +12,13 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import tempfile
 import time
 from urllib.parse import urlsplit
 from urllib.request import Request, ProxyHandler, build_opener
 
+from . import embedding_revision
 from .core import has_secret, safe_relative
 from .runtime import atomic_json, load_handoff, private_json, source_for
 from .snapshot import (SCHEMA, POLICY, MAX_TOTAL_BYTES, LocalSnapshotSource, _fingerprint,
@@ -194,6 +196,9 @@ def refresh(c):
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] and argv[0] in embedding_revision.ACTIONS:
+        return embedding_revision.main(argv)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['publish', 'refresh'])
     parser.add_argument('--config', type=Path, required=True)

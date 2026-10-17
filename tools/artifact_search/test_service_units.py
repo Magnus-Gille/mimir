@@ -34,7 +34,8 @@ class ServiceUnitsTests(unittest.TestCase):
         units = render("reader", HOME, RELEASE)
         self.assertEqual(set(units), {
             "mimir-search.service", "mimir-search-refresh.service",
-            "mimir-search-refresh.timer",
+            "mimir-search-refresh.timer", "mimir-search-semantic-check.service",
+            "mimir-search-semantic-check.timer",
         })
         runtime = units["mimir-search.service"]
         refresh = units["mimir-search-refresh.service"]
@@ -57,6 +58,21 @@ class ServiceUnitsTests(unittest.TestCase):
         self.assertIn("WantedBy=timers.target\n", timer)
         for filename in ("mimir-search.service", "mimir-search-refresh.service"):
             self.assert_common_hardening(units[filename], RELEASE)
+
+    def test_reader_semantic_check_runs_every_five_minutes_with_optional_heimdall_env(self) -> None:
+        units = render("reader", HOME, RELEASE)
+        check = units["mimir-search-semantic-check.service"]
+        self.assertIn(f"ExecStart=/usr/bin/python3 {HOME}/.local/share/mimir-search/releases/{RELEASE}/search.pyz ops semantic-check --port 8791\n", check)
+        self.assertIn(f"EnvironmentFile={HOME}/.config/mimir-search/runtime.env\n", check)
+        self.assertIn(f"EnvironmentFile=-{HOME}/.config/mimir-search/heimdall.env\n", check)
+        self.assertIn("Type=oneshot\n", check)
+        self.assertIn("TimeoutStartSec=60\n", check)
+        self.assertNotIn("[Install]", check)
+        self.assert_common_hardening(check, RELEASE)
+        timer = units["mimir-search-semantic-check.timer"]
+        self.assertIn("Unit=mimir-search-semantic-check.service\n", timer)
+        self.assertIn("OnUnitActiveSec=5min\n", timer)
+        self.assertIn("OnBootSec=30\n", timer)
 
     def test_render_rejects_role_path_and_release_injection(self) -> None:
         for role in ("admin", "reader;touch /tmp/pwned", "publisher\nExecStart=/bin/sh"):

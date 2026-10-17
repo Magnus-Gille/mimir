@@ -13,7 +13,7 @@ repository's lookup-only documentation map.
 - `docs/artifact-source-snapshots.md` — #41 immutable source manifest/object contract, local/HTTP acquisition, identity/delta behavior and acceptance boundary.
 - `docs/artifact-search-runtime.md` — standalone search service, trusted freshness handoff, authenticated provenance, recovery and immutable package acceptance.
 - `docs/artifact-search-client.md` — SSH client, CLI and agent command adapter, provenance checks, failure states and activation boundary.
-- `docs/artifact-search-operations.md` — first-install source publication, trusted refresh, edge authentication, user units and sync protection.
+- `docs/artifact-search-operations.md` — first-install source publication, trusted refresh, edge authentication, user units, sync protection, and the gateway revision drift alert and re-pin.
 - `docs/artifact-search-semantic.md` — opt-in vector/hybrid runtime modes: vector cache placement, gateway route, explicit lexical fallback, abstention, configuration and the fresh blind evaluation plan.
 - `docs/artifact-search-evaluation.md` — held-out label provenance, approval, calibration separation and reproducible metrics.
 - `docs/workload-requirement-v1.json` — machine-readable relocation requirement record.

@@ -29,7 +29,7 @@ def _unit(*sections: tuple[str, tuple[str, ...]]) -> str:
 
 
 def _service(description: str, command: str, *, release: str,
-             timeout: int | None = None, environment_file: str | None = None,
+             timeout: int | None = None, environment_file: str | tuple[str, ...] | None = None,
              restart: bool = False, runtime_dependency: bool = False) -> str:
     unit = [f"Description={description}"]
     service: list[str] = []
@@ -39,8 +39,8 @@ def _service(description: str, command: str, *, release: str,
                     "UMask=0077", "NoNewPrivileges=true", "PrivateTmp=true",
                     "MemoryMax=1G", "TasksMax=16", "Nice=10",
                     f"Environment=MIMIR_SEARCH_RELEASE={release}"))
-    if environment_file is not None:
-        service.append(f"EnvironmentFile={environment_file}")
+    files = (environment_file,) if isinstance(environment_file, str) else environment_file or ()
+    service.extend(f"EnvironmentFile={path}" for path in files)
     service.append(f"ExecStart={command}")
     if timeout is not None:
         service.append(f"TimeoutStartSec={timeout}")
@@ -86,6 +86,7 @@ def render(role: str, home: str, release: str) -> dict[str, str]:
 
     refresh_service = "mimir-search-refresh.service"
     runtime_service = "mimir-search.service"
+    check_service = "mimir-search-semantic-check.service"
     return {
         runtime_service: _service(
             "Mímir owner-only artifact search",
@@ -102,6 +103,16 @@ def render(role: str, home: str, release: str) -> dict[str, str]:
         ),
         "mimir-search-refresh.timer": _timer(
             "Refresh the Mímir artifact search snapshot", refresh_service, "60s"),
+        # Gateway revision drift must be visible within minutes. The optional
+        # leading "-" file holds only the Heimdall hub URL and fleet token.
+        check_service: _service(
+            "Check Mímir semantic search state and gateway revision drift",
+            f"/usr/bin/python3 {package} ops semantic-check --port 8791",
+            release=release_env, timeout=60,
+            environment_file=(f"{config_dir}/runtime.env", f"-{config_dir}/heimdall.env"),
+        ),
+        "mimir-search-semantic-check.timer": _timer(
+            "Check Mímir semantic search state and gateway revision drift", check_service, "5min"),
     }
 
 

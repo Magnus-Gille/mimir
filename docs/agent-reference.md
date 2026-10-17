@@ -153,4 +153,4 @@ Related checked-in unit files:
 | `MIMIR_OFFSITE_MAX_DELETE_PCT` | `25` | Abort a run that would delete more than this percent of `current/`; the count and percentage guards are OR-ed, so whichever trips first aborts |
 | `MIMIR_OFFSITE_STATE_DIR` | `$XDG_STATE_HOME/mimir` or `~/.local/state/mimir` | Deployment-stable heartbeat and log directory |
 | `MIMIR_QUARANTINE_DIR` | `<target-dir>-quarantine` | Where ingest secret-scan hits are moved |
-| `HEIMDALL_HUB_URL` / `HEIMDALL_FLEET_TOKEN` | — | Heimdall panel push for periodic self-report and secret-scan `fail` alerts |
+| `HEIMDALL_HUB_URL` / `HEIMDALL_FLEET_TOKEN` | — | Heimdall panel push for periodic self-report, secret-scan `fail` alerts and the search reader's `search-semantic` drift check (`~/.config/mimir-search/heimdall.env`) |

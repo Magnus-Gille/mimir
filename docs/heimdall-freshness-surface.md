@@ -44,6 +44,11 @@ The probe must classify each fixed record independently:
 Staleness is intentionally a reader policy: backup and sync schedules can differ
 without changing the publication format.
 
+The artifact-search reader runs on another host. It does not add records here.
+Its semantic and gateway-revision state goes to Heimdall as a pushed
+`mimir/search-semantic` status panel instead
+([operations](artifact-search-operations.md#gateway-revision-drift)).
+
 ## Installation and rollback
 
 On the NAS, after the actual publisher user and the dedicated probe identity exist,

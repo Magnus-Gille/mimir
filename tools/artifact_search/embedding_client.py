@@ -127,10 +127,17 @@ class M5Embedder:
         self._remaining()  # never accept a response that completed too late
         return b''.join(chunks)
 
-    def _verify_release(self):
+    def gateway_revision(self):
+        """The gateway's live 40-hex release, read through this key's ``/portal/me``."""
         body = self._request(self.base_url[:-3] + '/portal/me')
         gateway = body.get('gateway') if isinstance(body, dict) else None
-        if not isinstance(gateway, dict) or gateway.get('revision') != self.identity.revision.split(':')[0]:
+        revision = gateway.get('revision') if isinstance(gateway, dict) else None
+        if not isinstance(revision, str) or not re.fullmatch(r'[0-9a-f]{40}', revision):
+            raise EmbedderUnavailable('embedding_gateway_revision_mismatch')
+        return revision
+
+    def _verify_release(self):
+        if self.gateway_revision() != self.identity.revision.split(':')[0]:
             raise EmbedderUnavailable('embedding_gateway_revision_mismatch')
 
     def embed(self, inputs):
