@@ -458,6 +458,126 @@ esac
     expect(readFileSync(calls, "utf8")).not.toMatch(/^sync /m);
     expect(existsSync(join(state, "offsite.stamp"))).toBe(false);
   });
+
+  // Fake rclone whose `sync` appends the given lines to its --log-file and exits 6.
+  function failingSyncSetup(syncLogLines: string): {
+    root: string;
+    state: string;
+    log: string;
+    run: (extraEnv?: Record<string, string>) => ReturnType<typeof spawnSync<string>>;
+  } {
+    const root = tempDir();
+    const source = join(root, "source");
+    const state = join(root, "state");
+    const fakeRclone = join(root, "rclone");
+    const log = join(state, "offsite-backup.log");
+    mkdirSync(source);
+    mkdirSync(state);
+    writeFileSync(join(source, "artifact.txt"), "artifact\n");
+    writeFileSync(join(root, "sync-lines"), syncLogLines);
+    executable(
+      fakeRclone,
+      `case "\${1:-}" in
+  config) printf 'type = crypt\\nfilename_encryption = standard\\n' ;;
+  sync)
+    lf=""
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "--log-file" ]; then lf="$2"; break; fi
+      shift
+    done
+    cat "$SYNC_LINES" >> "$lf"
+    exit 6
+    ;;
+  *) exit 0 ;;
+esac
+`,
+    );
+    // Record only the -d payload; the Authorization header legitimately carries the token.
+    executable(
+      join(root, "curl"),
+      `while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-d" ]; then printf '%s\\n' "$2" >> "$CURL_ARGS"; fi
+  shift
+done
+`,
+    );
+    const run = (extraEnv: Record<string, string> = {}) =>
+      spawnSync("bash", [join(REPO_ROOT, "scripts/offsite-backup.sh")], {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HOME: root,
+          PATH: `${root}:${process.env.PATH ?? ""}`,
+          MIMIR_OFFSITE_ROOT: source,
+          MIMIR_OFFSITE_STATE_DIR: state,
+          RCLONE_BIN: fakeRclone,
+          SYNC_LINES: join(root, "sync-lines"),
+          CURL_ARGS: join(root, "curl.args"),
+          HEIMDALL_HUB_URL: "http://hub.invalid/panel",
+          HEIMDALL_FLEET_TOKEN: "test-token",
+          ...extraEnv,
+        },
+      });
+    return { root, state, log, run };
+  }
+
+  it("reports provider path-length rejections as an incomplete backup with a distinct count", () => {
+    const tooLong =
+      "invalidRequest: pathIsTooLong: The specified file or folder name is too long. " +
+      "The URL path for all files and folders must be 400 characters or less " +
+      "(and no more than 255 characters per segment)";
+    const { root, state, log, run } = failingSyncSetup(
+      [
+        `2026/10/17 03:39:40 ERROR : deep/one.txt: Failed to copy: ${tooLong}`,
+        `2026/10/17 03:39:41 ERROR : deep/two.txt: Failed to copy: ${tooLong}`,
+        `2026/10/17 03:39:42 ERROR : deep/one.txt: Failed to copy: ${tooLong}`,
+        "2026/10/17 03:39:43 ERROR : Local file system at /x: not deleting files as there were IO errors",
+        "",
+      ].join("\n"),
+    );
+    // An earlier run's rejection must not be counted.
+    writeFileSync(
+      log,
+      `2026/10/16 03:39:40 ERROR : old/stale.txt: Failed to copy: ${tooLong}\n`,
+    );
+
+    const result = run();
+
+    expect(result.status).toBe(6);
+    expect(result.stderr).toContain("offsite backup incomplete: 2 file(s) exceed");
+    expect(result.stderr).toContain("deletions withheld this run (rclone exit 6)");
+    expect(result.stderr).not.toContain("offsite backup failed");
+    expect(readFileSync(log, "utf8")).toContain("offsite backup incomplete: 2 file(s) exceed");
+    expect(existsSync(join(state, "offsite.stamp"))).toBe(false);
+    const panel = readFileSync(join(root, "curl.args"), "utf8");
+    expect(panel).toContain('"state":"fail"');
+    expect(panel).toContain("2 files exceed provider path-length limit");
+    expect(panel).toContain("deletions withheld");
+    expect(panel).not.toContain("test-token");
+  });
+
+  it("keeps the generic failure message when rclone fails for another reason", () => {
+    const { root, state, log, run } = failingSyncSetup(
+      "2026/10/17 03:39:40 ERROR : some/file.txt: Failed to copy: connection reset by peer\n",
+    );
+    writeFileSync(
+      log,
+      "2026/10/16 03:39:40 ERROR : old/stale.txt: Failed to copy: invalidRequest: pathIsTooLong: x\n",
+    );
+
+    const result = run();
+
+    expect(result.status).toBe(6);
+    expect(result.stderr).toContain("offsite backup failed (exit 6)");
+    expect(result.stderr).not.toContain("incomplete");
+    expect(readFileSync(log, "utf8")).not.toContain("incomplete");
+    expect(existsSync(join(state, "offsite.stamp"))).toBe(false);
+    const panel = readFileSync(join(root, "curl.args"), "utf8");
+    expect(panel).toContain('"state":"fail"');
+    expect(panel).toContain("backup failed (exit 6)");
+    expect(panel).not.toContain("path-length");
+  });
 });
 
 describe("NAS deploy script", () => {

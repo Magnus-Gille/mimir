@@ -40,6 +40,11 @@ The mirror path is fail-loud: any error exits non-zero **and** pushes a `fail` p
 Archive pruning is best-effort — a prune failure logs a warning but still reports `pass`,
 so transient retention drift can't mask an otherwise-healthy backup.
 
+If the storage provider rejects files because their encrypted path is too long, the run
+still exits non-zero with the original rclone exit code, but the log and the `fail` panel
+report it as **"backup incomplete"** with a count of the affected files (see
+[Path-length budget](#path-length-budget)) instead of the generic "backup failed".
+
 ---
 
 ## One-time setup
@@ -198,6 +203,37 @@ Dry-run any time without touching the remote: `./scripts/offsite-backup.sh --dry
    `mimir-crypt` remote using the **password + salt from your password manager**
    (step 4). The remote path must match: `storage:encrypted/mimir`.
 3. `rclone copy mimir-crypt:current ~/mimir-restored` → plaintext archive back.
+
+## Path-length budget
+
+With the default crypt `filename_encoding = base32`, each path segment is padded to a
+16-byte block and then base32-encoded, so a 64-character plaintext segment becomes 128
+characters on the provider. Deep or hash-named trees can therefore exceed provider
+URL-path limits (OneDrive: 400 characters for the whole path, including the crypt base
+path, and 255 per segment) even when the plaintext paths look short.
+
+**Symptoms**
+
+- `rclone sync` exits 6 every night; the log has `ERROR : <path>: Failed to copy:
+  ... pathIsTooLong ...` lines.
+- The log also says `not deleting files as there were IO errors`: rclone withholds all
+  deletions for that run, so `current/` keeps files that no longer exist in the source.
+- The log shows `offsite backup incomplete: N file(s) exceed the storage provider's
+  encrypted path-length limit`, and the Heimdall panel reads `backup incomplete (exit 6):
+  N files exceed provider path-length limit; deletions withheld`. N counts distinct
+  affected paths from this run only.
+
+The affected files are not backed up offsite until the budget problem is fixed. Remedies
+need an owner decision:
+
+1. **Durable fix:** create a new crypt remote with `filename_encoding = base32768`
+   (rclone recommends it for providers that count characters rather than bytes, such as
+   OneDrive and Dropbox), upload the archive into it once, then retire the old remote.
+   Retiring the old remote deletes data and is a separate destructive-action decision;
+   the new remote also needs its own key-custody entry (step 4).
+2. **Shorten or relocate** the deep subtrees in the archive so the encrypted paths fit.
+3. **Exclude** them (`RCLONE_FILTERS` in the script). This clears the error but loses
+   offsite coverage for those files.
 
 ## Reuse (munin-memory#172, brokkr#1)
 
