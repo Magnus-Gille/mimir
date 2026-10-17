@@ -47,25 +47,67 @@ def _validate_min_score(min_score: object) -> float:
     return value
 
 
+def _runtime(state: Path, handoff: Path) -> Any:
+    """Construct the served runtime with its own private service configuration."""
+    from .runtime import Runtime
+
+    return Runtime(state, handoff)
+
+
 def run_cli(
     labels: Path,
     snapshot_manifest: Path,
     calibration: Path,
     expected_label_sha256: str,
-    db: Path,
+    db: Path | None,
     *,
     top: int = 5,
     mode: str = "lexical",
     embedding_revision: str | None = None,
     dimensions: int = 256,
     min_score: float = 0.0,
+    runtime_state: Path | None = None,
+    runtime_handoff: Path | None = None,
 ) -> dict[str, Any]:
-    """Run held-out evaluation with all model construction deferred to search."""
+    """Run held-out evaluation with all model construction deferred to search.
+
+    With ``runtime_state``/``runtime_handoff`` the cases run through the served
+    snapshot runtime in-process instead of the offline prototype index.  Model
+    identity, dimensions and abstention thresholds then come only from the
+    service's own environment, so the evaluated path is the deployable one.
+    """
 
     if mode not in {"lexical", "vector", "hybrid"}:
         raise ValueError("invalid_mode")
     top = _validate_top(top)
     min_score = _validate_min_score(min_score)
+    if runtime_state is not None or runtime_handoff is not None:
+        if (db is not None or runtime_state is None or runtime_handoff is None or top > 5 or
+                embedding_revision is not None or dimensions != 256 or min_score != 0.0):
+            raise ValueError("runtime_uses_service_config")
+        served: Any = None
+
+        def runtime_search(_db: Path, query: str, search_top: int) -> dict[str, Any]:
+            nonlocal served
+            if served is None:
+                served = _runtime(runtime_state, runtime_handoff)
+            return served.search(query, search_top, mode=mode)
+
+        report = dict(run_heldout(
+            labels,
+            snapshot_manifest,
+            runtime_state,
+            calibration_path=calibration,
+            expected_label_sha256=expected_label_sha256,
+            search_fn=runtime_search,
+            top=top,
+        ))
+        report["requested_mode"] = mode
+        report["evaluated_path"] = "runtime"
+        report["effective_modes"] = {item["case_id"]: item["mode"] for item in report["results"]}
+        return report
+    if db is None:
+        raise ValueError("index_required")
     if mode != "lexical":
         if not isinstance(embedding_revision, str) or not embedding_revision:
             raise ValueError("embedding_revision_required")
@@ -109,6 +151,7 @@ def run_cli(
     # requested mode explicit so hybrid lexical fallback is never mislabelled.
     report = dict(report)
     report["requested_mode"] = mode
+    report["evaluated_path"] = "offline_prototype"
     report["effective_modes"] = {
         item["case_id"]: item["mode"] for item in report["results"]
     }
@@ -121,7 +164,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--snapshot-manifest", type=Path, required=True)
     parser.add_argument("--calibration", type=Path, required=True)
     parser.add_argument("--expected-label-sha256", required=True)
-    parser.add_argument("--db", type=Path, required=True)
+    index = parser.add_mutually_exclusive_group(required=True)
+    index.add_argument("--db", type=Path)
+    index.add_argument("--runtime-state", type=Path)
+    parser.add_argument("--runtime-handoff", type=Path)
     parser.add_argument("--top", type=int, default=5)
     parser.add_argument("--mode", choices=("lexical", "vector", "hybrid"), default="lexical")
     parser.add_argument("--embedding-revision")
@@ -145,6 +191,8 @@ def _diagnostic(error: BaseException) -> dict[str, Any]:
         code = str(error)
         safe_codes = {
             "embedding_revision_required",
+            "index_required",
+            "runtime_uses_service_config",
             "invalid_dimensions",
             "invalid_min_score",
             "invalid_mode",
@@ -174,6 +222,8 @@ def main(argv: list[str] | None = None) -> int:
             embedding_revision=args.embedding_revision,
             dimensions=args.dimensions,
             min_score=args.min_score,
+            runtime_state=args.runtime_state,
+            runtime_handoff=args.runtime_handoff,
         )
     except Exception as error:  # Keep the JSON CLI free of tracebacks and source text.
         print(json.dumps(_diagnostic(error), ensure_ascii=False), file=sys.stderr)

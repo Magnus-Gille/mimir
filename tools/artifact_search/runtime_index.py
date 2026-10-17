@@ -465,6 +465,25 @@ class SnapshotIndex:
 
         return self._run(operation)
 
+    def units(self) -> list[dict]:
+        """All indexed units in stable ID order, for derived semantic state."""
+        columns = ("id", "artifact_id", "path", "sha256", "kind", "number", "anchor", "title", "text")
+        return self._run(lambda: [dict(zip(columns, row)) for row in self.connection.execute(
+            "SELECT id, artifact_id, path, sha256, kind, number, anchor, title, text FROM units ORDER BY id")])
+
+    def lexical_ids(self, query: str, limit: int) -> list[int]:
+        """Unit IDs in the same BM25 order as :meth:`search`, for rank fusion."""
+        if not isinstance(query, str) or len(query) > MAX_QUERY_CHARS or not query.strip():
+            raise _bounded_error("invalid_query")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_TOP:
+            raise _bounded_error("invalid_top")
+        match = _match_query(query)
+        if not match:
+            return []
+        return self._run(lambda: [int(row[0]) for row in self.connection.execute(
+            "SELECT u.id FROM search_fts JOIN units u ON u.id=search_fts.rowid WHERE search_fts MATCH ? "
+            "ORDER BY bm25(search_fts) ASC, u.path ASC, u.number ASC, u.id ASC LIMIT ?", (match, limit))])
+
     def close(self) -> None:
         try:
             self.connection.close()

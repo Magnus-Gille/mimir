@@ -1,11 +1,13 @@
 """Release and rollback acceptance must be tied to approved bytes, never HEAD."""
+import ast
 import hashlib
 import json
+from pathlib import Path
 import unittest
 import time
 from unittest.mock import patch
 
-from tools.artifact_search.package_runtime import build, verify
+from tools.artifact_search.package_runtime import MODULES, build, verify
 
 
 class PackageTests(unittest.TestCase):
@@ -16,6 +18,23 @@ class PackageTests(unittest.TestCase):
             return b'# synthetic source\n'
         with patch('subprocess.check_output', side_effect=git):
             return build('.', revision)
+
+    def test_package_contains_every_module_the_entry_points_import(self):
+        # A missing sibling module only fails when the zipapp first imports it.
+        here = Path(__file__).parent
+        pending, seen = ['runtime.py', 'operations.py'], set()
+        while pending:
+            name = pending.pop()
+            if name in seen:
+                continue
+            seen.add(name)
+            for node in ast.walk(ast.parse((here / name).read_text())):
+                if isinstance(node, ast.ImportFrom) and node.level == 1:
+                    if node.module:
+                        pending.append(node.module + '.py')
+                    else:
+                        pending.extend(alias.name + '.py' for alias in node.names)
+        self.assertEqual(seen - set(MODULES), set())
 
     def test_only_explicit_exact_release_accepted(self):
         for value in ('HEAD', 'main', 'abc1234', 'A' * 40, ''):

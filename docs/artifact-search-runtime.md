@@ -2,8 +2,10 @@
 
 The separately packaged Python service consumes the #41 source contract. It does
 not add an Express route, provision credentials, install a service or deploy to M5.
-The initial service is lexical-only. The existing offline PoC retains vector and
-hybrid comparison; those modes are not exposed as production-quality retrieval.
+Lexical retrieval is the default. Opt-in `vector` and `hybrid` modes, which
+are off unless the operator enables them, are specified in
+[artifact-search-semantic.md](artifact-search-semantic.md). They are not accepted
+as production-quality retrieval.
 Python 3.10+ with SQLite FTS5 is required; PDF extraction also requires Poppler.
 
 ## Trusted freshness handoff
@@ -111,15 +113,19 @@ shell command or result URL. Only the exact loopback Host is accepted.
   means not ready; authentication failures reveal no index metadata. Readiness
   covers the index and trusted handoff only. It cannot certify every original;
   originals are checked on retrieval and deployment acceptance also needs a probe.
-- `POST /search`: JSON `{"query":"...","top":5}`. Up to five results and 4,096
-  query characters; the whole body is bounded to 8,192 bytes. No retrieval jobs,
-  source URLs or mutable configuration are accepted through this API.
+- `POST /search`: JSON `{"query":"...","top":5}`, with an optional
+  `"mode": "lexical"|"hybrid"|"vector"`. Up to five results and 4,096 query
+  characters; the whole body is bounded to 8,192 bytes. No retrieval jobs,
+  source URLs or mutable configuration are accepted through this API. A semantic
+  mode that cannot be served returns lexical results labelled `lexical_fallback`
+  with a `fallback_reason`.
 
 Each result contains artifact ID/path/hash, source ID, snapshot ID, original
 credential-free Mímir URL, physical page/slide/section locator, bounded title and
-snippet, BM25 score and `verification: original_sha256_matched`. Response metadata
-names the lexical/BM25 decision, observation deadline and whether it returned no
-results. Scores are not confidence probabilities; empty results do not certify
+snippet, score with its `score_kind` (`bm25` for lexical) and
+`verification: original_sha256_matched`. Response metadata names the effective
+and requested mode, the ranking decision, the observation deadline and whether it
+returned no results. Semantic responses add an explicit `abstention` decision. Scores are not confidence probabilities; empty results do not certify
 that an answer is absent. Result references confer no file access: agents must
 fetch through their own authorized Mímir path and verify the byte hash again.
 

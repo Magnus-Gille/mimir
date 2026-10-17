@@ -2,8 +2,11 @@
 
 The runtime, selected-corpus publisher and handoff refresher are packaged from
 one explicitly approved 40-character commit. Installation and credential access
-remain separate owner-approved actions. The service performs lexical retrieval;
-the offline answerability callback is not part of its serving path.
+remain separate owner-approved actions. The service performs lexical retrieval
+by default. Semantic modes stay off until the variables in
+[artifact-search-semantic.md](artifact-search-semantic.md) are set in the reader's
+`runtime.env`, which needs its own approval because it adds the existing M5 route
+to that file. The offline answerability callback is not part of the serving path.
 
 ## Private source configuration
 

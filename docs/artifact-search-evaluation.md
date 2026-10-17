@@ -119,9 +119,13 @@ with `--labels`, `--snapshot-manifest`, `--calibration`,
 `--expected-label-sha256`, and `--db`. It accepts `--top` and
 `--mode lexical|vector|hybrid`; vector and hybrid additionally require the existing
 `--embedding-revision` and may set `--dimensions` and `--min-score`. The
-output preserves the aggregate report, adds `requested_mode`, and exposes an
-`effective_modes` mapping by case ID so hybrid lexical fallback remains
-visible. The callback and M5 client are created lazily only after the held-out
+output preserves the aggregate report, adds `requested_mode` and
+`evaluated_path`, and exposes an `effective_modes` mapping by case ID so hybrid
+lexical fallback remains visible. To run the deployable code path instead of the
+offline prototype index, replace `--db` with `--runtime-state <private copy>`
+and `--runtime-handoff <path>`. Model identity, dimensions and abstention
+thresholds then come only from the runtime's own environment, and the report
+says `evaluated_path: runtime`. The callback and M5 client are created lazily only after the held-out
 preflight has accepted the approved, frozen, digest-pinned split.
 
 Positive Hit@k and MRR include both `positive` and `distractor` cases because

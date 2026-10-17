@@ -20,6 +20,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import quote, urlsplit
 
 from .core import _reference, read_source
+from . import runtime_vectors
 from .snapshot import (HEX, MAX_BYTES, LocalSnapshotSource, SnapshotError, _private_store,
                        _read, _sync_dir, _uuid, canonical, digest)
 from .snapshot_http import HttpSnapshotSource
@@ -120,10 +121,15 @@ def source_for(handoff):
 
 
 class Runtime:
-    def __init__(self, state, handoff, clock=time.time):
+    def __init__(self, state, handoff, clock=time.time, semantic=None, embedder_factory=None):
         self.state = _private_store(Path(state))
         self.handoff = Path(handoff)
         self.clock = clock
+        # Lexical stays the default; semantic retrieval is opt-in operator config.
+        self.semantic = semantic if semantic is not None else runtime_vectors.SemanticConfig.from_env()
+        self.embedder_factory = embedder_factory or _m5_embedder
+        self._breaker_until = 0.0
+        self._loaded = None
 
     @contextlib.contextmanager
     def locked(self):
@@ -154,6 +160,16 @@ class Runtime:
                     old['source_id'] != value['source_id']):
                 raise RuntimeErrorCode('invalid_job_state')
         elif any(key in value for key in ('index', 'source_id', 'handoff')) or value['status'] == 'ready':
+            raise RuntimeErrorCode('invalid_job_state')
+        vectors = value.get('vectors')
+        # Shape only: a stray field must never make job state unreadable.
+        if vectors is not None and (
+                not isinstance(vectors, dict) or
+                vectors.get('status') not in {'pending', 'complete', 'unavailable', 'failed'} or
+                vectors['status'] == 'unavailable' and (
+                    type(vectors.get('retry_after')) not in (int, float) or
+                    not math.isfinite(vectors['retry_after']) or
+                    type(vectors.get('failures')) is not int or vectors['failures'] < 1)):
             raise RuntimeErrorCode('invalid_job_state')
         if 'retry_after' in value or 'transient_failures' in value:
             if (value['status'] != 'pending' or type(value.get('retry_after')) not in (int, float) or
@@ -229,9 +245,12 @@ class Runtime:
                     self._clear_retry(job)
                     job['error'] = None
                     self.save(job)
+                    # Vectors are built only after lexical readiness and never affect it.
+                    self._vector_step(job)
                     return 'ready'
                 job['handoff'] = handoff
                 job['status'] = 'pending'
+                job.pop('vectors', None)
                 self.save(job)
                 source = source_for(handoff)
                 index = self.index(job, create=not (self.state / job['index']).exists())
@@ -260,6 +279,7 @@ class Runtime:
             except (OSError, ValueError, sqlite3.DatabaseError) as error:
                 # No exception text, URLs, paths, response bodies or source bytes in diagnostics.
                 code = error.args[0] if isinstance(error, (RuntimeErrorCode, SnapshotError)) and error.args else None
+                job.pop('vectors', None)  # Vector state belongs to a ready job only.
                 if isinstance(code, str) and TRANSIENT_ERRORS.fullmatch(code):
                     failures = job.get('transient_failures', 0) + 1
                     job['status'], job['error'] = 'pending', code
@@ -278,6 +298,7 @@ class Runtime:
         with self.locked():
             job = self.job()
             self._clear_retry(job)
+            job.pop('vectors', None)
             if action == 'cancel':
                 job['status'] = 'cancelled'
             elif action in {'retry', 'rebuild'}:
@@ -317,7 +338,76 @@ class Runtime:
         output['readiness_scope'] = 'index_and_handoff; originals verified per retrieval'
         output['release'] = os.environ.get('MIMIR_SEARCH_RELEASE', 'development')
         output['package_sha256'] = os.environ.get('MIMIR_SEARCH_PACKAGE_SHA256')
+        # Semantic state is reported but never part of readiness: lexical serves regardless.
+        output['semantic'] = dict(self.semantic.public(), vectors=job.get('vectors'))
         return output
+
+    def _vector_step(self, job):
+        """Advance the per-snapshot vector cache by one bounded slice; never raises."""
+        config = self.semantic
+        if not config.enabled:
+            if job.pop('vectors', None) is not None:
+                self.save(job)
+            return
+        previous = job.get('vectors') or {}
+        if previous.get('identity') != config.tag:
+            previous = {}
+        now = self.clock()
+        if previous.get('status') == 'failed':
+            return
+        # Backoff beyond the cap means a clock jump or corruption: try now.
+        if previous.get('status') == 'unavailable' and now < previous['retry_after'] <= now + runtime_vectors.MAX_RETRY_SECONDS:
+            return
+        index = store = None
+        try:
+            index = self.index(job)
+            store = runtime_vectors.VectorStore(self.state, config.identity, create=True)
+            units = index.units()
+            if previous.get('status') == 'complete' and store.covered(job['snapshot_id']) == len(runtime_vectors.eligible(units)):
+                return
+            try:
+                embedder = self.embedder_factory(config.identity, runtime_vectors.BUILD_TIMEOUT)
+            except (ValueError, TypeError):
+                raise runtime_vectors.VectorError('embedding_route_unavailable') from None
+            result = runtime_vectors.build_step(units, store, embedder, job['snapshot_id'],
+                                         deadline=time.monotonic() + runtime_vectors.STEP_SECONDS, now=self.clock)
+            vectors = {'status': result['status'], 'identity': config.tag,
+                       'units': result['units'], 'covered': result['covered']}
+        except runtime_vectors.EmbedderUnavailable as error:
+            if runtime_vectors.transient(error):
+                failures = previous.get('failures', 0) + 1
+                vectors = {'status': 'unavailable', 'identity': config.tag, 'failures': failures,
+                           'error': runtime_vectors.error_code(error, 'embedding_unavailable'),
+                           'retry_after': now + runtime_vectors.retry_delay(failures)}
+            else:
+                vectors = {'status': 'failed', 'identity': config.tag,
+                           'error': runtime_vectors.error_code(error, 'embedding_unavailable')}
+        except (OSError, ValueError, TypeError, KeyError, sqlite3.DatabaseError) as error:
+            # Bounded codes only: no exception text, unit text, URLs or credentials.
+            vectors = {'status': 'failed', 'identity': config.tag,
+                       'error': runtime_vectors.error_code(error, 'vector_step_failed')}
+        finally:
+            for handle in (store, index):
+                if handle is not None:
+                    try:
+                        handle.close()
+                    except (ValueError, sqlite3.DatabaseError):
+                        pass
+        job['vectors'] = vectors
+        self.save(job)
+
+    def step_delay(self, job):
+        """Seconds until the serve loop should run the next index/vector step."""
+        delay = 60 if job['status'] == 'ready' else 1.1
+        if 'retry_after' in job:
+            delay = max(delay, min(MAX_RETRY_SECONDS, job['retry_after'] - time.time()))
+        vectors = job.get('vectors')
+        if job['status'] == 'ready' and self.semantic.enabled:
+            if vectors is None or vectors['status'] == 'pending':
+                delay = 1.1
+            elif vectors['status'] == 'unavailable':
+                delay = max(1.1, min(runtime_vectors.MAX_RETRY_SECONDS, vectors['retry_after'] - self.clock()))
+        return delay
 
     def _verify_originals(self, handoff, results):
         checked = set()
@@ -340,8 +430,11 @@ class Runtime:
                 raise RuntimeErrorCode('original_changed')
             checked.add(item['path'])
 
-    def search(self, query, top=5):
+    def search(self, query, top=5, mode=None):
         if not isinstance(query, str) or not query.strip() or len(query) > 4096 or type(top) is not int or not 1 <= top <= 5:
+            raise RuntimeErrorCode('invalid_query')
+        requested = self.semantic.default_mode if mode is None else mode
+        if requested not in runtime_vectors.MODES:
             raise RuntimeErrorCode('invalid_query')
         job = self.job()
         handoff = self.lease(job)
@@ -351,7 +444,12 @@ class Runtime:
         try:
             if not index.stats()['complete']:
                 raise RuntimeErrorCode('index_incomplete')
-            results = index.search(query, top)
+            if requested == 'lexical':
+                results, decision = index.search(query, top), {'mode': 'lexical', 'decision': 'fts5_bm25'}
+                for item in results:
+                    item['score_kind'] = 'bm25'
+            else:
+                results, decision = self._semantic_search(index, job, query, top, requested)
         finally:
             index.close()
         self._verify_originals(handoff, results)
@@ -364,13 +462,96 @@ class Runtime:
             item['mimir_url'] = _reference(handoff['mimir_origin'], path, locator['kind'], locator['number'], locator.get('anchor'))
             item['source_id'], item['snapshot_id'] = job['source_id'], job['snapshot_id']
             item['verification'] = 'original_sha256_matched'
-        return {'mode': 'lexical', 'decision': 'fts5_bm25', 'results': results,
+        return {**decision, 'requested_mode': requested, 'results': results,
                 'snapshot_id': job['snapshot_id'], 'source_id': job['source_id'],
                 'observed_at': current['observed_at'], 'expires_at': current['expires_at'],
                 'verified_at': self.clock(),
                 'release': os.environ.get('MIMIR_SEARCH_RELEASE', 'development'),
                 'package_sha256': os.environ.get('MIMIR_SEARCH_PACKAGE_SHA256'),
                 'abstained': not bool(results)}
+
+    def _semantic_search(self, index, job, query, top, mode):
+        """Rank one snapshot's units semantically, or fall back to lexical explicitly.
+
+        Any missing precondition (disabled or invalid config, incomplete vectors,
+        unreachable gateway) returns lexical results labelled ``lexical_fallback``
+        with a bounded reason; it is never silently presented as semantic.
+        """
+        config = self.semantic
+        reason = None
+        loaded = None
+        if not config.enabled:
+            reason = config.error or 'semantic_disabled'
+        else:
+            loaded = self._snapshot_vectors(index, job)
+            if loaded is None:
+                reason = 'vectors_incomplete'
+            elif time.monotonic() < self._breaker_until:
+                reason = 'embedding_unavailable'
+        if reason is None:
+            try:
+                embedder = self.embedder_factory(config.identity, runtime_vectors.QUERY_TIMEOUT)
+                query_vector = runtime_vectors.embed_query(embedder, query, config.identity)
+            except (ValueError, TypeError):
+                reason = 'embedding_route_unavailable'
+            except runtime_vectors.EmbedderUnavailable:
+                # One outage must not cost every query a full timeout.
+                self._breaker_until = time.monotonic() + runtime_vectors.BREAKER_SECONDS
+                reason = 'embedding_unavailable'
+        if reason is not None:
+            results = index.search(query, top)
+            for item in results:
+                item['score_kind'] = 'bm25'
+            return results, {'mode': 'lexical_fallback', 'decision': 'fts5_bm25', 'fallback_reason': reason}
+        rows, vectors = loaded
+        window = max(top, 5)
+        lexical = index.lexical_ids(query, window) if mode == 'hybrid' else []
+        ranked, similarity, abstention = runtime_vectors.rank(
+            rows, vectors, query_vector, mode=mode, top=top, lexical_ids=lexical,
+            min_cosine=config.min_cosine, min_zscore=config.min_zscore)
+        by_id = {row['id']: row for row in rows}
+        results = []
+        for identifier, score in ranked:
+            row = by_id[identifier]
+            results.append({
+                'path': row['path'], 'artifact_id': row['artifact_id'], 'sha256': row['sha256'],
+                'locator': {'kind': row['kind'], 'number': int(row['number']), 'anchor': row['anchor']},
+                'title': row['title'][:512], 'snippet': row['text'][:512],
+                'score': score, 'score_kind': 'cosine' if mode == 'vector' else 'rrf',
+                'cosine': similarity[identifier]})
+        decision = {'mode': mode, 'decision': 'cosine_max_segment' if mode == 'vector' else 'rrf60_bounded',
+                    'abstention': abstention, 'embedding': {'model': config.identity.model,
+                                                            'dimensions': config.identity.dimensions,
+                                                            'cache': config.tag}}
+        if mode == 'hybrid':
+            decision['candidate_window'] = window
+        return results, decision
+
+    def _snapshot_vectors(self, index, job):
+        """Covered rows and vectors for this snapshot, cached per process."""
+        key = (job['snapshot_id'], self.semantic.tag)
+        if self._loaded is not None and self._loaded[0] == key:
+            return self._loaded[1]
+        try:
+            store = runtime_vectors.VectorStore(self.state, self.semantic.identity)
+        except ValueError:
+            return None
+        try:
+            loaded = runtime_vectors.load_vectors(index.units(), store, job['snapshot_id'])
+        except ValueError:
+            loaded = None
+        finally:
+            store.close()
+        if loaded is not None:
+            self._loaded = (key, loaded)
+        return loaded
+
+
+def _m5_embedder(identity, timeout):
+    """The existing private M5 route only: explicit /v1 base, no proxy or redirects."""
+    from .embedding_client import M5Embedder
+    return M5Embedder(identity, os.environ.get('M5_OPENAI_BASE_URL', ''), os.environ.get('M5_API_KEY', ''),
+                      timeout=timeout)
 
 
 def _read_original(reader, url):
@@ -452,17 +633,19 @@ def handler(runtime, api_key):
                         not 0 < int(lengths[0]) <= 8192 or self.headers.get('Transfer-Encoding')):
                     raise RuntimeErrorCode('invalid_request')
                 body = json.loads(self.rfile.read(int(lengths[0])))
-                if not isinstance(body, dict) or set(body) - {'query', 'top'} or 'query' not in body:
+                if not isinstance(body, dict) or set(body) - {'query', 'top', 'mode'} or 'query' not in body:
                     raise RuntimeErrorCode('invalid_request')
                 query, top = body['query'], body.get('top', 5)
                 if (not isinstance(query, str) or not query.strip() or len(query) > 4096 or
-                        type(top) is not int or not 1 <= top <= 5):
+                        type(top) is not int or not 1 <= top <= 5 or
+                        'mode' in body and body['mode'] not in runtime_vectors.MODES):
                     raise RuntimeErrorCode('invalid_request')
             except (ValueError, OSError, UnicodeError):
                 self.reply(400, {'error': 'invalid_request'})
                 return
             try:
-                self.reply(200, runtime.search(body['query'], body.get('top', 5)))
+                options = {'mode': body['mode']} if 'mode' in body else {}
+                self.reply(200, runtime.search(body['query'], body.get('top', 5), **options))
             except (OSError, ValueError, sqlite3.DatabaseError):
                 self.reply(503, {'error': 'retrieval_unavailable'})
 
@@ -504,11 +687,7 @@ def main(argv=None):
                         if child.returncode != 0 and runtime.job()['status'] != 'failed':
                             runtime.control('cancel')
                         child = None
-                        job = runtime.job()
-                        delay = 60 if job['status'] == 'ready' else 1.1
-                        if 'retry_after' in job:
-                            delay = max(delay, min(MAX_RETRY_SECONDS, job['retry_after'] - time.time()))
-                        next_step = time.monotonic() + delay
+                        next_step = time.monotonic() + runtime.step_delay(runtime.job())
                     job = runtime.job()
                     if ((job['status'] not in {'failed', 'cancelled'} or job['status'] == 'failed' and runtime._transient(job))
                             and time.monotonic() >= next_step):
