@@ -25,11 +25,17 @@ are regression evidence only.
 
 - **Computed by the runtime's own index child.** Vectors are built only after the
   snapshot's lexical index is complete and the job is `ready`. Each step embeds a
-  bounded slice: at most 8 batches, no new unit after 15 s, a hard stop at 40 s,
-  and an 8 s timeout on each gateway call. That keeps every step well inside the
-  90 s kill that would otherwise cancel the lexical job. Only complete per-unit
-  vectors are committed. Vector work never delays, fails or cancels lexical
-  readiness.
+  bounded slice: at most 8 batches, and no new unit after 15 s. All gateway
+  requests, retries and Retry-After sleeps in a step share one absolute deadline,
+  60 s after the step started, and each call is also capped at 8 s. That keeps
+  every step well inside the 90 s kill that would otherwise cancel the lexical
+  job. A step that runs out of time keeps its committed units and continues in
+  the next step. Only complete per-unit vectors are committed. Vector work never
+  delays, fails or cancels lexical readiness. Unexpected vector-step errors are
+  recorded as `vector_step_failed` instead of crashing the child, and an invalid
+  `vectors` job field is dropped rather than making `job.json` unreadable.
+  Residual risk: socket timeouts apply per read, so a gateway that trickles bytes
+  could still stretch a call.
 - **Cached in the runtime state directory.** Each embedding identity gets one
   private (`0600`) SQLite file, `vectors-<dims>d-<identity-hash>.sqlite`. The
   identity hash covers the cache schema, model, gateway revision and
@@ -42,8 +48,12 @@ are regression evidence only.
   that row, semantic modes are unavailable and queries fall back to lexical.
   A new snapshot starts with no coverage. A changed configuration produces a
   different file, so the old cache is never reused.
-- **Bounded.** The file is capped at 128 MiB (SQLite `max_page_count`), so it can
-  never exhaust the runtime's 512 MiB state budget and take lexical down. Semantic
+- **Bounded.** All vector caches together are capped at 128 MiB. Before each
+  step, the runtime also keeps 32 MiB of the 512 MiB state budget free for
+  lexical work, enforced through SQLite `max_page_count`. Exhausting either
+  limit fails the vector state with `vector_budget_exceeded`; it can never trip
+  the lexical job's `state_budget_exceeded`. Caches for old identities are kept
+  until an operator prunes them, with normal deletion authorization. Semantic
   modes handle at most 5,000 eligible units; a larger corpus is reported as a
   failed vector state. 256 dimensions is the default. 768 dimensions are accepted,
   but the JSON cache costs roughly three times as much, so choose them only from
@@ -65,11 +75,13 @@ Putting those values into the reader's `runtime.env` is a new credential
 A missing route is reported as `embedding_route_unavailable`, and lexical
 retrieval keeps serving.
 
-Interactive queries use a 3 s per-call timeout. After a gateway failure, a 30 s
-in-process breaker sends queries straight to lexical without waiting. Index-time
+Interactive queries use a 3 s per-call timeout inside a 4 s absolute budget per
+query, so the single-request server is never blocked for long. After any
+query-embedding failure, a 30 s in-process breaker sends queries straight to
+lexical without waiting. Index-time
 failures are classified as follows:
 
-- **Transient** (transport errors, HTTP 408/429/5xx): the vector state becomes
+- **Transient** (transport errors, an exhausted deadline, HTTP 408/429/5xx): the vector state becomes
   `unavailable`, with backoff doubling from 5 s to a 300 s cap.
 - **Operator-actionable** (authentication, gateway-revision drift, malformed
   responses, cache corruption or a full cache): the vector state becomes `failed`
@@ -114,6 +126,8 @@ and the unit count. Two optional thresholds withhold *all* results, giving
 - `MIMIR_SEARCH_ABSTAIN_MIN_ZSCORE`: the top unit must stand out from the corpus.
   Fewer than 8 units abstain, because a margin cannot be estimated.
 
+Identical scores are exactly flat, because the statistics use `math.fsum` with a
+negligible-spread guard, so a flat distribution can never pass the margin.
 The margin was chosen over the gap to the second-best unit because the corpus is
 full of revisions and copies, so near-duplicates make that gap meaningless.
 

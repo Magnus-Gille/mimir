@@ -68,12 +68,14 @@ class SemanticRuntimeTests(unittest.TestCase):
         self.calls = []
         self.failure = None
         self.factory_calls = []
+        self.deadlines = []
 
     def tearDown(self):
         self.tempdir.cleanup()
 
-    def factory(self, identity, timeout):
+    def factory(self, identity, timeout, deadline=None):
         self.factory_calls.append(timeout)
+        self.deadlines.append(deadline)
         return FakeEmbedder(identity, self.calls, self.failure)
 
     def _source(self, name, texts):
@@ -270,6 +272,61 @@ class SemanticRuntimeTests(unittest.TestCase):
         runtime.control("retry")
         self._ready(runtime)
         self.assertEqual(runtime.search("breeze", mode="vector")["mode"], "vector")
+
+    def test_invalid_vector_metadata_is_dropped_without_touching_lexical(self):
+        for semantic in (SemanticConfig(), _config()):
+            with self.subTest(enabled=semantic.enabled):
+                self.tearDown()
+                self.setUp()
+                runtime = self._runtime(semantic)
+                self._ready(runtime)
+                job = runtime.job()
+                job["vectors"] = {"status": "bogus"}
+                runtime.save(job)
+                self.assertNotIn("vectors", runtime.job())
+                self.assertTrue(runtime.health()["ready"])
+                self.assertEqual(runtime.search("north star")["mode"], "lexical")
+                runtime.control("retry")
+                self._ready(runtime)
+
+    def test_vector_storage_budget_stops_vectors_never_lexical(self):
+        runtime = self._runtime(_config())
+        while runtime.step() != "ready":
+            pass
+        used = sum(path.stat().st_size for path in self.state.iterdir() if path.is_file())
+        with mock.patch.object(runtime_module, "MAX_STATE_BYTES", used + 1024):
+            self.assertEqual(runtime.step(), "ready")
+            self.assertEqual(runtime.job()["vectors"]["error"], "vector_budget_exceeded")
+            self.assertEqual(runtime.step(), "ready")
+        self.assertEqual(self.calls, [])
+        self.assertTrue(runtime.health()["ready"])
+
+    def test_vector_step_and_queries_carry_absolute_deadlines(self):
+        runtime = self._runtime(_config())
+        self._ready(runtime)
+        build_deadline = self.deadlines[0]
+        self.assertIsNotNone(build_deadline)
+        runtime.search("breeze", mode="vector")
+        self.assertIsNotNone(self.deadlines[-1])
+        with mock.patch.object(runtime_module.time, "monotonic", return_value=1000.0):
+            runtime.search("breeze", mode="vector")
+        self.assertEqual(self.deadlines[-1], 1000.0 + runtime_module.runtime_vectors.QUERY_SECONDS)
+
+    def test_unexpected_query_embedding_error_is_an_explicit_fallback(self):
+        runtime = self._runtime(_config())
+        self._ready(runtime)
+        self.failure = OverflowError("synthetic")
+        response = runtime.search("north star", mode="hybrid")
+        self.assertEqual((response["mode"], response["fallback_reason"]), ("lexical_fallback", "embedding_unavailable"))
+
+    def test_unexpected_vector_step_error_is_contained(self):
+        runtime = self._runtime(_config())
+        while runtime.step() != "ready":
+            pass
+        self.failure = AssertionError("synthetic")
+        self.assertEqual(runtime.step(), "ready")
+        self.assertEqual(runtime.job()["vectors"]["error"], "vector_step_failed")
+        self.assertTrue(runtime.health()["ready"])
 
     # -- retrieval ---------------------------------------------------------
 

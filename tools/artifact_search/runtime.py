@@ -130,6 +130,7 @@ class Runtime:
         self.embedder_factory = embedder_factory or _m5_embedder
         self._breaker_until = 0.0
         self._loaded = None
+        self._step_started = time.monotonic()
 
     @contextlib.contextmanager
     def locked(self):
@@ -162,7 +163,9 @@ class Runtime:
         elif any(key in value for key in ('index', 'source_id', 'handoff')) or value['status'] == 'ready':
             raise RuntimeErrorCode('invalid_job_state')
         vectors = value.get('vectors')
-        # Shape only: a stray field must never make job state unreadable.
+        # Derived semantic state is validated on its own: an invalid block is
+        # dropped (and rebuilt by the next step), never allowed to make the
+        # lexical job unreadable.
         if vectors is not None and (
                 not isinstance(vectors, dict) or
                 vectors.get('status') not in {'pending', 'complete', 'unavailable', 'failed'} or
@@ -170,7 +173,7 @@ class Runtime:
                     type(vectors.get('retry_after')) not in (int, float) or
                     not math.isfinite(vectors['retry_after']) or
                     type(vectors.get('failures')) is not int or vectors['failures'] < 1)):
-            raise RuntimeErrorCode('invalid_job_state')
+            del value['vectors']
         if 'retry_after' in value or 'transient_failures' in value:
             if (value['status'] != 'pending' or type(value.get('retry_after')) not in (int, float) or
                     not math.isfinite(value['retry_after']) or
@@ -214,6 +217,7 @@ class Runtime:
 
     def step(self):
         """One artifact per durable step; a crash leaves its transaction retryable."""
+        self._step_started = time.monotonic()
         with self.locked():
             job = self.job()
             if job['status'] == 'failed' and self._transient(job):
@@ -359,18 +363,22 @@ class Runtime:
         if previous.get('status') == 'unavailable' and now < previous['retry_after'] <= now + runtime_vectors.MAX_RETRY_SECONDS:
             return
         index = store = None
+        hard = self._step_started + runtime_vectors.HARD_STEP_SECONDS
         try:
+            allowance = self._vector_allowance(config.tag)
             index = self.index(job)
             store = runtime_vectors.VectorStore(self.state, config.identity, create=True)
+            store.limit(allowance)
             units = index.units()
             if previous.get('status') == 'complete' and store.covered(job['snapshot_id']) == len(runtime_vectors.eligible(units)):
                 return
             try:
-                embedder = self.embedder_factory(config.identity, runtime_vectors.BUILD_TIMEOUT)
+                embedder = self.embedder_factory(config.identity, runtime_vectors.BUILD_TIMEOUT, hard)
             except (ValueError, TypeError):
                 raise runtime_vectors.VectorError('embedding_route_unavailable') from None
+            soft = min(time.monotonic() + runtime_vectors.STEP_SECONDS, hard)
             result = runtime_vectors.build_step(units, store, embedder, job['snapshot_id'],
-                                         deadline=time.monotonic() + runtime_vectors.STEP_SECONDS, now=self.clock)
+                                                deadline=soft, hard_deadline=hard, now=self.clock)
             vectors = {'status': result['status'], 'identity': config.tag,
                        'units': result['units'], 'covered': result['covered']}
         except runtime_vectors.EmbedderUnavailable as error:
@@ -382,10 +390,12 @@ class Runtime:
             else:
                 vectors = {'status': 'failed', 'identity': config.tag,
                            'error': runtime_vectors.error_code(error, 'embedding_unavailable')}
-        except (OSError, ValueError, TypeError, KeyError, sqlite3.DatabaseError) as error:
+        except (OSError, ValueError, sqlite3.DatabaseError) as error:
             # Bounded codes only: no exception text, unit text, URLs or credentials.
             vectors = {'status': 'failed', 'identity': config.tag,
                        'error': runtime_vectors.error_code(error, 'vector_step_failed')}
+        except Exception:  # noqa: BLE001 - recorded below; a crash would cancel the lexical job.
+            vectors = {'status': 'failed', 'identity': config.tag, 'error': 'vector_step_failed'}
         finally:
             for handle in (store, index):
                 if handle is not None:
@@ -395,6 +405,30 @@ class Runtime:
                         pass
         job['vectors'] = vectors
         self.save(job)
+
+    def _vector_allowance(self, tag):
+        """Bytes this identity's cache may reach without endangering lexical state.
+
+        All vector caches share one cap, and the whole state directory keeps a
+        reserve below the job budget, so vector growth can stop vector work but
+        never trip ``state_budget_exceeded`` for the lexical job.
+        """
+        own_prefix = 'vectors-%s.sqlite' % tag
+        total = own = other = 0
+        for path in self.state.iterdir():
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            total += info.st_size
+            if path.name.startswith(own_prefix):
+                own += info.st_size
+            elif path.name.startswith('vectors-'):
+                other += info.st_size
+        allowance = min(runtime_vectors.MAX_VECTOR_BYTES - other,
+                        MAX_STATE_BYTES - runtime_vectors.LEXICAL_RESERVE_BYTES - (total - own))
+        if allowance < own + runtime_vectors.MIN_VECTOR_GROWTH:
+            raise runtime_vectors.VectorError('vector_budget_exceeded')
+        return allowance
 
     def step_delay(self, job):
         """Seconds until the serve loop should run the next index/vector step."""
@@ -490,11 +524,14 @@ class Runtime:
                 reason = 'embedding_unavailable'
         if reason is None:
             try:
-                embedder = self.embedder_factory(config.identity, runtime_vectors.QUERY_TIMEOUT)
-                query_vector = runtime_vectors.embed_query(embedder, query, config.identity)
+                embedder = self.embedder_factory(config.identity, runtime_vectors.QUERY_TIMEOUT,
+                                                 time.monotonic() + runtime_vectors.QUERY_SECONDS)
             except (ValueError, TypeError):
                 reason = 'embedding_route_unavailable'
-            except runtime_vectors.EmbedderUnavailable:
+        if reason is None:
+            try:
+                query_vector = runtime_vectors.embed_query(embedder, query, config.identity)
+            except Exception:  # noqa: BLE001 - any model failure is an explicit, labelled fallback.
                 # One outage must not cost every query a full timeout.
                 self._breaker_until = time.monotonic() + runtime_vectors.BREAKER_SECONDS
                 reason = 'embedding_unavailable'
@@ -547,11 +584,11 @@ class Runtime:
         return loaded
 
 
-def _m5_embedder(identity, timeout):
+def _m5_embedder(identity, timeout, deadline):
     """The existing private M5 route only: explicit /v1 base, no proxy or redirects."""
     from .embedding_client import M5Embedder
     return M5Embedder(identity, os.environ.get('M5_OPENAI_BASE_URL', ''), os.environ.get('M5_API_KEY', ''),
-                      timeout=timeout)
+                      timeout=timeout, deadline=deadline)
 
 
 def _read_original(reader, url):

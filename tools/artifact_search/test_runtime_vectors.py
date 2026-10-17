@@ -509,6 +509,41 @@ class AbstentionTests(unittest.TestCase):
         self.assertEqual(abstention([0.5] * 8, min_cosine=0.9, min_zscore=1.0)['reason'], 'below_cosine_floor')
 
 
+class ReviewRegressionTests(StateDirTestCase):
+    def test_flat_distribution_never_passes_the_margin(self):
+        for value in (0.1, 0.3, 0.7, -0.2):
+            decision = abstention([value] * 8, min_zscore=0.5)
+            self.assertTrue(decision['abstained'], value)
+            self.assertEqual(decision['signal']['zscore'], 0.0)
+
+    def test_overflowing_vector_values_are_invalid_not_a_crash(self):
+        from tools.artifact_search.vectors import normalize
+        with self.assertRaises(ValueError):
+            normalize([10 ** 400] + [0.0] * 255, 256)
+
+        class Overflowing(FakeEmbedder):
+            def embed(self, inputs):
+                return [[10 ** 400] + [0.0] * 255 for _ in inputs]
+
+        with self.assertRaises(EmbedderUnavailable) as caught:
+            build_step([unit(1)], self.open_store(), Overflowing(), 'snap', deadline=math.inf)
+        self.assertEqual(str(caught.exception), 'embedding_invalid_response')
+
+    def test_embedder_deadline_keeps_committed_progress_and_reports_pending(self):
+        store = self.open_store()
+
+        class Expiring(FakeEmbedder):
+            def embed(self, inputs):
+                if self.calls:
+                    raise EmbedderUnavailable('embedding_deadline_exceeded')
+                return super().embed(inputs)
+
+        units = [unit(n) for n in range(1, 21)]  # two batches
+        result = build_step(units, store, Expiring(), 'snap', deadline=math.inf)
+        self.assertEqual((result['status'], result['covered'], result['batches']), ('pending', 16, 1))
+        self.assertIsNone(store.covered('snap'))
+
+
 class RankTests(unittest.TestCase):
     QUERY = [1.0, 0.0, 0.0]
 

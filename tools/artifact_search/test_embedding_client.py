@@ -70,3 +70,43 @@ class ClientTests(unittest.TestCase):
             with self.subTest(count=len(inputs)), self.assertRaises(ValueError):
                 client.embed(inputs)
         self.assertEqual(transport.requests, [])
+
+    def test_absolute_deadline_bounds_requests_retries_and_sleeps(self):
+        from tools.artifact_search.embedding_client import M5Embedder, EmbedderUnavailable
+        now = [0.0]
+
+        class SlowBusy:
+            def __init__(self):
+                self.timeouts = []
+
+            def open(self, request, timeout):
+                self.timeouts.append(timeout)
+                now[0] += timeout  # every request uses its full allowance, then is busy
+                raise HTTPError('http://localhost/v1', 503, 'busy', {'Retry-After': '2'}, io.BytesIO(b''))
+
+        def sleep(seconds):
+            now[0] += seconds
+
+        transport = SlowBusy()
+        client = M5Embedder(self.identity(), 'http://localhost/v1', 'synthetic-key', timeout=8,
+                            opener=transport, sleep=sleep, deadline=11.0, clock=lambda: now[0])
+        with self.assertRaises(EmbedderUnavailable) as caught:
+            client.embed(['x'])
+        self.assertLessEqual(now[0], 11.0)
+        self.assertEqual(transport.timeouts[0], 8)
+        self.assertLessEqual(sum(transport.timeouts), 11.0)
+        expired = M5Embedder(self.identity(), 'http://localhost/v1', 'synthetic-key', opener=Transport([]),
+                             deadline=5.0, clock=lambda: 5.0)
+        with self.assertRaises(EmbedderUnavailable) as late:
+            expired.embed(['x'])
+        self.assertEqual(str(late.exception), 'embedding_deadline_exceeded')
+
+    def test_overflowing_numbers_are_an_invalid_response(self):
+        from tools.artifact_search.embedding_client import M5Embedder, EmbedderUnavailable
+        payload = self.payload()
+        payload['data'][0]['embedding'] = [10 ** 400] + [0.0] * 127
+        client = M5Embedder(self.identity(), 'http://localhost/v1', 'synthetic-key',
+                            opener=Transport([self.release(), payload, self.release()]))
+        with self.assertRaises(EmbedderUnavailable) as caught:
+            client.embed(['x'])
+        self.assertEqual(str(caught.exception), 'embedding_invalid_response')

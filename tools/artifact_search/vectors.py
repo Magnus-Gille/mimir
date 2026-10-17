@@ -98,7 +98,10 @@ def _coerce_vector(vector: object, dimensions: int) -> list[float]:
     for item in vector:
         if isinstance(item, bool) or not isinstance(item, numbers.Real):
             raise TypeError("vector values must be real numbers")
-        value = float(item)
+        try:
+            value = float(item)
+        except OverflowError:  # e.g. a JSON integer such as 10**400
+            raise ValueError("vector values must be finite") from None
         if not math.isfinite(value):
             raise ValueError("vector values must be finite")
         values.append(value)

@@ -32,12 +32,18 @@ MAX_SEMANTIC_UNITS = 5_000
 MAX_CACHE_PAGES = 32_768  # 128 MiB: vectors can never exhaust the 512 MiB state budget.
 MAX_STEP_BATCHES = 8
 # The serve loop kills an index child after 90 s and that cancels the lexical job,
-# so a vector step must finish well inside it: soft stop 15 s, hard stop 40 s,
-# and each of a batch's three gateway calls is bounded to 8 s.
+# so a vector step must finish well inside it.  Gateway calls share one absolute
+# deadline (requests, retries and Retry-After sleeps): no new unit after 15 s and
+# nothing at all after 60 s from the start of the step.
 STEP_SECONDS = 15
-HARD_STEP_SECONDS = 40
+HARD_STEP_SECONDS = 60
 BUILD_TIMEOUT = 8
 QUERY_TIMEOUT = 3
+QUERY_SECONDS = 4
+# All vector caches together, and headroom kept free for lexical index work.
+MAX_VECTOR_BYTES = MAX_CACHE_PAGES * 4096
+LEXICAL_RESERVE_BYTES = 32 * 1024 * 1024
+MIN_VECTOR_GROWTH = 1024 * 1024
 BREAKER_SECONDS = 30
 MIN_ZSCORE_UNITS = 8
 MIN_RETRY_SECONDS = 5
@@ -140,7 +146,8 @@ def transient(error):
     """True when an embedding failure should back off rather than fail."""
     if not isinstance(error, EmbedderUnavailable):
         return False
-    return str(error) == 'embedding_transport_error' or error.status in _TRANSIENT_STATUS
+    return (str(error) in {'embedding_transport_error', 'embedding_deadline_exceeded'} or
+            error.status in _TRANSIENT_STATUS)
 
 
 def error_code(error, default):
@@ -203,6 +210,14 @@ class VectorStore:
                 raise VectorError('vector_cache_unavailable') from None
             raise
 
+    def limit(self, max_bytes):
+        """Cap this file below the shared budget; SQLite never shrinks below its size."""
+        try:
+            page = int(self.connection.execute('PRAGMA page_size').fetchone()[0])
+            self.connection.execute('PRAGMA max_page_count=%d' % max(1, min(MAX_CACHE_PAGES, max_bytes // page)))
+        except sqlite3.DatabaseError:
+            raise VectorError('vector_cache_corrupt') from None
+
     def get(self, key, segments):
         try:
             vectors = get_cached(self.connection, key, self.identity.dimensions)
@@ -256,7 +271,7 @@ def _embed(embedder, inputs, identity):
         return [normalize(vector, identity.dimensions) for vector in values]
     except EmbedderUnavailable:
         raise
-    except (OSError, RuntimeError, ValueError, TypeError):
+    except (OSError, RuntimeError, ValueError, TypeError, ArithmeticError):
         raise EmbedderUnavailable('embedding_invalid_response') from None
 
 
@@ -297,7 +312,12 @@ def build_step(units, store, embedder, snapshot_id, *, deadline, hard_deadline=N
                 break
             batch.append(tasks.pop(0))
             inputs.append(batch[-1][2])
-        values = _embed(embedder, inputs, identity)
+        try:
+            values = _embed(embedder, inputs, identity)
+        except EmbedderUnavailable as error:
+            if str(error) != 'embedding_deadline_exceeded':
+                raise
+            break  # Out of step time: keep committed units, resume next step.
         batches += 1
         for (key, count, _), vector in zip(batch, values):
             received.setdefault(key, []).append(vector)
@@ -344,16 +364,20 @@ def abstention(scores, min_cosine=None, min_zscore=None):
         return {'policy': policy, 'abstained': True, 'reason': 'no_vectors', 'signal': signal}
     top = max(scores)
     signal['top_cosine'] = round(top, 6)
+    zscore = None
     if len(scores) >= MIN_ZSCORE_UNITS:
-        mean = sum(scores) / len(scores)
-        spread = math.sqrt(sum((value - mean) ** 2 for value in scores) / len(scores))
-        signal['zscore'] = round((top - mean) / spread, 6) if spread > 0 else 0.0
+        # fsum keeps identical scores exactly flat; a rounding residue must not
+        # look like an outlier, so a negligible spread counts as no spread.
+        mean = math.fsum(scores) / len(scores)
+        spread = math.sqrt(math.fsum((value - mean) ** 2 for value in scores) / len(scores))
+        zscore = (top - mean) / spread if spread > 1e-9 * max(1.0, abs(mean)) else 0.0
+        signal['zscore'] = round(zscore, 6)
     reason = None
     if min_cosine is not None and top < min_cosine:
         reason = 'below_cosine_floor'
-    elif min_zscore is not None and signal['zscore'] is None:
+    elif min_zscore is not None and zscore is None:
         reason = 'too_few_units_for_margin'
-    elif min_zscore is not None and signal['zscore'] < min_zscore:
+    elif min_zscore is not None and zscore < min_zscore:
         reason = 'below_score_margin'
     return {'policy': policy, 'abstained': reason is not None, 'reason': reason, 'signal': signal}
 

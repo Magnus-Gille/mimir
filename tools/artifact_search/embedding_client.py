@@ -33,7 +33,7 @@ def payload_bytes(inputs, identity):
 
 class M5Embedder:
     def __init__(self, identity: EmbeddingIdentity, base_url: str, api_key: str,
-                 timeout=30, opener=None, sleep=time.sleep):
+                 timeout=30, opener=None, sleep=time.sleep, deadline=None, clock=time.monotonic):
         parts = urlsplit(base_url)
         try:
             _ = parts.port
@@ -60,6 +60,17 @@ class M5Embedder:
         self.timeout = timeout
         self.opener = opener or build_opener(ProxyHandler({}), _NoRedirect())
         self.sleep = sleep
+        # Optional absolute monotonic deadline across every request, retry and sleep.
+        self.deadline = deadline
+        self.clock = clock
+
+    def _remaining(self):
+        if self.deadline is None:
+            return self.timeout
+        left = self.deadline - self.clock()
+        if left <= 0:
+            raise EmbedderUnavailable('embedding_deadline_exceeded')
+        return min(self.timeout, left)
 
     @classmethod
     def from_env(cls, identity):
@@ -71,7 +82,7 @@ class M5Embedder:
                           headers={'Authorization': 'Bearer ' + self.api_key,
                                    'Content-Type': 'application/json', 'User-Agent': 'mimir-artifact-search/1'})
             try:
-                with self.opener.open(req, timeout=self.timeout) as response:
+                with self.opener.open(req, timeout=self._remaining()) as response:
                     raw = response.read(4*1024*1024 + 1)
                 if len(raw) > 4*1024*1024:
                     raise EmbedderUnavailable('embedding_response_too_large')
@@ -83,7 +94,8 @@ class M5Embedder:
                         delay = None
                 except (ValueError, TypeError):
                     delay = None
-                if attempt == 0 and error.code in {429, 503} and delay is not None and delay <= 2:
+                fits = self.deadline is None or delay is not None and self.clock() + delay < self.deadline
+                if attempt == 0 and error.code in {429, 503} and delay is not None and delay <= 2 and fits:
                     error.close()
                     self.sleep(delay)
                     continue
@@ -120,7 +132,7 @@ class M5Embedder:
                 if item['index'] != index or item['object'] != 'embedding':
                     raise ValueError('invalid order')
                 vectors.append(normalize(item['embedding'], self.identity.dimensions))
-        except (KeyError, ValueError, TypeError, IndexError) as error:
+        except (KeyError, ValueError, TypeError, IndexError, ArithmeticError) as error:
             raise EmbedderUnavailable('embedding_invalid_response') from error
         self._verify_release()
         return vectors
