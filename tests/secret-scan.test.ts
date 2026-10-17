@@ -1,9 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync, chmodSync, statSync, readFileSync } from "node:fs";
+import type { Dirent } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
-const fsMockControl = vi.hoisted(() => ({ forceNextLinkExdev: false, failOpenPath: null as string | null }));
+const fsMockControl = vi.hoisted(() => ({
+  forceNextLinkExdev: false,
+  failOpenPath: null as string | null,
+  failReadDirPath: null as string | null,
+  rawReadDirPath: null as string | null,
+  rawReadDirEntries: null as Array<Pick<Dirent<Buffer>, "name" | "isDirectory" | "isFile" | "isSymbolicLink">> | null,
+}));
 const processMockControl = vi.hoisted(() => ({ failAfterAclStrips: null as number | null }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -22,6 +29,19 @@ vi.mock("node:fs/promises", async (importOriginal) => {
         return Promise.reject(Object.assign(new Error("synthetic copy failure"), { code: "EIO" }));
       }
       return actual.open(...args);
+    },
+    readdir: (...args: Parameters<typeof actual.readdir>) => {
+      if (fsMockControl.failReadDirPath === String(args[0])) {
+        fsMockControl.failReadDirPath = null;
+        return Promise.reject(Object.assign(new Error("synthetic listing failure"), { code: "EIO" }));
+      }
+      if (fsMockControl.rawReadDirPath === String(args[0]) && fsMockControl.rawReadDirEntries) {
+        const entries = fsMockControl.rawReadDirEntries;
+        fsMockControl.rawReadDirPath = null;
+        fsMockControl.rawReadDirEntries = null;
+        return Promise.resolve(entries) as ReturnType<typeof actual.readdir>;
+      }
+      return actual.readdir(...args);
     },
   };
 });
@@ -66,6 +86,10 @@ function cleanup() {
 
 beforeEach(() => {
   cleanup();
+  fsMockControl.failOpenPath = null;
+  fsMockControl.failReadDirPath = null;
+  fsMockControl.rawReadDirPath = null;
+  fsMockControl.rawReadDirEntries = null;
   mkdirSync(TEST_ROOT, { recursive: true });
 });
 
@@ -145,21 +169,27 @@ describe("scanFile", () => {
   it("returns findings for a file containing a secret", async () => {
     const filePath = join(TEST_ROOT, "leaky.env");
     writeFileSync(filePath, "AWS_KEY=AKIAABCDEFGHIJKLMNOP\n");
-    const hits = await scanFile(filePath);
-    expect(hits.length).toBeGreaterThan(0);
+    const result = await scanFile(filePath);
+    expect(result.status).toBe("findings");
+    if (result.status === "findings") expect(result.findings.length).toBeGreaterThan(0);
   });
 
-  it("returns an empty array for a clean file", async () => {
+  it("returns a complete clean verdict for a clean file", async () => {
     const filePath = join(TEST_ROOT, "clean.txt");
     writeFileSync(filePath, "Just a regular note about the project.\n");
-    const hits = await scanFile(filePath);
-    expect(hits).toHaveLength(0);
+    await expect(scanFile(filePath)).resolves.toEqual({ status: "clean" });
   });
 
-  it("skips binary files without throwing", async () => {
+  it("returns an incomplete binary verdict without throwing", async () => {
     const filePath = join(TEST_ROOT, "image.png");
     writeFileSync(filePath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02, 0x00, 0xff]));
-    await expect(scanFile(filePath)).resolves.toEqual([]);
+    await expect(scanFile(filePath)).resolves.toEqual({ status: "incomplete", reason: "binary" });
+  });
+
+  it("detects a NUL byte anywhere in the bounded file contents", async () => {
+    const filePath = join(TEST_ROOT, "late-nul.bin");
+    writeFileSync(filePath, Buffer.concat([Buffer.alloc(8000, 0x61), Buffer.from([0x00])]));
+    await expect(scanFile(filePath)).resolves.toEqual({ status: "incomplete", reason: "binary" });
   });
 
   it("does not follow a symlink to read/scan a file outside the tree", async () => {
@@ -168,7 +198,7 @@ describe("scanFile", () => {
     const linkPath = join(TEST_ROOT, "link-to-outside.txt");
     symlinkSync(outsidePath, linkPath);
     try {
-      await expect(scanFile(linkPath)).resolves.toEqual([]);
+      await expect(scanFile(linkPath)).resolves.toEqual({ status: "incomplete", reason: "symlink" });
     } finally {
       rmSync(outsidePath, { force: true });
     }
@@ -179,11 +209,32 @@ describe("scanFile", () => {
     const filePath = join(TEST_ROOT, "huge.bin");
     writeFileSync(filePath, Buffer.alloc(10 * 1024 * 1024 + 1, "a"));
 
-    const hits = await scanFile(filePath);
+    const result = await scanFile(filePath);
 
-    expect(hits).toEqual([]);
+    expect(result).toEqual({ status: "incomplete", reason: "oversized" });
     expect(warnSpy).toHaveBeenCalled();
     warnSpy.mockRestore();
+  });
+
+  it("reports unsupported UTF-8 instead of scanning replacement characters", async () => {
+    const filePath = join(TEST_ROOT, "invalid-utf8.txt");
+    writeFileSync(filePath, Buffer.from([0x61, 0xff, 0x62]));
+    await expect(scanFile(filePath)).resolves.toEqual({ status: "incomplete", reason: "unsupported-encoding" });
+  });
+
+  it("reports non-regular inputs and I/O failures as incomplete", async () => {
+    await expect(scanFile(TEST_ROOT)).resolves.toEqual({ status: "incomplete", reason: "nonregular" });
+    await expect(scanFile(join(TEST_ROOT, "missing.txt"))).resolves.toEqual({
+      status: "incomplete",
+      reason: "io-failure",
+    });
+  });
+
+  it("reports a read-open failure as incomplete", async () => {
+    const filePath = join(TEST_ROOT, "unreadable.txt");
+    writeFileSync(filePath, "clean\n");
+    fsMockControl.failOpenPath = filePath;
+    await expect(scanFile(filePath)).resolves.toEqual({ status: "incomplete", reason: "io-failure" });
   });
 });
 
@@ -196,14 +247,40 @@ describe("scanFiles", () => {
     writeFileSync(join(TEST_ROOT, "flagged.txt"), "AKIAABCDEFGHIJKLMNOP\n");
     writeFileSync(join(TEST_ROOT, "ignored.txt"), "AKIAZZZZZZZZZZZZZZZZ\n");
 
-    const hits = await scanFiles(TEST_ROOT, ["flagged.txt"]);
+    const result = await scanFiles(TEST_ROOT, ["flagged.txt", "missing.txt"]);
 
-    expect(hits).toHaveLength(1);
-    expect(hits[0].file).toBe("flagged.txt");
+    expect(result.entries).toEqual([
+      expect.objectContaining({ file: "flagged.txt", status: "findings" }),
+      { file: "missing.txt", status: "incomplete", reason: "io-failure" },
+    ]);
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0].file).toBe("flagged.txt");
+    expect(result.incomplete).toEqual([{ file: "missing.txt", reason: "io-failure" }]);
   });
 
-  it("refuses to scan a path that escapes the root", async () => {
-    await expect(scanFiles(TEST_ROOT, ["../outside.txt"])).rejects.toThrow();
+  it("refuses paths outside the root, records them, and continues scanning the batch", async () => {
+    writeFileSync(join(TEST_ROOT, "clean.txt"), "clean\n");
+
+    const result = await scanFiles(TEST_ROOT, ["../outside.txt", "clean.txt"]);
+
+    expect(result.entries).toEqual([
+      { file: "../outside.txt", status: "incomplete", reason: "io-failure" },
+      { file: "clean.txt", status: "clean" },
+    ]);
+    expect(result.incomplete).toEqual([{ file: "../outside.txt", reason: "io-failure" }]);
+    expect(result.findings).toEqual([]);
+  });
+
+  it("does not follow a symlinked parent directory", async () => {
+    mkdirSync(OUTSIDE_ROOT);
+    writeFileSync(join(OUTSIDE_ROOT, "leaky.txt"), "AKIAABCDEFGHIJKLMNOP\n");
+    symlinkSync(OUTSIDE_ROOT, join(TEST_ROOT, "external-directory"));
+
+    const result = await scanFiles(TEST_ROOT, ["external-directory/leaky.txt"]);
+
+    expect(result.entries).toEqual([{ file: "external-directory/leaky.txt", status: "incomplete", reason: "symlink" }]);
+    expect(result.findings).toEqual([]);
+    expect(existsSync(join(OUTSIDE_ROOT, "leaky.txt"))).toBe(true);
   });
 });
 
@@ -217,11 +294,12 @@ describe("scanDirectory", () => {
     writeFileSync(join(TEST_ROOT, "sub", "creds.txt"), "-----BEGIN RSA PRIVATE KEY-----\n");
     writeFileSync(join(TEST_ROOT, "top.txt"), "nothing to see here\n");
 
-    const findings = await scanDirectory(TEST_ROOT);
+    const result = await scanDirectory(TEST_ROOT);
 
-    expect(findings).toHaveLength(1);
-    expect(findings[0].file).toBe(join("sub", "creds.txt"));
-    expect(findings[0].rule).toBe("private-key-block");
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0].file).toBe(join("sub", "creds.txt"));
+    expect(result.findings[0].rule).toBe("private-key-block");
+    expect(result.entries.map(({ file }) => file).sort()).toEqual(["sub/creds.txt", "top.txt"]);
   });
 
   it("returns an empty array for a fully clean tree", async () => {
@@ -229,14 +307,106 @@ describe("scanDirectory", () => {
     mkdirSync(join(TEST_ROOT, "b"), { recursive: true });
     writeFileSync(join(TEST_ROOT, "b", "c.txt"), "world\n");
 
-    const findings = await scanDirectory(TEST_ROOT);
-    expect(findings).toEqual([]);
+    const result = await scanDirectory(TEST_ROOT);
+    expect(result.findings).toEqual([]);
+    expect(result.incomplete).toEqual([]);
+    expect(result.entries.map(({ file }) => file).sort()).toEqual(["a.txt", join("b", "c.txt")]);
   });
 
   it("scans dotfiles (not just what directory listing shows)", async () => {
     writeFileSync(join(TEST_ROOT, ".env"), "AKIAABCDEFGHIJKLMNOP\n");
-    const findings = await scanDirectory(TEST_ROOT);
-    expect(findings.some((f) => f.file === ".env")).toBe(true);
+    const result = await scanDirectory(TEST_ROOT);
+    expect(result.findings.some((f) => f.file === ".env")).toBe(true);
+  });
+
+  it("includes skipped symlinks and non-regular entries in the recursive inventory", async () => {
+    writeFileSync(join(TEST_ROOT, "clean.txt"), "clean\n");
+    writeFileSync(join(TEST_ROOT, "binary.bin"), Buffer.from([0x61, 0x00, 0x62]));
+    symlinkSync(join(TEST_ROOT, "clean.txt"), join(TEST_ROOT, "linked.txt"));
+    execFileSync("mkfifo", [join(TEST_ROOT, "pipe.fifo")]);
+    mkdirSync(OUTSIDE_ROOT);
+    writeFileSync(join(OUTSIDE_ROOT, "external-secret.txt"), "AKIAABCDEFGHIJKLMNOP\n");
+    symlinkSync(OUTSIDE_ROOT, join(TEST_ROOT, "linked-directory"));
+
+    const result = await scanDirectory(TEST_ROOT);
+
+    expect(result.entries).toEqual(expect.arrayContaining([
+      { file: "clean.txt", status: "clean" },
+      { file: "binary.bin", status: "incomplete", reason: "binary" },
+      { file: "linked.txt", status: "incomplete", reason: "symlink" },
+      { file: "linked-directory", status: "incomplete", reason: "symlink" },
+      { file: "pipe.fifo", status: "incomplete", reason: "nonregular" },
+    ]));
+    expect(result.incomplete).toEqual(expect.arrayContaining([
+      { file: "binary.bin", reason: "binary" },
+      { file: "linked.txt", reason: "symlink" },
+      { file: "linked-directory", reason: "symlink" },
+      { file: "pipe.fifo", reason: "nonregular" },
+    ]));
+    expect(result.findings).toEqual([]);
+  });
+
+  it("records an unreadable directory listing as incomplete and continues other entries", async () => {
+    const inaccessible = join(TEST_ROOT, "cannot-list");
+    mkdirSync(inaccessible);
+    writeFileSync(join(inaccessible, "hidden-from-walk.txt"), "clean\n");
+    writeFileSync(join(TEST_ROOT, "visible.txt"), "clean\n");
+    fsMockControl.failReadDirPath = inaccessible;
+
+    const result = await scanDirectory(TEST_ROOT);
+
+    expect(result.entries).toEqual(expect.arrayContaining([
+      { file: "cannot-list", status: "incomplete", reason: "io-failure" },
+      { file: "visible.txt", status: "clean" },
+    ]));
+    expect(result.incomplete).toContainEqual({ file: "cannot-list", reason: "io-failure" });
+  });
+
+  it("returns an incomplete verdict when the root cannot be listed", async () => {
+    const missingRoot = join(TEST_ROOT, "missing-root");
+    const result = await scanDirectory(missingRoot);
+    expect(result.incomplete).toEqual([{ file: ".", reason: "io-failure" }]);
+  });
+
+  it("keeps invalid UTF-8 names incomplete without aliasing a valid replacement-character name", async () => {
+    const replacementName = "\uFFFD";
+    writeFileSync(join(TEST_ROOT, replacementName), "clean\n");
+    const regularDirent = (name: Buffer) => ({
+      name,
+      isDirectory: () => false,
+      isFile: () => true,
+      isSymbolicLink: () => false,
+    });
+    fsMockControl.rawReadDirPath = TEST_ROOT;
+    fsMockControl.rawReadDirEntries = [
+      regularDirent(Buffer.from(replacementName, "utf8")),
+      regularDirent(Buffer.from([0xff])),
+    ];
+
+    const result = await scanAndQuarantine(TEST_ROOT, QUARANTINE_ROOT);
+
+    expect(result.entries).toEqual(expect.arrayContaining([
+      { file: replacementName, status: "clean" },
+      { file: "[filename-bytes:ff]", status: "incomplete", reason: "unsupported-encoding" },
+    ]));
+    expect(result.incomplete).toContainEqual({ file: "[filename-bytes:ff]", reason: "unsupported-encoding" });
+    expect(result.quarantined).toEqual([]);
+    expect(existsSync(join(TEST_ROOT, replacementName))).toBe(true);
+    expect(existsSync(join(QUARANTINE_ROOT, replacementName))).toBe(false);
+  });
+
+  it("preserves a BOM in filenames instead of aliasing the clean name", async () => {
+    const bomName = "\uFEFFsecret.txt";
+    writeFileSync(join(TEST_ROOT, bomName), "AWS_KEY=AKIAABCDEFGHIJKLMNOP\n");
+    writeFileSync(join(TEST_ROOT, "secret.txt"), "clean\n");
+
+    const result = await scanAndQuarantine(TEST_ROOT, QUARANTINE_ROOT);
+
+    expect(result.quarantined).toContain(bomName);
+    expect(result.findings).toContainEqual(expect.objectContaining({ file: bomName }));
+    expect(existsSync(join(QUARANTINE_ROOT, bomName))).toBe(true);
+    expect(existsSync(join(TEST_ROOT, "secret.txt"))).toBe(true);
+    expect(existsSync(join(QUARANTINE_ROOT, "secret.txt"))).toBe(false);
   });
 });
 
@@ -513,6 +683,18 @@ describe("scanAndQuarantine", () => {
     const result = await scanAndQuarantine(TEST_ROOT, QUARANTINE_ROOT);
     expect(result.findings).toEqual([]);
     expect(result.quarantined).toEqual([]);
+  });
+
+  it("quarantines complete findings but leaves incomplete files in place", async () => {
+    writeFileSync(join(TEST_ROOT, "leaky.txt"), "AKIAABCDEFGHIJKLMNOP\n");
+    writeFileSync(join(TEST_ROOT, "binary.bin"), Buffer.from([0x00, 0xff]));
+
+    const result = await scanAndQuarantine(TEST_ROOT, QUARANTINE_ROOT);
+
+    expect(result.quarantined).toEqual(["leaky.txt"]);
+    expect(existsSync(join(QUARANTINE_ROOT, "leaky.txt"))).toBe(true);
+    expect(existsSync(join(TEST_ROOT, "binary.bin"))).toBe(true);
+    expect(result.incomplete).toEqual([{ file: "binary.bin", reason: "binary" }]);
   });
 });
 

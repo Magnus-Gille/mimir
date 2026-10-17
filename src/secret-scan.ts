@@ -1,7 +1,8 @@
-import { constants } from "node:fs";
-import { open, readFile, readdir, stat, lstat, realpath, mkdir, link, unlink } from "node:fs/promises";
+import { constants, type BigIntStats, type Dirent } from "node:fs";
+import { open, readdir, stat, lstat, realpath, mkdir, link, unlink } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { join, relative, dirname, resolve, sep } from "node:path";
+import { TextDecoder } from "node:util";
 import { pushPanel } from "./heimdall-report.js";
 
 // --- Detector rules ---
@@ -40,17 +41,44 @@ export interface SecretFinding extends RuleHit {
   file: string; // path relative to the scanned root
 }
 
+export const SCAN_INCOMPLETE_REASONS = [
+  "binary",
+  "oversized",
+  "symlink",
+  "nonregular",
+  "io-failure",
+  "unsupported-encoding",
+] as const;
+
+export type ScanIncompleteReason = typeof SCAN_INCOMPLETE_REASONS[number];
+
+export type ScanFileVerdict =
+  | { status: "clean" }
+  | { status: "findings"; findings: RuleHit[] }
+  | { status: "incomplete"; reason: ScanIncompleteReason };
+
+export type ScanEntryResult =
+  | { file: string; status: "clean" }
+  | { file: string; status: "findings"; findings: SecretFinding[] }
+  | { file: string; status: "incomplete"; reason: ScanIncompleteReason };
+
+export interface ScanIncomplete {
+  file: string;
+  reason: ScanIncompleteReason;
+}
+
+export interface ScanBatchResult {
+  entries: ScanEntryResult[];
+  findings: SecretFinding[];
+  incomplete: ScanIncomplete[];
+}
+
 // --- Text / file scanning ---
 
-const MAX_SCAN_BYTES = 10 * 1024 * 1024; // 10 MB — skip huge files (video, disk images)
-const BINARY_SNIFF_BYTES = 8000;
+const MAX_SCAN_BYTES = 10 * 1024 * 1024; // 10 MB — incomplete for huge files (video, disk images)
 
 function looksBinary(buf: Buffer): boolean {
-  const len = Math.min(buf.length, BINARY_SNIFF_BYTES);
-  for (let i = 0; i < len; i++) {
-    if (buf[i] === 0) return true;
-  }
-  return false;
+  return buf.includes(0);
 }
 
 export function scanText(text: string): RuleHit[] {
@@ -66,22 +94,99 @@ export function scanText(text: string): RuleHit[] {
   return hits;
 }
 
-export async function scanFile(filePath: string): Promise<RuleHit[]> {
-  // Never follow symlinks: the root jail (resolveWithinRoot) only checks the
-  // lexical path, so a symlink inside the tree could otherwise point at an
-  // arbitrary file outside it and have its target read/scanned.
-  const linkStats = await lstat(filePath);
-  if (linkStats.isSymbolicLink()) return [];
-
-  const stats = await stat(filePath);
-  if (!stats.isFile()) return [];
-  if (stats.size > MAX_SCAN_BYTES) {
-    console.warn(`[mimir] secret-scan: skipping oversized file (${stats.size} bytes): ${filePath}`);
-    return [];
+export async function scanFile(filePath: string): Promise<ScanFileVerdict> {
+  let pathStats: BigIntStats;
+  try {
+    pathStats = await lstat(filePath, { bigint: true });
+  } catch {
+    return { status: "incomplete", reason: "io-failure" };
   }
-  const buf = await readFile(filePath);
-  if (looksBinary(buf)) return [];
-  return scanText(buf.toString("utf8"));
+
+  if (pathStats.isSymbolicLink()) return { status: "incomplete", reason: "symlink" };
+  if (!pathStats.isFile()) return { status: "incomplete", reason: "nonregular" };
+  if (pathStats.size > BigInt(MAX_SCAN_BYTES)) {
+    console.warn(`[mimir] secret-scan: skipping oversized file (${pathStats.size} bytes): ${filePath}`);
+    return { status: "incomplete", reason: "oversized" };
+  }
+
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  let verdict: ScanFileVerdict = { status: "incomplete", reason: "io-failure" };
+  try {
+    // O_NONBLOCK prevents a path swapped to a FIFO between lstat and open
+    // from hanging the scanner; O_NOFOLLOW prevents following a final symlink.
+    handle = await open(
+      filePath,
+      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
+    );
+    const openedStats = await handle.stat({ bigint: true });
+    if (!openedStats.isFile()) {
+      verdict = { status: "incomplete", reason: "nonregular" };
+    } else if (openedStats.dev !== pathStats.dev || openedStats.ino !== pathStats.ino) {
+      verdict = { status: "incomplete", reason: "io-failure" };
+    } else if (openedStats.size > BigInt(MAX_SCAN_BYTES)) {
+      verdict = { status: "incomplete", reason: "oversized" };
+    } else {
+      // Read at most the cap plus one byte so a file that grows after lstat
+      // cannot make the scanner allocate without bound or be treated as clean.
+      const buffer = Buffer.allocUnsafe(Math.min(Number(openedStats.size) + 1, MAX_SCAN_BYTES + 1));
+      let length = 0;
+      while (length < buffer.length) {
+        const { bytesRead } = await handle.read(buffer, length, buffer.length - length, null);
+        if (bytesRead === 0) break;
+        length += bytesRead;
+      }
+
+      if (length > MAX_SCAN_BYTES) {
+        verdict = { status: "incomplete", reason: "oversized" };
+      } else {
+        const finalStats = await handle.stat({ bigint: true });
+        if (finalStats.size > BigInt(MAX_SCAN_BYTES)) {
+          verdict = { status: "incomplete", reason: "oversized" };
+        } else if (
+          finalStats.size !== openedStats.size
+          || finalStats.mtimeNs !== openedStats.mtimeNs
+          || finalStats.ctimeNs !== openedStats.ctimeNs
+          || BigInt(length) !== finalStats.size
+        ) {
+          verdict = { status: "incomplete", reason: "io-failure" };
+        } else {
+          const contents = buffer.subarray(0, length);
+          if (looksBinary(contents)) {
+            verdict = { status: "incomplete", reason: "binary" };
+          } else {
+            let text: string | undefined;
+            try {
+              text = new TextDecoder("utf-8", { fatal: true }).decode(contents);
+            } catch {
+              verdict = { status: "incomplete", reason: "unsupported-encoding" };
+            }
+            if (text !== undefined) {
+              const findings = scanText(text);
+              verdict = findings.length > 0 ? { status: "findings", findings } : { status: "clean" };
+            }
+          }
+        }
+      }
+    }
+  } catch (error) {
+    const code = errnoCode(error);
+    if (code === "ELOOP") {
+      verdict = { status: "incomplete", reason: "symlink" };
+    } else if (code === "EISDIR") {
+      verdict = { status: "incomplete", reason: "nonregular" };
+    } else {
+      verdict = { status: "incomplete", reason: "io-failure" };
+    }
+  }
+
+  if (handle) {
+    try {
+      await handle.close();
+    } catch {
+      return { status: "incomplete", reason: "io-failure" };
+    }
+  }
+  return verdict;
 }
 
 // Resolve a relative path against rootDir and refuse anything that escapes
@@ -97,35 +202,140 @@ function resolveWithinRoot(rootDir: string, relativePath: string): string {
 
 /** Scan an explicit list of relative paths — used by the ingest hook so only
  * newly-imported files are scanned, not the whole archive on every sync. */
-export async function scanFiles(rootDir: string, relativeFiles: string[]): Promise<SecretFinding[]> {
-  const findings: SecretFinding[] = [];
-  for (const relFile of relativeFiles) {
-    const fullPath = resolveWithinRoot(rootDir, relFile);
-    const hits = await scanFile(fullPath);
-    for (const hit of hits) findings.push({ file: relFile, ...hit });
+function recordVerdict(result: ScanBatchResult, file: string, verdict: ScanFileVerdict): void {
+  if (verdict.status === "clean") {
+    result.entries.push({ file, status: "clean" });
+    return;
   }
-  return findings;
+  if (verdict.status === "incomplete") {
+    const incomplete = { file, reason: verdict.reason };
+    result.entries.push({ file, status: "incomplete", reason: verdict.reason });
+    result.incomplete.push(incomplete);
+    return;
+  }
+
+  const findings = verdict.findings.map((finding) => ({ file, ...finding }));
+  result.entries.push({ file, status: "findings", findings });
+  result.findings.push(...findings);
+}
+
+function emptyScanResult(): ScanBatchResult {
+  return { entries: [], findings: [], incomplete: [] };
+}
+
+async function scanRelativeFile(rootDir: string, relativeFile: string): Promise<ScanFileVerdict> {
+  const root = resolve(rootDir);
+  let fullPath: string;
+  try {
+    fullPath = resolveWithinRoot(root, relativeFile);
+  } catch {
+    // Keep the lexical root check fail-closed while retaining this input in the
+    // batch inventory instead of aborting the remaining requested paths.
+    return { status: "incomplete", reason: "io-failure" };
+  }
+  let rootStats: BigIntStats;
+  try {
+    rootStats = await lstat(root, { bigint: true });
+  } catch {
+    return { status: "incomplete", reason: "io-failure" };
+  }
+  if (rootStats.isSymbolicLink()) return { status: "incomplete", reason: "symlink" };
+  if (!rootStats.isDirectory()) return { status: "incomplete", reason: "nonregular" };
+
+  const parentParts = relative(root, dirname(fullPath)).split(sep).filter(Boolean);
+  let current = root;
+
+  for (const part of parentParts) {
+    current = join(current, part);
+    let parentStats: BigIntStats;
+    try {
+      parentStats = await lstat(current, { bigint: true });
+    } catch {
+      return { status: "incomplete", reason: "io-failure" };
+    }
+    if (parentStats.isSymbolicLink()) return { status: "incomplete", reason: "symlink" };
+    if (!parentStats.isDirectory()) return { status: "incomplete", reason: "nonregular" };
+  }
+
+  return scanFile(fullPath);
+}
+
+export async function scanFiles(rootDir: string, relativeFiles: string[]): Promise<ScanBatchResult> {
+  const result = emptyScanResult();
+  for (const relFile of relativeFiles) {
+    const verdict = await scanRelativeFile(rootDir, relFile);
+    recordVerdict(result, relFile, verdict);
+  }
+  return result;
 }
 
 /** Recursively scan every file under rootDir (used for full-tree audits). */
-export async function scanDirectory(rootDir: string): Promise<SecretFinding[]> {
-  const findings: SecretFinding[] = [];
+export async function scanDirectory(rootDir: string): Promise<ScanBatchResult> {
+  const result = emptyScanResult();
+  const resolvedRoot = resolve(rootDir);
 
-  async function walk(dir: string): Promise<void> {
-    const entries = await readdir(dir, { withFileTypes: true });
+  async function walk(dir: string, relativeDir: string): Promise<void> {
+    let directoryStats: BigIntStats;
+    try {
+      directoryStats = await lstat(dir, { bigint: true });
+    } catch {
+      recordVerdict(result, relativeDir || ".", { status: "incomplete", reason: "io-failure" });
+      return;
+    }
+    if (directoryStats.isSymbolicLink()) {
+      recordVerdict(result, relativeDir || ".", { status: "incomplete", reason: "symlink" });
+      return;
+    }
+    if (!directoryStats.isDirectory()) {
+      recordVerdict(result, relativeDir || ".", { status: "incomplete", reason: "nonregular" });
+      return;
+    }
+
+    let entries: Dirent<Buffer>[];
+    try {
+      entries = await readdir(dir, { withFileTypes: true, encoding: "buffer" });
+    } catch {
+      recordVerdict(result, relativeDir || ".", { status: "incomplete", reason: "io-failure" });
+      return;
+    }
     for (const entry of entries) {
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        await walk(full);
-      } else if (entry.isFile()) {
-        const hits = await scanFile(full);
-        for (const hit of hits) findings.push({ file: relative(rootDir, full), ...hit });
+      let entryName: string;
+      try {
+        entryName = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(entry.name);
+        if (!Buffer.from(entryName, "utf8").equals(entry.name)) throw new Error("filename did not round-trip");
+      } catch {
+        const displayName = `[filename-bytes:${entry.name.toString("hex")}]`;
+        recordVerdict(result, join(relativeDir, displayName), {
+          status: "incomplete",
+          reason: "unsupported-encoding",
+        });
+        continue;
+      }
+
+      const full = join(dir, entryName);
+      const relativeFile = relative(resolvedRoot, full);
+      let entryStats: BigIntStats;
+      try {
+        entryStats = await lstat(full, { bigint: true });
+      } catch {
+        recordVerdict(result, relativeFile, { status: "incomplete", reason: "io-failure" });
+        continue;
+      }
+
+      if (entryStats.isSymbolicLink()) {
+        recordVerdict(result, relativeFile, { status: "incomplete", reason: "symlink" });
+      } else if (entryStats.isDirectory()) {
+        await walk(full, relativeFile);
+      } else if (entryStats.isFile()) {
+        recordVerdict(result, relativeFile, await scanFile(full));
+      } else {
+        recordVerdict(result, relativeFile, { status: "incomplete", reason: "nonregular" });
       }
     }
   }
 
-  await walk(rootDir);
-  return findings;
+  await walk(resolvedRoot, "");
+  return result;
 }
 
 // --- Quarantine ---
@@ -362,8 +572,7 @@ export async function quarantineFile(
   return dest;
 }
 
-export interface ScanAndQuarantineResult {
-  findings: SecretFinding[];
+export interface ScanAndQuarantineResult extends ScanBatchResult {
   quarantined: string[]; // relative paths that were moved to quarantine
 }
 
@@ -377,16 +586,16 @@ export async function scanAndQuarantine(
   quarantineDir: string,
   relativeFiles?: string[],
 ): Promise<ScanAndQuarantineResult> {
-  const findings = relativeFiles ? await scanFiles(rootDir, relativeFiles) : await scanDirectory(rootDir);
+  const scanResult = relativeFiles ? await scanFiles(rootDir, relativeFiles) : await scanDirectory(rootDir);
 
-  const flaggedFiles = [...new Set(findings.map((f) => f.file))];
+  const flaggedFiles = [...new Set(scanResult.findings.map((f) => f.file))];
   const quarantined: string[] = [];
   for (const file of flaggedFiles) {
     await quarantineFile(rootDir, quarantineDir, file);
     quarantined.push(file);
   }
 
-  return { findings, quarantined };
+  return { ...scanResult, quarantined };
 }
 
 // --- Alert ---

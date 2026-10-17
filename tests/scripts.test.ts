@@ -229,6 +229,28 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
     expect(invocations).not.toContain("--max-delete=");
   });
 
+  it("keeps binary and oversized imports staged and blocks promotion and mirroring", () => {
+    const harness = createSyncHarness(script);
+    const pendingRoot = join(harness.root, ".local", "state", "mimir", "import-pending");
+    mkdirSync(pendingRoot, { recursive: true });
+    writeFileSync(join(pendingRoot, "binary.bin"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]));
+    writeFileSync(join(pendingRoot, "oversized.txt"), Buffer.alloc(10 * 1024 * 1024 + 1, "x"));
+
+    const { result, invocations } = harness.run({ MOCK_REAL_SCAN: "1" });
+    const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+
+    expect(result.status).not.toBe(0);
+    expect(output).toContain("incomplete 2 item(s)");
+    expect(output).toContain("binary=1");
+    expect(output).toContain("oversized=1");
+    expect(existsSync(join(pendingRoot, "binary.bin"))).toBe(true);
+    expect(existsSync(join(pendingRoot, "oversized.txt"))).toBe(true);
+    expect(existsSync(join(harness.root, "mimir", "binary.bin"))).toBe(false);
+    expect(existsSync(join(harness.root, "mimir", "oversized.txt"))).toBe(false);
+    expect(invocations).not.toContain("-ani --delete --out-format=%i");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
   it("retains scanner-failed content across invocations and clears it only after success", () => {
     const harness = createSyncHarness(script);
     const first = harness.run({

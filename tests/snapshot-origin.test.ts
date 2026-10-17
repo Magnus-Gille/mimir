@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import type { Server } from "node:http";
-import { createApp } from "../src/index.js";
 
 const SOURCE_ID = "123e4567-e89b-12d3-a456-426614174000";
 const FIXTURE_KEY = "snapshot-origin-fixture-key";
@@ -23,6 +22,15 @@ type SnapshotArtifact = {
 type SnapshotManifest = {
   artifacts: SnapshotArtifact[];
 };
+
+type CreateApp = (typeof import("../src/index.js"))["createApp"];
+type App = ReturnType<CreateApp>;
+
+async function loadCreateApp(): Promise<CreateApp> {
+  vi.resetModules();
+  const module = await import("../src/index.js");
+  return module.createApp;
+}
 
 function repositoryRoot(): string {
   return resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -64,7 +72,7 @@ function runPython(
   });
 }
 
-function listen(app: ReturnType<typeof createApp>): Promise<Server> {
+function listen(app: App): Promise<Server> {
   return new Promise((resolveServer, reject) => {
     const server = app.listen(0, "127.0.0.1");
     server.once("error", reject);
@@ -105,6 +113,7 @@ describe("snapshot origin integration", () => {
       ], repositoryRoot());
       expect(created.code, created.stderr).toBe(0);
       const snapshotId = (JSON.parse(created.stdout) as { snapshot_id: string }).snapshot_id;
+      const createApp = await loadCreateApp();
       const app = createApp({ apiKey: FIXTURE_KEY, rootDir: snapshotStore });
       server = await listen(app);
       const acquired = await runPython(["-c", `
@@ -162,6 +171,7 @@ assert result['artifacts'] == 60
 
       const manifestBytes = await readFile(join(bundle, "manifest.json"));
       const manifest = JSON.parse(manifestBytes.toString("utf8")) as SnapshotManifest;
+      const createApp = await loadCreateApp();
       const app = createApp({ apiKey: FIXTURE_KEY, rootDir: snapshotStore, rateLimitMax: 20 });
       server = await listen(app);
       const baseUrl = `http://127.0.0.1:${port(server)}/files/${snapshotId}`;
