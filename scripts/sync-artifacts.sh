@@ -40,18 +40,12 @@ if ! rsync -a --ignore-existing --remove-source-files "$INBOX" "$PENDING/"; then
   exit 1
 fi
 
-PENDING_FILES=$(cd "$PENDING" && find . ! -type d -print | sed 's#^\./##')
-
 # Step 1.5: Secret-scan every pending file, including files left by an older
 # failed invocation. Hits are quarantined outside both staging and $LOCAL.
-if [ -n "$PENDING_FILES" ]; then
-  echo "==> Scanning pending imports for secrets..."
-  if ! printf '%s\n' "$PENDING_FILES" | node "$(dirname "$0")/../dist/cli/secret-scan.js" --stdin "$PENDING" "$QUARANTINE"; then
-    echo "ERROR: secret scan failed; pending files remain staged at $PENDING; refusing to mirror." >&2
-    exit 1
-  fi
-else
-  echo "==> No pending files — skipping secret scan."
+echo "==> Scanning pending imports for secrets..."
+if ! node "$(dirname "$0")/../dist/cli/secret-scan.js" "$PENDING" "$QUARANTINE"; then
+  echo "ERROR: secret scan failed; pending files remain staged at $PENDING; refusing to mirror." >&2
+  exit 1
 fi
 
 # Step 1.6: Promote only verified content. --ignore-existing prevents an

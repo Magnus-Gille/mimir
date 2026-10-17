@@ -66,14 +66,14 @@ case "$*" in
     previous=""
     for argument in "$@"; do source="$previous"; previous="$argument"; done
     destination="$previous"
-    while IFS= read -r staged; do
+    while IFS= read -r -d '' staged; do
       relative="\${staged#"$source"}"
       target="$destination$relative"
       if [ ! -e "$target" ] && [ ! -L "$target" ]; then
         mkdir -p "$(dirname "$target")"
         mv "$staged" "$target"
       fi
-    done < <(find "$source" ! -type d -print)
+    done < <(find "$source" ! -type d -print0)
     exit "\${MOCK_PROMOTE_RC:-0}"
     ;;
   *"-ani --delete --out-format=%i"*)
@@ -99,7 +99,11 @@ exit 0
   executable(
     join(bin, "node"),
     `printf 'node %s\n' "$*" >> "$SYNC_CALLS"
-while IFS= read -r _line; do :; done
+if [ "\${MOCK_REAL_SCAN:-0}" = 1 ]; then
+  shift
+  exec "$REAL_NODE" --import tsx "$REAL_SCAN_CLI" "$@"
+fi
+cat >/dev/null
 exit "\${MOCK_SCAN_RC:-0}"
 `,
   );
@@ -126,6 +130,8 @@ function createSyncHarness(script: (typeof SYNC_SCRIPTS)[number]) {
           PATH: `${bin}:${process.env.PATH ?? ""}`,
           MIMIR_NAS: "test-nas",
           SYNC_CALLS: calls,
+          REAL_NODE: process.execPath,
+          REAL_SCAN_CLI: join(REPO_ROOT, "src", "cli", "secret-scan.ts"),
           ...overrides,
         },
       });
@@ -246,6 +252,46 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
     expect(promotionIndex).toBeLessThan(retryInvocations.indexOf("-ani --delete --out-format=%i"));
     expect(existsSync(pendingRoot)).toBe(false);
     expect(readFileSync(join(harness.root, "mimir", "retry-me.txt"), "utf8")).toContain("staged:retry-me.txt");
+  });
+
+  it("scans exact staged paths with newline, whitespace, and CR characters before promotion", () => {
+    const harness = createSyncHarness(script);
+    const pending = join(harness.root, ".local", "state", "mimir", "import-pending");
+    const quarantine = join(harness.root, "mimir-quarantine");
+    mkdirSync(pending, { recursive: true });
+
+    const riskyPaths = [
+      join(pending, "nested", "line\nbreak.txt"),
+      join(pending, " leading-and-trailing "),
+      join(pending, "carriage\rreturn"),
+    ];
+    for (const path of riskyPaths) {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, "AKIAABCDEFGHIJKLMNOP\n");
+    }
+
+    const cleanPath = join(pending, "ordinary\n nested ", " clean\r file ");
+    mkdirSync(dirname(cleanPath), { recursive: true });
+    writeFileSync(cleanPath, "ordinary content\n");
+    const nestedControl = join(pending, "ordinary", "nested", "control.txt");
+    mkdirSync(dirname(nestedControl), { recursive: true });
+    writeFileSync(nestedControl, "nested control\n");
+
+    const { result, invocations } = harness.run({ MOCK_REAL_SCAN: "1" });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(invocations).toContain("secret-scan.js ");
+    expect(invocations).not.toContain("--stdin");
+    for (const path of riskyPaths) {
+      const relative = path.slice(pending.length + 1);
+      expect(existsSync(path)).toBe(false);
+      expect(existsSync(join(quarantine, relative))).toBe(true);
+    }
+    expect(readFileSync(join(harness.root, "mimir", "ordinary\n nested ", " clean\r file "), "utf8"))
+      .toBe("ordinary content\n");
+    expect(readFileSync(join(harness.root, "mimir", "ordinary", "nested", "control.txt"), "utf8"))
+      .toBe("nested control\n");
+    expect(existsSync(pending)).toBe(false);
   });
 
   it("preserves both files and refuses to mirror when a pending path collides locally", () => {
