@@ -144,9 +144,10 @@ class ModeRequestTests(unittest.TestCase):
                 receipt = _with_abstention(_extended(self.profile, self.now, default), policy="score")
                 self.assertIs(self._search(receipt), receipt)
                 self.assertEqual(self.payloads, [{"query": "north star", "top": 5}])
-                fallback = _with(_extended(self.profile, self.now, default, "lexical_fallback"),
-                                 fallback_reason="vectors_incomplete")
-                self.assertIs(self._search(fallback), fallback)
+                for reason in ("vectors_incomplete", "embedding_unavailable", "embedding_route_unavailable"):
+                    fallback = _with(_extended(self.profile, self.now, default, "lexical_fallback"),
+                                     fallback_reason=reason)
+                    self.assertIs(self._search(fallback), fallback)
 
     def test_server_default_cannot_weaken_lexical_or_abstention(self):
         hybrid = _extended(self.profile, self.now, "hybrid")
@@ -159,6 +160,11 @@ class ModeRequestTests(unittest.TestCase):
             ("lexical fallback must name a semantic request",
              _with(_extended(self.profile, self.now, "hybrid", "lexical_fallback"), requested_mode="lexical")),
             ("served mode differs from advertised", _with_abstention(_with(hybrid, requested_mode="vector"), policy="score")),
+        ) + tuple(
+            # Any configuration error resets the runtime default to lexical (exact v1).
+            ("impossible default fallback " + reason,
+             _with(_extended(self.profile, self.now, "hybrid", "lexical_fallback"), fallback_reason=reason))
+            for reason in sorted(client.FALLBACK_REASONS - client.DEFAULT_FALLBACK_REASONS)
         )
         for label, receipt in cases:
             with self.subTest(case=label):

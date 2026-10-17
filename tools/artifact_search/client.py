@@ -24,6 +24,9 @@ FALLBACK_REASONS = frozenset({
     'invalid_semantic_flag', 'invalid_default_mode', 'semantic_default_requires_enabled',
     'invalid_embedding_revision', 'invalid_embedding_dimensions', 'invalid_abstain_min_cosine',
     'invalid_abstain_min_zscore', 'semantic_default_requires_abstention'})
+# A configuration error resets the runtime default to lexical, so a semantic
+# server default can only fall back for availability reasons.
+DEFAULT_FALLBACK_REASONS = frozenset({'vectors_incomplete', 'embedding_unavailable', 'embedding_route_unavailable'})
 ABSTENTION_REASONS = (None, 'no_vectors', 'below_cosine_floor', 'too_few_units_for_margin', 'below_score_margin')
 MIN_ZSCORE_UNITS = 8
 
@@ -114,6 +117,7 @@ def _shape(value, mode, top):
     what was served. Without ``mode`` the receipt is exact v1 lexical, unless
     it advertises a semantic server default through ``requested_mode``.
     """
+    reasons = FALLBACK_REASONS
     if mode is None:
         if 'requested_mode' not in value:
             _require(value.get('mode') == 'lexical' and value.get('decision') == 'fts5_bm25')
@@ -122,13 +126,14 @@ def _shape(value, mode, top):
         # may be advertised.
         mode = value['requested_mode']
         _require(isinstance(mode, str) and mode in ('hybrid', 'vector'))
+        reasons = DEFAULT_FALLBACK_REASONS
     _require(mode in MODES and value.get('requested_mode') == mode)
     served = value.get('mode')
     if served == 'lexical' and mode == 'lexical' or served == 'lexical_fallback' and mode != 'lexical':
         _require(value.get('decision') == 'fts5_bm25')
         if served == 'lexical':
             return {'requested_mode'}, {'score_kind'}, 'bm25'
-        _require(isinstance(value.get('fallback_reason'), str) and value['fallback_reason'] in FALLBACK_REASONS)
+        _require(isinstance(value.get('fallback_reason'), str) and value['fallback_reason'] in reasons)
         return {'requested_mode', 'fallback_reason'}, {'score_kind'}, 'bm25'
     _require(served == mode)
     extras = {'requested_mode', 'abstention', 'embedding'}
