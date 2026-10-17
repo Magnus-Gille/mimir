@@ -13,9 +13,9 @@ import time
 from urllib.parse import quote, urlsplit
 import uuid
 
-from .client_remote import decode, private_bytes
+from .client_remote import ENVELOPE_LIMIT, LIMIT, decode, private_bytes
 
-LIMIT = 131072
+TRANSPORT_TIMEOUT = 45
 ERRORS = {'credential_unavailable', 'unauthorized', 'retrieval_unavailable', 'invalid_response', 'invalid_request'}
 MODES = ('lexical', 'hybrid', 'vector')
 # Runtime fallback reasons, including every SemanticConfig error code.
@@ -211,7 +211,7 @@ def _transport(profile, payload):
     process = None
     try:
         process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=environment)
-        deadline = time.monotonic() + 45
+        deadline = time.monotonic() + TRANSPORT_TIMEOUT
         chunks = bytearray()
         with selectors.DefaultSelector() as selector:
             os.set_blocking(process.stdin.fileno(), False)
@@ -232,7 +232,7 @@ def _transport(profile, payload):
                     else:
                         data = os.read(process.stdout.fileno(), 16384)
                         chunks.extend(data)
-                        if len(chunks) > LIMIT:
+                        if len(chunks) > ENVELOPE_LIMIT:
                             raise ClientError('invalid_response')
                         if not data:
                             selector.unregister(process.stdout)

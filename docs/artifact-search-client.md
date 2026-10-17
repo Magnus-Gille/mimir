@@ -110,7 +110,17 @@ in another repository or harness is a separate integration action.
 ## Evidence and failure contract
 
 Queries are limited to 4096 characters and an 8192-byte serialized request;
-`top` is an integer from 1 to 5. Responses and SSH output are bounded to 128 KiB.
+`top` is an integer from 1 to 5. The byte limit applies to the UTF-8 JSON request
+as the client sends it (`json.dumps` with `ensure_ascii=False` and default
+separators, for example `{"query": "...", "top": 5}`), so a query within 4096
+characters can still be rejected as
+`invalid_request` when it contains many non-ASCII or JSON-escaped characters
+(quotes, backslashes, control characters). JSON Schema cannot express a byte
+limit, so `TOOL_DEFINITION` states it in its descriptions. Runtime responses are
+bounded to 128 KiB; the helper re-encodes them as compact UTF-8, so the SSH
+output is bounded to 128 KiB plus 64 bytes for the `ok`/`data` wrapper. A runtime
+`400` maps to `invalid_request`, `401`/`403` to `unauthorized`, and any other
+non-200 status to `retrieval_unavailable`; HTTP error bodies are never read.
 SSH completion is limited to 45 seconds, with a 10-second connect timeout and a
 30-second loopback HTTP timeout. No redirects or proxy environment variables are
 used for the loopback request.

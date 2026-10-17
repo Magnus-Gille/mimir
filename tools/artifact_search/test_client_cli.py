@@ -217,6 +217,26 @@ class ClientCliTests(unittest.TestCase):
         self.assertNotIn("mode", agent.TOOL_DEFINITION["inputSchema"]["required"])
         self.assertIn("lexical_fallback", agent.GUIDANCE)
 
+    def test_tool_definition_documents_serialized_byte_limit(self):
+        _, agent = load_entrypoints()
+        query = agent.TOOL_DEFINITION["inputSchema"]["properties"]["query"]
+        self.assertEqual((query["minLength"], query["maxLength"]), (1, 4096))
+        for text in (agent.TOOL_DEFINITION["description"], query["description"]):
+            self.assertIn("8192 bytes", text)
+            self.assertIn("UTF-8", text)
+
+    def test_query_within_char_limit_but_over_byte_limit_is_rejected_before_transport(self):
+        _, agent = load_entrypoints()
+        from tools.artifact_search import client
+
+        for query in ("\u00e9" * 4096, "\x01" * 1400, '"' * 4096):
+            with self.subTest(length=len(query)), patch.object(client, "_transport") as transport, patch.object(client, "load_profile") as profile:
+                result = agent.handle_tool_input({"query": query})
+            self.assertLessEqual(len(query), 4096)
+            self.assertEqual((result["status"], result["error"]["code"]), ("invalid_request", "invalid_request"))
+            transport.assert_not_called()
+            profile.assert_not_called()
+
     def test_human_output_announces_lexical_fallback(self):
         cli, _ = load_entrypoints()
         fallback = {**RECEIPT, "mode": "lexical_fallback", "fallback_reason": "embedding\x1b[31m_unavailable\n"}

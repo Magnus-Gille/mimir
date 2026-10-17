@@ -10,6 +10,8 @@ import sys
 KEY_PATH = Path.home() / '.config/mimir-search/runtime.env'
 PORT = 8791
 LIMIT = 131072
+# Fixed room for the ok/data wrapper around a runtime body of at most LIMIT bytes.
+ENVELOPE_LIMIT = LIMIT + 64
 
 
 class RemoteError(Exception):
@@ -73,6 +75,8 @@ def execute(request):
         response = connection.getresponse()
         if response.status in (401, 403):
             raise RemoteError('unauthorized')
+        if response.status == 400:
+            raise RemoteError('invalid_request')
         if response.status != 200:
             raise RemoteError('retrieval_unavailable')
         if response.getheader('Content-Type', '').split(';')[0].strip() != 'application/json' or response.getheader('Content-Encoding', 'identity') != 'identity':
@@ -89,17 +93,35 @@ def execute(request):
         connection.close()
 
 
-def main():
+def envelope(result):
+    # Compact UTF-8 like the runtime's canonical body, so one within LIMIT fits ENVELOPE_LIMIT.
+    return json.dumps(result, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode('utf-8')
+
+
+def respond(raw):
     try:
-        raw = sys.stdin.buffer.read(8193)
         if len(raw) > 8192:
             raise RemoteError('invalid_request')
-        result = {'ok': True, 'data': execute(decode(raw))}
+        try:
+            request = decode(raw)
+        except (ValueError, UnicodeError, RecursionError):
+            raise RemoteError('invalid_request') from None
+        data = execute(request)
+        try:
+            output = envelope({'ok': True, 'data': data})
+        except (ValueError, UnicodeError, RecursionError):
+            raise RemoteError('invalid_response') from None
+        if len(output) > ENVELOPE_LIMIT:
+            raise RemoteError('invalid_response')
+        return output
     except RemoteError as error:
-        result = {'ok': False, 'error': error.code}
-    except (ValueError, UnicodeError, RecursionError):
-        result = {'ok': False, 'error': 'invalid_request'}
-    print(json.dumps(result, allow_nan=False))
+        return envelope({'ok': False, 'error': error.code})
+
+
+def main():
+    # Bytes, not text: the remote login shell's locale must not choose the encoding.
+    sys.stdout.buffer.write(respond(sys.stdin.buffer.read(8193)))
+    sys.stdout.buffer.flush()
 
 
 if __name__ == '__main__':
