@@ -1,6 +1,48 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync, chmodSync, statSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+
+const fsMockControl = vi.hoisted(() => ({ forceNextLinkExdev: false, failOpenPath: null as string | null }));
+const processMockControl = vi.hoisted(() => ({ failAfterAclStrips: null as number | null }));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    link: (...args: Parameters<typeof actual.link>) => {
+      if (fsMockControl.forceNextLinkExdev) {
+        fsMockControl.forceNextLinkExdev = false;
+        return Promise.reject(Object.assign(new Error("synthetic cross-device error"), { code: "EXDEV" }));
+      }
+      return actual.link(...args);
+    },
+    open: (...args: Parameters<typeof actual.open>) => {
+      if (fsMockControl.failOpenPath === String(args[0])) {
+        fsMockControl.failOpenPath = null;
+        return Promise.reject(Object.assign(new Error("synthetic copy failure"), { code: "EIO" }));
+      }
+      return actual.open(...args);
+    },
+  };
+});
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return {
+    ...actual,
+    spawn: (...args: unknown[]) => {
+      const [command, childArgs, options] = args;
+      if (processMockControl.failAfterAclStrips !== null) {
+        if (processMockControl.failAfterAclStrips > 0) {
+          processMockControl.failAfterAclStrips -= 1;
+        } else {
+          processMockControl.failAfterAclStrips = null;
+          return (actual.spawn as (...values: unknown[]) => unknown)("/bin/false", childArgs, options);
+        }
+      }
+      return (actual.spawn as (...values: unknown[]) => unknown)(command, childArgs, options);
+    },
+  };
+});
 import {
   SECRET_RULES,
   scanText,
@@ -14,10 +56,12 @@ import {
 
 const TEST_ROOT = join(import.meta.dirname, "__test_fixtures_secret_scan__");
 const QUARANTINE_ROOT = join(import.meta.dirname, "__test_fixtures_secret_scan_quarantine__");
+const OUTSIDE_ROOT = join(import.meta.dirname, "__test_fixtures_secret_scan_outside__");
 
 function cleanup() {
   rmSync(TEST_ROOT, { recursive: true, force: true });
   rmSync(QUARANTINE_ROOT, { recursive: true, force: true });
+  rmSync(OUTSIDE_ROOT, { recursive: true, force: true });
 }
 
 beforeEach(() => {
@@ -211,6 +255,209 @@ describe("quarantineFile", () => {
     expect(existsSync(src)).toBe(false);
     expect(existsSync(dest)).toBe(true);
     expect(dest).toBe(join(QUARANTINE_ROOT, "sub", "secret.txt"));
+  });
+
+  it("makes quarantine directories private and protects a permissive source before moving it", async () => {
+    const nested = join(TEST_ROOT, "nested", "secret.txt");
+    mkdirSync(join(TEST_ROOT, "nested"), { recursive: true });
+    writeFileSync(nested, "synthetic confidential bytes\n", { mode: 0o644 });
+    chmodSync(nested, 0o644);
+
+    const dest = await quarantineFile(TEST_ROOT, QUARANTINE_ROOT, "nested/secret.txt");
+
+    expect(readFileSync(dest, "utf8")).toBe("synthetic confidential bytes\n");
+    expect(statSync(dest).mode & 0o777).toBe(0o600);
+    expect(statSync(QUARANTINE_ROOT).mode & 0o777).toBe(0o700);
+    expect(statSync(join(QUARANTINE_ROOT, "nested")).mode & 0o777).toBe(0o700);
+  });
+
+  it("secures existing owned quarantine directories before using them", async () => {
+    mkdirSync(join(QUARANTINE_ROOT, "nested"), { recursive: true, mode: 0o755 });
+    chmodSync(QUARANTINE_ROOT, 0o755);
+    chmodSync(join(QUARANTINE_ROOT, "nested"), 0o755);
+    mkdirSync(join(TEST_ROOT, "nested"));
+    writeFileSync(join(TEST_ROOT, "nested", "secret.txt"), "synthetic payload\n", { mode: 0o644 });
+
+    await quarantineFile(TEST_ROOT, QUARANTINE_ROOT, "nested/secret.txt");
+
+    expect(statSync(QUARANTINE_ROOT).mode & 0o777).toBe(0o700);
+    expect(statSync(join(QUARANTINE_ROOT, "nested")).mode & 0o777).toBe(0o700);
+  });
+
+  it("rejects a symlink quarantine root without changing its target", async () => {
+    const target = join(TEST_ROOT, "target");
+    mkdirSync(target, { mode: 0o755 });
+    symlinkSync(target, QUARANTINE_ROOT);
+    writeFileSync(join(TEST_ROOT, "secret.txt"), "synthetic payload\n");
+
+    await expect(quarantineFile(TEST_ROOT, QUARANTINE_ROOT, "secret.txt")).rejects.toThrow(/symlink/);
+
+    expect(statSync(target).mode & 0o777).toBe(0o755);
+    expect(existsSync(join(TEST_ROOT, "secret.txt"))).toBe(true);
+  });
+
+  it("rejects a symlink in the quarantine directory hierarchy without changing its target", async () => {
+    mkdirSync(QUARANTINE_ROOT);
+    const target = join(TEST_ROOT, "target");
+    mkdirSync(target, { mode: 0o755 });
+    symlinkSync(target, join(QUARANTINE_ROOT, "nested"));
+    mkdirSync(join(TEST_ROOT, "nested"));
+    writeFileSync(join(TEST_ROOT, "nested", "secret.txt"), "synthetic payload\n");
+
+    await expect(quarantineFile(TEST_ROOT, QUARANTINE_ROOT, "nested/secret.txt")).rejects.toThrow(/symlink/);
+
+    expect(statSync(target).mode & 0o777).toBe(0o755);
+    expect(existsSync(join(TEST_ROOT, "nested", "secret.txt"))).toBe(true);
+  });
+
+  it("rejects a quarantine parent alias that resolves into the servable root", async () => {
+    const alias = join(TEST_ROOT, "outside-alias");
+    symlinkSync(TEST_ROOT, alias);
+    const aliasedQuarantine = join(alias, "quarantine");
+    writeFileSync(join(TEST_ROOT, "secret.txt"), "synthetic payload\n");
+
+    await expect(quarantineFile(TEST_ROOT, aliasedQuarantine, "secret.txt")).rejects.toThrow(/inside root/);
+
+    expect(existsSync(join(TEST_ROOT, "secret.txt"))).toBe(true);
+    expect(existsSync(join(TEST_ROOT, "quarantine"))).toBe(false);
+  });
+
+  it("keeps the source and existing quarantine data when a destination collision occurs", async () => {
+    const src = join(TEST_ROOT, "secret.txt");
+    const dest = join(QUARANTINE_ROOT, "secret.txt");
+    writeFileSync(src, "source payload\n", { mode: 0o644 });
+    mkdirSync(QUARANTINE_ROOT);
+    writeFileSync(dest, "existing payload\n", { mode: 0o600 });
+
+    await expect(quarantineFile(TEST_ROOT, QUARANTINE_ROOT, "secret.txt")).rejects.toMatchObject({ code: "EEXIST" });
+
+    expect(existsSync(src)).toBe(true);
+    expect(readFileSync(dest, "utf8")).toBe("existing payload\n");
+  });
+
+  it("uses a private exclusive copy on EXDEV before removing the source", async () => {
+    const src = join(TEST_ROOT, "secret.txt");
+    const dest = join(QUARANTINE_ROOT, "secret.txt");
+    writeFileSync(src, "synthetic cross-device payload\n", { mode: 0o644 });
+    fsMockControl.forceNextLinkExdev = true;
+
+    try {
+      await quarantineFile(TEST_ROOT, QUARANTINE_ROOT, "secret.txt");
+    } finally {
+      fsMockControl.forceNextLinkExdev = false;
+    }
+
+    expect(existsSync(src)).toBe(false);
+    expect(readFileSync(dest, "utf8")).toBe("synthetic cross-device payload\n");
+    expect(statSync(dest).mode & 0o777).toBe(0o600);
+  });
+
+  it("preserves an existing destination and source when the EXDEV copy collides", async () => {
+    const src = join(TEST_ROOT, "secret.txt");
+    const dest = join(QUARANTINE_ROOT, "secret.txt");
+    writeFileSync(src, "source payload\n", { mode: 0o644 });
+    mkdirSync(QUARANTINE_ROOT);
+    writeFileSync(dest, "existing payload\n", { mode: 0o600 });
+    fsMockControl.forceNextLinkExdev = true;
+
+    try {
+      await expect(quarantineFile(TEST_ROOT, QUARANTINE_ROOT, "secret.txt")).rejects.toMatchObject({ code: "EEXIST" });
+    } finally {
+      fsMockControl.forceNextLinkExdev = false;
+    }
+
+    expect(existsSync(src)).toBe(true);
+    expect(readFileSync(dest, "utf8")).toBe("existing payload\n");
+  });
+
+  it("retains the source when the EXDEV copy cannot create a destination", async () => {
+    const src = join(TEST_ROOT, "secret.txt");
+    const dest = join(QUARANTINE_ROOT, "secret.txt");
+    writeFileSync(src, "synthetic payload\n", { mode: 0o644 });
+    fsMockControl.forceNextLinkExdev = true;
+    fsMockControl.failOpenPath = dest;
+
+    try {
+      await expect(quarantineFile(TEST_ROOT, QUARANTINE_ROOT, "secret.txt")).rejects.toMatchObject({ code: "EIO" });
+    } finally {
+      fsMockControl.forceNextLinkExdev = false;
+      fsMockControl.failOpenPath = null;
+    }
+
+    expect(existsSync(src)).toBe(true);
+    expect(existsSync(dest)).toBe(false);
+  });
+
+  it("rejects symbolic-link and non-regular source files", async () => {
+    const target = join(TEST_ROOT, "target.txt");
+    writeFileSync(target, "synthetic payload\n");
+    symlinkSync(target, join(TEST_ROOT, "link.txt"));
+    mkdirSync(join(TEST_ROOT, "directory"));
+
+    await expect(quarantineFile(TEST_ROOT, QUARANTINE_ROOT, "link.txt")).rejects.toThrow();
+    await expect(quarantineFile(TEST_ROOT, QUARANTINE_ROOT, "directory")).rejects.toThrow(/non-regular/);
+    expect(existsSync(target)).toBe(true);
+  });
+
+  it("rejects a source parent alias outside the root before changing source permissions", async () => {
+    mkdirSync(OUTSIDE_ROOT);
+    const externalFile = join(OUTSIDE_ROOT, "secret.txt");
+    writeFileSync(externalFile, "synthetic outside payload\n", { mode: 0o644 });
+    chmodSync(externalFile, 0o644);
+    symlinkSync(OUTSIDE_ROOT, join(TEST_ROOT, "external"));
+
+    await expect(quarantineFile(TEST_ROOT, QUARANTINE_ROOT, "external/secret.txt")).rejects.toThrow(/outside root/);
+
+    expect(existsSync(externalFile)).toBe(true);
+    expect(statSync(externalFile).mode & 0o777).toBe(0o644);
+  });
+
+  it("creates a missing quarantine parent chain without weakening created directory modes", async () => {
+    mkdirSync(OUTSIDE_ROOT);
+    const customParent = join(OUTSIDE_ROOT, "missing", "intermediate");
+    const customQuarantine = join(customParent, "quarantine");
+    writeFileSync(join(TEST_ROOT, "secret.txt"), "synthetic payload\n");
+
+    const dest = await quarantineFile(TEST_ROOT, customQuarantine, "secret.txt");
+
+    expect(existsSync(dest)).toBe(true);
+    expect(existsSync(join(TEST_ROOT, "secret.txt"))).toBe(false);
+    expect(statSync(OUTSIDE_ROOT).mode & 0o777).toBe(0o755);
+    expect(statSync(OUTSIDE_ROOT + "/missing").mode & 0o777).toBe(0o700);
+    expect(statSync(customParent).mode & 0o777).toBe(0o700);
+    expect(statSync(customQuarantine).mode & 0o777).toBe(0o700);
+  });
+
+  it.skipIf(process.platform !== "darwin")("removes inherited everyone ACLs from the quarantine tree and file", async () => {
+    mkdirSync(OUTSIDE_ROOT);
+    const source = join(TEST_ROOT, "nested", "secret.txt");
+    mkdirSync(join(TEST_ROOT, "nested"));
+    writeFileSync(source, "synthetic ACL payload\n", { mode: 0o644 });
+    const acl = "everyone allow read,search,file_inherit,directory_inherit";
+    execFileSync("/bin/chmod", ["+a", acl, OUTSIDE_ROOT]);
+    execFileSync("/bin/chmod", ["+a", "everyone allow read", source]);
+    const customQuarantine = join(OUTSIDE_ROOT, "quarantine");
+
+    await quarantineFile(TEST_ROOT, customQuarantine, "nested/secret.txt");
+
+    const listing = execFileSync("/bin/ls", ["-lde", customQuarantine, join(customQuarantine, "nested"), join(customQuarantine, "nested", "secret.txt")], { encoding: "utf8" });
+    expect(listing).not.toMatch(/everyone/i);
+  });
+
+  it.skipIf(process.platform !== "darwin")("fails closed and retains the source if ACL removal fails", async () => {
+    const source = join(TEST_ROOT, "secret.txt");
+    writeFileSync(source, "synthetic ACL failure payload\n", { mode: 0o644 });
+    processMockControl.failAfterAclStrips = 1;
+
+    try {
+      await expect(quarantineFile(TEST_ROOT, QUARANTINE_ROOT, "secret.txt")).rejects.toThrow(/ACL/);
+    } finally {
+      processMockControl.failAfterAclStrips = null;
+    }
+
+    expect(existsSync(source)).toBe(true);
+    expect(statSync(source).mode & 0o777).toBe(0o644);
+    expect(existsSync(join(QUARANTINE_ROOT, "secret.txt"))).toBe(false);
   });
 
   it("refuses to quarantine a path that escapes the root", async () => {
