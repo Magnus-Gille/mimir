@@ -70,12 +70,38 @@ die() {
   exit 1
 }
 
-# Unexpected command failure after preflight (e.g. rclone sync aborts).
+# Byte offset of $LOG just before `rclone sync` (empty until then). The log is
+# append-only and shared across runs, so only this run's tail may be inspected.
+SYNC_LOG_START=""
+
+# Print how many distinct files the storage provider rejected for path length in
+# this run's sync output (0 if none, or if sync never started). Always succeeds:
+# it runs inside the failure handler, where a stray non-zero would mask the rc.
+count_pathlen_rejections() {
+  case "$SYNC_LOG_START" in ''|*[!0-9]*) echo 0; return 0;; esac
+  [ -f "$LOG" ] || { echo 0; return 0; }
+  { tail -c +"$((SYNC_LOG_START + 1))" "$LOG" 2>/dev/null \
+      | grep -iE 'ERROR : .*Failed to copy.*(pathIsTooLong|file name too long|path too long|name too long)' \
+      | sed -E 's/^(.* )?ERROR : //; s/: Failed to copy.*$//' \
+      | sort -u \
+      | grep -c . ; } || true
+}
+
+# Unexpected command failure after preflight (e.g. rclone sync aborts). A sync
+# that fails only because the provider rejects over-long encrypted paths gets a
+# self-explaining message instead of the generic one (mimir#58).
 on_err() {
-  local rc=$?
+  local rc=$? n
   trap - ERR
-  log "ERROR: offsite backup failed (exit ${rc})"
-  push_panel fail "backup failed (exit ${rc}) — see ${LOG}"
+  n=$(count_pathlen_rejections || true)
+  case "$n" in ''|*[!0-9]*) n=0;; esac
+  if [ "$n" -gt 0 ]; then
+    log "ERROR: offsite backup incomplete: ${n} file(s) exceed the storage provider's encrypted path-length limit; deletions withheld this run (rclone exit ${rc}) — see docs/offsite-backup.md \"Path-length budget\""
+    push_panel fail "backup incomplete (exit ${rc}): ${n} files exceed provider path-length limit; deletions withheld — see ${LOG}"
+  else
+    log "ERROR: offsite backup failed (exit ${rc})"
+    push_panel fail "backup failed (exit ${rc}) — see ${LOG}"
+  fi
   exit "${rc}"
 }
 trap on_err ERR
@@ -167,6 +193,8 @@ log "starting offsite backup ${DRY_RUN:+(dry-run) }${SOURCE} → ${DEST} (archiv
 # Mirror the current state. Overwritten/deleted files are MOVED into the per-run
 # archive dir (never destroyed). --max-delete is a second-line guard behind the
 # preflight gate above.
+# Remember where this run's output starts (see count_pathlen_rejections).
+SYNC_LOG_START=$(wc -c < "$LOG" | tr -d ' ')
 # shellcheck disable=SC2086
 "$RCLONE" sync "${SOURCE}/" "$DEST" \
   --backup-dir "$ARCHIVE" \
