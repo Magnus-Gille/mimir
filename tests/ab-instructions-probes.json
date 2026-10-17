@@ -71,6 +71,12 @@
       "target": "docs/artifact-search-runtime.md"
     },
     {
+      "id": "artifact-search-client",
+      "kind": "retrieval",
+      "prompt": "How does a local agent run the pinned search client over SSH, and which receipt fields does it verify before trusting a result?",
+      "target": "docs/artifact-search-client.md"
+    },
+    {
       "id": "artifact-search-heldout-evaluation",
       "kind": "retrieval",
       "prompt": "How are proposed search questions approved and frozen before measuring positive, distractor and miss retrieval quality?",
