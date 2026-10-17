@@ -20,6 +20,7 @@ describe("checked-in Mímir systemd unit", () => {
     expect(unitProperty("mimir.service", "EnvironmentFile")).toBe("/home/magnus/mimir-server/.env");
     expect(unitProperty("mimir.service", "ReadWritePaths")).toBe("/home/magnus/mimir-server");
     expect(unitProperty("mimir.service", "ReadOnlyPaths")).toBe("/home/magnus/mimir");
+    expect(unitProperty("mimir-offsite.service", "UMask")).toBe("0077");
   });
 
   it.each(["magnus", "archive"])("renders the HTTP service paths for deployment user %s", (user) => {
@@ -45,6 +46,7 @@ describe("checked-in Mímir systemd unit", () => {
     expect(offsite.stdout).toContain("User=archive");
     expect(offsite.stdout).toContain("ReadWritePaths=/home/archive/.config/rclone");
     expect(offsite.stdout).toContain("ReadOnlyPaths=/home/archive/mimir");
+    expect(offsite.stdout).toContain("UMask=0077");
   });
 });
 
