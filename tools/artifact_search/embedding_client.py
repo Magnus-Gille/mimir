@@ -33,7 +33,7 @@ def payload_bytes(inputs, identity):
 
 class M5Embedder:
     def __init__(self, identity: EmbeddingIdentity, base_url: str, api_key: str,
-                 timeout=30, opener=None, sleep=time.sleep):
+                 timeout=30, opener=None, sleep=time.sleep, deadline=None, clock=time.monotonic):
         parts = urlsplit(base_url)
         try:
             _ = parts.port
@@ -60,6 +60,17 @@ class M5Embedder:
         self.timeout = timeout
         self.opener = opener or build_opener(ProxyHandler({}), _NoRedirect())
         self.sleep = sleep
+        # Optional absolute monotonic deadline across every request, retry and sleep.
+        self.deadline = deadline
+        self.clock = clock
+
+    def _remaining(self):
+        if self.deadline is None:
+            return self.timeout
+        left = self.deadline - self.clock()
+        if left <= 0:
+            raise EmbedderUnavailable('embedding_deadline_exceeded')
+        return min(self.timeout, left)
 
     @classmethod
     def from_env(cls, identity):
@@ -71,8 +82,8 @@ class M5Embedder:
                           headers={'Authorization': 'Bearer ' + self.api_key,
                                    'Content-Type': 'application/json', 'User-Agent': 'mimir-artifact-search/1'})
             try:
-                with self.opener.open(req, timeout=self.timeout) as response:
-                    raw = response.read(4*1024*1024 + 1)
+                with self.opener.open(req, timeout=self._remaining()) as response:
+                    raw = self._read_body(response, 4*1024*1024 + 1)
                 if len(raw) > 4*1024*1024:
                     raise EmbedderUnavailable('embedding_response_too_large')
                 return json.loads(raw)
@@ -83,7 +94,8 @@ class M5Embedder:
                         delay = None
                 except (ValueError, TypeError):
                     delay = None
-                if attempt == 0 and error.code in {429, 503} and delay is not None and delay <= 2:
+                fits = self.deadline is None or delay is not None and self.clock() + delay < self.deadline
+                if attempt == 0 and error.code in {429, 503} and delay is not None and delay <= 2 and fits:
                     error.close()
                     self.sleep(delay)
                     continue
@@ -93,6 +105,27 @@ class M5Embedder:
                 raise EmbedderUnavailable('embedding_transport_error') from error
             except (ValueError, UnicodeError) as error:
                 raise EmbedderUnavailable('embedding_invalid_json') from error
+
+    def _read_body(self, response, limit):
+        """Read incrementally and refuse a body that finishes past the deadline.
+
+        This bounds trickled bodies without signals, but HTTP chunk framing can
+        take several socket reads inside one ``read1``, so it is best-effort; the
+        runtime's main-thread watchdog is what makes the bound absolute.
+        """
+        reader = getattr(response, 'read1', None)
+        if self.deadline is None or reader is None:
+            return response.read(limit)
+        chunks, size = [], 0
+        while size < limit:
+            self._remaining()
+            chunk = reader(min(65536, limit - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        self._remaining()  # never accept a response that completed too late
+        return b''.join(chunks)
 
     def _verify_release(self):
         body = self._request(self.base_url[:-3] + '/portal/me')
@@ -120,7 +153,7 @@ class M5Embedder:
                 if item['index'] != index or item['object'] != 'embedding':
                     raise ValueError('invalid order')
                 vectors.append(normalize(item['embedding'], self.identity.dimensions))
-        except (KeyError, ValueError, TypeError, IndexError) as error:
+        except (KeyError, ValueError, TypeError, IndexError, ArithmeticError) as error:
             raise EmbedderUnavailable('embedding_invalid_response') from error
         self._verify_release()
         return vectors

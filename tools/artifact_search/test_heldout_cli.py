@@ -181,6 +181,57 @@ class HeldoutCliTests(unittest.TestCase):
         self.assertEqual(report["effective_modes"], {"heldout": "lexical_fallback"})
         self.assertEqual(report["results"][0]["mode"], "lexical_fallback")
 
+    def test_runtime_adapter_evaluates_the_served_path_after_preflight(self) -> None:
+        draft, draft_digest = self._write_labels(
+            "runtime-draft.json", [self._case("heldout", "private query", "miss", [])], status="draft")
+        with patch.object(heldout_cli, "_runtime") as construct:
+            with self.assertRaisesRegex(HeldoutError, "approval_required"):
+                heldout_cli.run_cli(draft, self.snapshot_manifest, self._calibration(), draft_digest, None,
+                                    mode="hybrid", runtime_state=self.workspace / "state",
+                                    runtime_handoff=self.workspace / "handoff.json")
+            construct.assert_not_called()
+
+        labels, digest = self._write_labels(
+            "runtime.json",
+            [self._case("positive", "private runtime query", "positive",
+                        [{"path": "answer.txt", "kind": "page", "number": 1, "sha256": self.answer_sha}]),
+             self._case("miss", "absent runtime query", "miss", [])],
+        )
+        calls = []
+        answer_sha = self.answer_sha
+
+        class FakeRuntime:
+            def search(self, query, top, mode):
+                calls.append((top, mode))
+                if query == "private runtime query":
+                    return {"mode": "hybrid", "results": [{"path": "answer.txt", "sha256": answer_sha,
+                                                           "locator": {"kind": "page", "number": 1}}]}
+                return {"mode": "hybrid", "results": [], "abstained": True}
+
+        with patch.object(heldout_cli, "_runtime", return_value=FakeRuntime()) as construct:
+            report = heldout_cli.run_cli(labels, self.snapshot_manifest, self._calibration(), digest, None,
+                                         mode="hybrid", runtime_state=self.workspace / "state",
+                                         runtime_handoff=self.workspace / "handoff.json")
+        construct.assert_called_once_with(self.workspace / "state", self.workspace / "handoff.json")
+        self.assertEqual(calls, [(5, "hybrid"), (5, "hybrid")])
+        self.assertEqual(report["evaluated_path"], "runtime")
+        self.assertEqual(report["effective_modes"], {"positive": "hybrid", "miss": "hybrid"})
+        self.assertEqual((report["positive_hit_at_k"], report["miss_pass_rate"]), (1.0, 1.0))
+
+    def test_runtime_adapter_takes_model_settings_only_from_service_config(self) -> None:
+        labels, digest = self._write_labels("conflict.json", [self._case("heldout", "q", "miss", [])])
+        for options in ({"embedding_revision": "revision"}, {"min_score": 0.5}, {"dimensions": 768},
+                        {"top": 6}, {"runtime_handoff": None}):
+            arguments = dict(mode="vector", runtime_state=self.workspace / "state",
+                             runtime_handoff=self.workspace / "handoff.json")
+            arguments.update(options)
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                heldout_cli.run_cli(labels, self.snapshot_manifest, self._calibration(), digest, None, **arguments)
+        with self.assertRaises(ValueError):
+            heldout_cli.run_cli(labels, self.snapshot_manifest, self._calibration(), digest,
+                                self.workspace / "index.sqlite3", runtime_state=self.workspace / "state",
+                                runtime_handoff=self.workspace / "handoff.json")
+
     def test_invalid_floor_and_embedder_error_are_bounded_json(self) -> None:
         with self.assertRaisesRegex(ValueError, "invalid_min_score"):
             heldout_cli._validate_min_score(float("nan"))

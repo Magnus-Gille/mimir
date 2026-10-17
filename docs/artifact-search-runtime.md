@@ -2,8 +2,10 @@
 
 The separately packaged Python service consumes the #41 source contract. It does
 not add an Express route, provision credentials, install a service or deploy to M5.
-The initial service is lexical-only. The existing offline PoC retains vector and
-hybrid comparison; those modes are not exposed as production-quality retrieval.
+Lexical retrieval is the default. Opt-in `vector` and `hybrid` modes, which
+are off unless the operator enables them, are specified in
+[artifact-search-semantic.md](artifact-search-semantic.md). They are not accepted
+as production-quality retrieval.
 Python 3.10+ with SQLite FTS5 is required; PDF extraction also requires Poppler.
 
 ## Trusted freshness handoff
@@ -72,7 +74,8 @@ equivalent enforced memory cap here: input, unit, extracted-text, process count
 and duration caps still apply. Only one request and one index child run at once.
 Snapshot limits remain 20 MiB/file, 256 MiB/corpus and 10,000 entries. Index limits
 include 50,000 units and one million extracted characters per artifact. State over
-512 MiB blocks further job work; pruning is explicit and never deletes originals.
+512 MiB, excluding the separately capped 128 MiB of optional vector caches, blocks
+further job work. Pruning is explicit and never deletes originals.
 HTTP pulls retain no-redirect/no-proxy behavior and source request pacing.
 
 Transient source conditions — `source_unavailable`, HTTP 408/429/5xx and a lapsed
@@ -111,15 +114,34 @@ shell command or result URL. Only the exact loopback Host is accepted.
   means not ready; authentication failures reveal no index metadata. Readiness
   covers the index and trusted handoff only. It cannot certify every original;
   originals are checked on retrieval and deployment acceptance also needs a probe.
-- `POST /search`: JSON `{"query":"...","top":5}`. Up to five results and 4,096
-  query characters; the whole body is bounded to 8,192 bytes. No retrieval jobs,
-  source URLs or mutable configuration are accepted through this API.
+- `POST /search`: JSON `{"query":"...","top":5}`, with an optional
+  `"mode": "lexical"|"hybrid"|"vector"`. Up to five results and 4,096 query
+  characters; the whole body is bounded to 8,192 bytes. No retrieval jobs,
+  source URLs or mutable configuration are accepted through this API. A semantic
+  mode that cannot be served returns lexical results labelled `lexical_fallback`
+  with a `fallback_reason`.
 
 Each result contains artifact ID/path/hash, source ID, snapshot ID, original
 credential-free Mímir URL, physical page/slide/section locator, bounded title and
 snippet, BM25 score and `verification: original_sha256_matched`. Response metadata
 names the lexical/BM25 decision, observation deadline and whether it returned no
-results. Scores are not confidence probabilities; empty results do not certify
+results.
+
+**Compatibility contract.** A request that omits `mode`, while the configured
+default is lexical, returns exactly this v1 shape with no added keys:
+
+- response keys: `mode`, `decision`, `results`, `snapshot_id`, `source_id`,
+  `observed_at`, `expires_at`, `verified_at`, `release`, `package_sha256`,
+  `abstained`;
+- result keys: `path`, `artifact_id`, `sha256`, `locator`, `title`, `snippet`,
+  `score`, `mimir_url`, `source_id`, `snapshot_id`, `verification`.
+
+The installed `mimir-search` client validates these exact sets. Sending any
+explicit `mode`, including `"lexical"`, opts into the extended shape:
+`requested_mode` plus per-result `score_kind`, and for semantic responses
+`fallback_reason`, `abstention`, `embedding`, `candidate_window` and `cosine`. A
+semantic configured default cannot be expressed in v1, so the client must accept
+the extended shape before any default is changed. Scores are not confidence probabilities; empty results do not certify
 that an answer is absent. Result references confer no file access: agents must
 fetch through their own authorized Mímir path and verify the byte hash again.
 

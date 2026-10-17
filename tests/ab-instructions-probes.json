@@ -83,6 +83,12 @@
       "target": "docs/artifact-search-operations.md"
     },
     {
+      "id": "artifact-search-semantic-modes",
+      "kind": "retrieval",
+      "prompt": "Where are search runtime vectors cached, when does hybrid retrieval fall back to lexical, and what abstention is required before a semantic default?",
+      "target": "docs/artifact-search-semantic.md"
+    },
+    {
       "id": "secret-scan-quarantine-control",
       "kind": "control",
       "prompt": "If an inbox import contains a private key or other secret-looking token, what must happen before it can reach the NAS mirror?",

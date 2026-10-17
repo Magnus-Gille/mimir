@@ -70,3 +70,92 @@ class ClientTests(unittest.TestCase):
             with self.subTest(count=len(inputs)), self.assertRaises(ValueError):
                 client.embed(inputs)
         self.assertEqual(transport.requests, [])
+
+    def test_absolute_deadline_bounds_requests_retries_and_sleeps(self):
+        from tools.artifact_search.embedding_client import M5Embedder, EmbedderUnavailable
+        now = [0.0]
+
+        class SlowBusy:
+            def __init__(self):
+                self.timeouts = []
+
+            def open(self, request, timeout):
+                self.timeouts.append(timeout)
+                now[0] += timeout  # every request uses its full allowance, then is busy
+                raise HTTPError('http://localhost/v1', 503, 'busy', {'Retry-After': '2'}, io.BytesIO(b''))
+
+        def sleep(seconds):
+            now[0] += seconds
+
+        transport = SlowBusy()
+        client = M5Embedder(self.identity(), 'http://localhost/v1', 'synthetic-key', timeout=8,
+                            opener=transport, sleep=sleep, deadline=11.0, clock=lambda: now[0])
+        with self.assertRaises(EmbedderUnavailable) as caught:
+            client.embed(['x'])
+        self.assertLessEqual(now[0], 11.0)
+        self.assertEqual(transport.timeouts[0], 8)
+        self.assertLessEqual(sum(transport.timeouts), 11.0)
+        expired = M5Embedder(self.identity(), 'http://localhost/v1', 'synthetic-key', opener=Transport([]),
+                             deadline=5.0, clock=lambda: 5.0)
+        with self.assertRaises(EmbedderUnavailable) as late:
+            expired.embed(['x'])
+        self.assertEqual(str(late.exception), 'embedding_deadline_exceeded')
+
+    def test_overflowing_numbers_are_an_invalid_response(self):
+        from tools.artifact_search.embedding_client import M5Embedder, EmbedderUnavailable
+        payload = self.payload()
+        payload['data'][0]['embedding'] = [10 ** 400] + [0.0] * 127
+        client = M5Embedder(self.identity(), 'http://localhost/v1', 'synthetic-key',
+                            opener=Transport([self.release(), payload, self.release()]))
+        with self.assertRaises(EmbedderUnavailable) as caught:
+            client.embed(['x'])
+        self.assertEqual(str(caught.exception), 'embedding_invalid_response')
+
+    def test_trickled_response_body_cannot_outlive_the_deadline(self):
+        from tools.artifact_search.embedding_client import M5Embedder, EmbedderUnavailable
+        now = [0.0]
+        body = json.dumps(self.release()).encode()
+
+        class Trickle(io.BytesIO):
+            def read1(self, size=-1):
+                now[0] += 1.0  # one byte per (sub-timeout) second, as a slow peer would send
+                return super().read1(1)
+
+            def read(self, size=-1):
+                raise AssertionError('body must be read incrementally against the deadline')
+
+        class Opener:
+            def open(self, request, timeout):
+                return Trickle(body)
+
+        client = M5Embedder(self.identity(), 'http://localhost/v1', 'synthetic-key', timeout=8,
+                            opener=Opener(), deadline=5.0, clock=lambda: now[0])
+        with self.assertRaises(EmbedderUnavailable) as caught:
+            client.embed(['x'])
+        self.assertEqual(str(caught.exception), 'embedding_deadline_exceeded')
+        self.assertLessEqual(now[0], 6.0)
+
+    def test_body_completing_after_the_deadline_is_not_accepted(self):
+        from tools.artifact_search.embedding_client import M5Embedder, EmbedderUnavailable
+        now = [0.0]
+
+        class SlowEof(io.BytesIO):
+            def read1(self, size=-1):
+                chunk = super().read1(size)
+                if not chunk:
+                    now[0] = 10.0  # e.g. a trickled chunk trailer before EOF
+                return chunk
+
+        responses = iter([io.BytesIO(json.dumps(self.release()).encode()),
+                          io.BytesIO(json.dumps(self.payload()).encode()),
+                          SlowEof(json.dumps(self.release()).encode())])
+
+        class Opener:
+            def open(self, request, timeout):
+                return next(responses)
+
+        client = M5Embedder(self.identity(), 'http://localhost/v1', 'synthetic-key', opener=Opener(),
+                            deadline=5.0, clock=lambda: now[0])
+        with self.assertRaises(EmbedderUnavailable) as caught:
+            client.embed(['x'])
+        self.assertEqual(str(caught.exception), 'embedding_deadline_exceeded')

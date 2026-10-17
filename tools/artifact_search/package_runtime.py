@@ -13,7 +13,8 @@ import uuid
 import zipfile
 
 MODULES = ('__init__.py', 'core.py', 'extract.py', 'snapshot.py', 'snapshot_delta.py',
-           'snapshot_http.py', 'runtime_index.py', 'runtime.py', 'operations.py')
+           'snapshot_http.py', 'runtime_index.py', 'runtime.py', 'operations.py',
+           'vectors.py', 'embedding_client.py', 'runtime_vectors.py')
 SHA = re.compile(r'^[0-9a-f]{40}$')
 BOOT = '''import hashlib, json, os, sys, zipfile
 with zipfile.ZipFile(sys.argv[0]) as package:
