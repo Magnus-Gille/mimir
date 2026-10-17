@@ -8,7 +8,7 @@ import sys
 import unicodedata
 
 from .agent_tool import TOOL_DEFINITION, handle_tool_input
-from .client import ClientError, search
+from .client import MODES, ClientError, search
 
 
 _CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -35,9 +35,11 @@ def _safe_text(value) -> str:
 
 def _human(receipt: dict) -> str:
     results = receipt.get("results", [])
-    if not results:
-        return "Inga träffar. Det bevisar inte att informationen saknas."
     lines = []
+    if receipt.get("mode") == "lexical_fallback":
+        lines.append(f"Semantisk sökning ej tillgänglig ({_safe_text(receipt.get('fallback_reason', ''))}); visar lexikala träffar.")
+    if not results:
+        lines.append("Inga träffar. Det bevisar inte att informationen saknas.")
     for result in results:
         path = _safe_text(result.get("path", ""))
         locator = result.get("locator") or {}
@@ -82,6 +84,7 @@ def main(argv=None) -> int:
     parser = _Parser(description=__doc__)
     parser.add_argument("query", nargs="?", help="Search text (omit when using --query-stdin or --tool)")
     parser.add_argument("--top", help="Number of results (1–5; default 5)")
+    parser.add_argument("--mode", choices=MODES, help="Retrieval mode (default: lexical v1 receipt)")
     parser.add_argument("--config", help="Path to the client profile")
     parser.add_argument("--json", action="store_true", help="Emit the validated receipt as JSON")
     modes = parser.add_mutually_exclusive_group()
@@ -95,14 +98,14 @@ def main(argv=None) -> int:
         return 2
 
     if args.tool_schema:
-        if args.query is not None or args.top is not None or args.config is not None or args.json or args.query_stdin:
+        if args.query is not None or args.top is not None or args.mode is not None or args.config is not None or args.json or args.query_stdin:
             print(json.dumps(_error("invalid_request", "invalid_request")))
             return 2
         print(json.dumps(TOOL_DEFINITION, ensure_ascii=False))
         return 0
 
     if args.tool:
-        if args.query is not None or args.top is not None or args.json:
+        if args.query is not None or args.top is not None or args.mode is not None or args.json:
             print(json.dumps(_error("invalid_request", "invalid_request")))
             return 2
         raw_bytes = _stdin_bytes(8192)
@@ -146,7 +149,7 @@ def main(argv=None) -> int:
         return 2
 
     try:
-        receipt = search(query, top, profile_path=args.config)
+        receipt = search(query, top, profile_path=args.config) if args.mode is None else search(query, top, mode=args.mode, profile_path=args.config)
     except ClientError as error:
         code = error.code if isinstance(error.code, str) else "client_error"
         status = "invalid_request" if code == "invalid_request" else "unavailable"

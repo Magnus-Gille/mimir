@@ -48,7 +48,22 @@ From the checked-out repository:
 scripts/mimir-search 'Workflows Compound' --top 3
 scripts/mimir-search --query-stdin --json < query.txt
 scripts/mimir-search --config /absolute/path/client.json --query-stdin < query.txt
+scripts/mimir-search 'Workflows Compound' --mode hybrid --json
 ```
+
+`--mode {lexical,hybrid,vector}` is optional. Without it the request and the
+exact v1 lexical receipt are unchanged. An explicit mode is sent to the runtime
+and the extended receipt is validated: `requested_mode`, a per-result `score_kind`
+and, for semantic modes, `cosine`, `abstention` and `embedding` (plus
+`candidate_window` for `hybrid`). If the semantic request is served lexically the
+receipt has `mode: lexical_fallback` with a `fallback_reason`, and human output
+says so first. Semantic modes abstain only when the operator has configured a
+threshold (`abstention.policy` `score`); none is calibrated yet, so with policy
+`none` a semantic hit does not show that the archive answers the question. A
+receipt without a sent mode is extended only when the server advertises a
+semantic default through `requested_mode`; the client then requires policy
+`score`, and lexical stays exact v1. Scores are ranking values, not confidence. `--mode` cannot be combined with `--tool` or
+`--tool-schema`.
 
 Use stdin for private queries: a positional query is visible in local process
 arguments and may enter shell history. The SSH command never contains the query
@@ -64,9 +79,11 @@ scripts/mimir-search --tool < request.json
 ```
 
 `request.json` contains one object, for example
-`{"query":"Workflows Compound","top":3}`. Only `query` and optional `top` are
-accepted. `--config` is an operator argument; configuration, endpoints, shell
-commands and credentials cannot be supplied through the tool JSON.
+`{"query":"Workflows Compound","top":3}`. Only `query`, optional `top` and
+optional `mode` (`lexical`, `hybrid` or `vector`, as for `--mode`) are accepted;
+a `mode` of `null` or any other value is `invalid_request`. `--config` is an
+operator argument; configuration, endpoints, shell commands and credentials
+cannot be supplied through the tool JSON.
 
 The adapter returns one JSON envelope with schema `mimir-artifact-search-v1`:
 
@@ -84,7 +101,7 @@ raw SSH diagnostics, remote exception text or HTTP error bodies. Examples includ
 `retrieval_unavailable`, `invalid_response`, and `stale_response`.
 
 Python consumers can call
-`tools.artifact_search.agent_tool.artifact_search(query, top=5, profile_path=...)`
+`tools.artifact_search.agent_tool.artifact_search(query, top=5, mode=None, profile_path=...)`
 and obtain `TOOL_DEFINITION` from the same module. This is a command/function
 adapter, not an automatically registered MCP tool. A consuming agent must invoke
 the fixed launcher through its existing permitted tool mechanism. Registration

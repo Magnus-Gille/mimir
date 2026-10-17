@@ -166,5 +166,68 @@ class ClientCliTests(unittest.TestCase):
         search.assert_not_called()
 
 
+    def test_cli_mode_is_forwarded_and_omitted_by_default(self):
+        cli, _ = load_entrypoints()
+        with patch.object(cli, "search", return_value=RECEIPT) as search, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["needle", "--mode", "hybrid"]), 0)
+        search.assert_called_once_with("needle", 5, mode="hybrid", profile_path=None)
+        with patch.object(cli, "search", return_value=RECEIPT) as search, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["needle"]), 0)
+        self.assertNotIn("mode", search.call_args.kwargs)
+
+    def test_cli_rejects_bad_or_misplaced_mode_without_calling_client(self):
+        cli, _ = load_entrypoints()
+        for argv in (["needle", "--mode", "fuzzy"], ["--tool", "--mode", "hybrid"], ["--tool-schema", "--mode", "vector"]):
+            output = io.StringIO()
+            with patch.object(cli, "search") as search, patch("sys.stdin", io.StringIO('{"query":"needle"}')), contextlib.redirect_stdout(output):
+                status = cli.main(argv)
+            self.assertEqual(status, 2, argv)
+            self.assertEqual(json.loads(output.getvalue())["status"], "invalid_request")
+            search.assert_not_called()
+
+    def test_tool_json_mode_is_forwarded_validated_and_optional(self):
+        cli, agent = load_entrypoints()
+        output = io.StringIO()
+        with patch.object(agent, "search", return_value=RECEIPT) as search, patch("sys.stdin", io.StringIO('{"query":"needle","mode":"hybrid"}')), contextlib.redirect_stdout(output):
+            status = cli.main(["--tool"])
+        self.assertEqual(status, 0)
+        search.assert_called_once_with("needle", 5, mode="hybrid", profile_path=None)
+        with patch.object(agent, "search", return_value=RECEIPT) as search:
+            agent.handle_tool_input({"query": "needle"})
+        self.assertNotIn("mode", search.call_args.kwargs)
+        for bad in ("null", "1", "true", '"semantic"'):
+            output = io.StringIO()
+            with patch.object(agent, "search") as search, patch("sys.stdin", io.StringIO('{"query":"needle","mode":%s}' % bad)), contextlib.redirect_stdout(output):
+                status = cli.main(["--tool"])
+            self.assertEqual(status, 2, bad)
+            self.assertEqual(json.loads(output.getvalue())["status"], "invalid_request")
+            search.assert_not_called()
+
+    def test_artifact_search_rejects_invalid_mode_with_code(self):
+        _, agent = load_entrypoints()
+        with patch.object(agent, "search") as search:
+            result = agent.artifact_search("needle", mode="semantic")
+        self.assertEqual((result["status"], result["error"]["code"]), ("invalid_request", "invalid_mode"))
+        search.assert_not_called()
+
+    def test_tool_definition_exposes_mode_enum_and_guidance(self):
+        _, agent = load_entrypoints()
+        mode = agent.TOOL_DEFINITION["inputSchema"]["properties"]["mode"]
+        self.assertEqual(mode, {"type": "string", "enum": ["lexical", "hybrid", "vector"]})
+        self.assertNotIn("mode", agent.TOOL_DEFINITION["inputSchema"]["required"])
+        self.assertIn("lexical_fallback", agent.GUIDANCE)
+
+    def test_human_output_announces_lexical_fallback(self):
+        cli, _ = load_entrypoints()
+        fallback = {**RECEIPT, "mode": "lexical_fallback", "fallback_reason": "embedding\x1b[31m_unavailable\n"}
+        output = io.StringIO()
+        with patch.object(cli, "search", return_value=fallback), contextlib.redirect_stdout(output):
+            cli.main(["needle", "--mode", "hybrid"])
+        first = output.getvalue().splitlines()[0]
+        self.assertEqual(first, "Semantisk sökning ej tillgänglig (embedding [31m_unavailable); visar lexikala träffar.")
+        self.assertNotIn("\x1b", output.getvalue())
+        self.assertIn("docs/guide.pdf", output.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,18 @@ from .client_remote import decode, private_bytes
 
 LIMIT = 131072
 ERRORS = {'credential_unavailable', 'unauthorized', 'retrieval_unavailable', 'invalid_response', 'invalid_request'}
+MODES = ('lexical', 'hybrid', 'vector')
+# Runtime fallback reasons, including every SemanticConfig error code.
+FALLBACK_REASONS = frozenset({
+    'semantic_disabled', 'vectors_incomplete', 'embedding_unavailable', 'embedding_route_unavailable',
+    'invalid_semantic_flag', 'invalid_default_mode', 'semantic_default_requires_enabled',
+    'invalid_embedding_revision', 'invalid_embedding_dimensions', 'invalid_abstain_min_cosine',
+    'invalid_abstain_min_zscore', 'semantic_default_requires_abstention'})
+# A configuration error resets the runtime default to lexical, so a semantic
+# server default can only fall back for availability reasons.
+DEFAULT_FALLBACK_REASONS = frozenset({'vectors_incomplete', 'embedding_unavailable', 'embedding_route_unavailable'})
+ABSTENTION_REASONS = (None, 'no_vectors', 'below_cosine_floor', 'too_few_units_for_margin', 'below_score_margin')
+MIN_ZSCORE_UNITS = 8
 
 
 class ClientError(Exception):
@@ -65,12 +77,82 @@ def load_profile(path=None):
         raise ClientError('invalid_profile') from None
 
 
-def validate_receipt(value, profile, top, *, now=None):
+def _number(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def _cosine(value):
+    # Unit-vector dot products may exceed 1 by rounding residue only.
+    return _number(value) and -1 - 1e-9 <= value <= 1 + 1e-9
+
+
+def _abstention(value, results):
+    _require(isinstance(value, dict) and set(value) == {'policy', 'abstained', 'reason', 'signal'})
+    _require(value['policy'] in ('none', 'score') and type(value['abstained']) is bool)
+    reason, signal = value['reason'], value['signal']
+    _require(reason in ABSTENTION_REASONS and (reason is None) == (not value['abstained']))
+    _require(value['abstained'] == (not results))
+    _require(value['policy'] == 'score' or reason in (None, 'no_vectors'))
+    _require(isinstance(signal, dict) and set(signal) == {'units', 'top_cosine', 'zscore'})
+    units, top_cosine, zscore = signal['units'], signal['top_cosine'], signal['zscore']
+    _require(type(units) is int and units >= len(results) and (reason == 'no_vectors') == (units == 0))
+    _require(top_cosine is None if units == 0 else _cosine(top_cosine))
+    _require(zscore is None if units < MIN_ZSCORE_UNITS else _number(zscore) and zscore >= 0)
+    # Each threshold reason needs the signal it was computed from.
+    _require(reason != 'too_few_units_for_margin' or 0 < units < MIN_ZSCORE_UNITS)
+    _require(reason != 'below_score_margin' or zscore is not None)
+
+
+def _embedding(value):
+    _require(isinstance(value, dict) and set(value) == {'model', 'dimensions', 'cache'})
+    _require(isinstance(value['model'], str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}', value['model']))
+    _require(type(value['dimensions']) is int and value['dimensions'] in (256, 768))
+    _require(isinstance(value['cache'], str) and re.fullmatch('%dd-[0-9a-f]{16}' % value['dimensions'], value['cache']))
+
+
+def _shape(value, mode, top):
+    """Expected (top-level extras, result extras, score kind) for the served mode.
+
+    An explicit mode opts into the extended receipt, whose fields depend on
+    what was served. Without ``mode`` the receipt is exact v1 lexical, unless
+    it advertises a semantic server default through ``requested_mode``.
+    """
+    reasons = FALLBACK_REASONS
+    if mode is None:
+        if 'requested_mode' not in value:
+            _require(value.get('mode') == 'lexical' and value.get('decision') == 'fts5_bm25')
+            return set(), set(), None
+        # A lexical default is always answered in v1, so only a semantic one
+        # may be advertised.
+        mode = value['requested_mode']
+        _require(isinstance(mode, str) and mode in ('hybrid', 'vector'))
+        reasons = DEFAULT_FALLBACK_REASONS
+    _require(mode in MODES and value.get('requested_mode') == mode)
+    served = value.get('mode')
+    if served == 'lexical' and mode == 'lexical' or served == 'lexical_fallback' and mode != 'lexical':
+        _require(value.get('decision') == 'fts5_bm25')
+        if served == 'lexical':
+            return {'requested_mode'}, {'score_kind'}, 'bm25'
+        _require(isinstance(value.get('fallback_reason'), str) and value['fallback_reason'] in reasons)
+        return {'requested_mode', 'fallback_reason'}, {'score_kind'}, 'bm25'
+    _require(served == mode)
+    extras = {'requested_mode', 'abstention', 'embedding'}
+    if mode == 'vector':
+        _require(value.get('decision') == 'cosine_max_segment')
+        return extras, {'score_kind', 'cosine'}, 'cosine'
+    _require(value.get('decision') == 'rrf60_bounded')
+    window = value.get('candidate_window')
+    _require(type(window) is int and window == max(top, 5))
+    return extras | {'candidate_window'}, {'score_kind', 'cosine'}, 'rrf'
+
+
+def validate_receipt(value, profile, top, *, mode=None, now=None):
     now = time.time() if now is None else now
     try:
+        _require(isinstance(value, dict))
+        extras, result_extras, score_kind = _shape(value, mode, top)
         fields = {'mode', 'decision', 'results', 'snapshot_id', 'source_id', 'observed_at', 'expires_at', 'verified_at', 'release', 'package_sha256', 'abstained'}
-        _require(isinstance(value, dict) and set(value) == fields)
-        _require(value['mode'] == 'lexical' and value['decision'] == 'fts5_bm25')
+        _require(set(value) == fields | extras)
         _require(all(value[k] == profile[k] for k in ('source_id', 'release', 'package_sha256')))
         _require(_hex(value['snapshot_id'], 64))
         observed, expires, verified = (value[k] for k in ('observed_at', 'expires_at', 'verified_at'))
@@ -80,7 +162,12 @@ def validate_receipt(value, profile, top, *, now=None):
             raise ClientError('stale_response')
         results = value['results']
         _require(isinstance(results, list) and len(results) <= top and type(value['abstained']) is bool and value['abstained'] == (not results))
-        result_fields = {'path', 'artifact_id', 'sha256', 'locator', 'title', 'snippet', 'score', 'mimir_url', 'source_id', 'snapshot_id', 'verification'}
+        if 'abstention' in extras:
+            _abstention(value['abstention'], results)
+            # The runtime refuses a semantic default without an abstention policy.
+            _require(mode is not None or value['abstention']['policy'] == 'score')
+            _embedding(value['embedding'])
+        result_fields = {'path', 'artifact_id', 'sha256', 'locator', 'title', 'snippet', 'score', 'mimir_url', 'source_id', 'snapshot_id', 'verification'} | result_extras
         for result in results:
             _require(isinstance(result, dict) and set(result) == result_fields)
             path = result['path']
@@ -102,7 +189,15 @@ def validate_receipt(value, profile, top, *, now=None):
                 expected += '#' + quote(locator['anchor'], safe='')
             _require(result['mimir_url'] == expected)
             _require(_text(result['title'], 512, controls=True) and _text(result['snippet'], 512, controls=True))
-            _require(type(result['score']) in (int, float) and math.isfinite(result['score']))
+            _require(_number(result['score']))
+            if score_kind is not None:
+                _require(result['score_kind'] == score_kind)
+            if score_kind == 'cosine':
+                _require(_cosine(result['cosine']) and result['score'] == result['cosine'])
+            elif score_kind == 'rrf':
+                # Equal-weight RRF60 over two windowed channels: a result gets one
+                # or two contributions, each between 1/(60 + window) and 1/61.
+                _require(_cosine(result['cosine']) and 1 / (60 + max(top, 5)) <= result['score'] <= 2 / 61)
         return value
     except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
         raise ClientError('invalid_response') from None
@@ -164,12 +259,14 @@ def _transport(profile, payload):
                     stream.close()
 
 
-def search(query, top=5, *, profile_path=None):
+def search(query, top=5, *, mode=None, profile_path=None):
     try:
         _require(isinstance(query, str) and query.strip() and len(query) <= 4096 and type(top) is int and 1 <= top <= 5)
-        payload = json.dumps({'query': query, 'top': top}, ensure_ascii=False, allow_nan=False).encode('utf-8')
+        _require(mode is None or isinstance(mode, str) and mode in MODES)
+        request = {'query': query, 'top': top} if mode is None else {'query': query, 'top': top, 'mode': mode}
+        payload = json.dumps(request, ensure_ascii=False, allow_nan=False).encode('utf-8')
         _require(len(payload) <= 8192)
     except (ValueError, TypeError, UnicodeError):
         raise ClientError('invalid_request') from None
     profile = load_profile(profile_path)
-    return validate_receipt(_transport(profile, payload), profile, top)
+    return validate_receipt(_transport(profile, payload), profile, top, mode=mode)

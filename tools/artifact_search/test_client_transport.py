@@ -247,6 +247,18 @@ class ClientRemoteIntegrationTests(unittest.TestCase):
                 self.assertEqual(hit["package_sha256"], PACKAGE_SHA256)
                 self.assertFalse(client.search("volcano", profile_path=self._profile_file())["results"])
 
+    def test_explicit_mode_crosses_real_http_and_validates_extended_receipt(self):
+        with _serve(self.runtime) as server:
+            with patch.object(client_remote, "KEY_PATH", self.key_path), patch.object(client_remote, "PORT", server.server_port), patch.object(
+                client, "_transport", side_effect=lambda _profile, payload: client_remote.execute(json.loads(payload))
+            ):
+                lexical = client.search("north star", mode="lexical", profile_path=self._profile_file())
+                self.assertEqual((lexical["mode"], lexical["requested_mode"]), ("lexical", "lexical"))
+                fallback = client.search("north star", mode="hybrid", profile_path=self._profile_file())
+                self.assertEqual((fallback["mode"], fallback["fallback_reason"]), ("lexical_fallback", "semantic_disabled"))
+                self.assertEqual(fallback["results"][0]["verification"], "original_sha256_matched")
+                self.assertNotIn("requested_mode", client.search("north star", profile_path=self._profile_file()))
+
     def test_remote_rejects_wrong_bearer_and_unreachable_server_with_stable_codes(self):
         with _serve(self.runtime, api_key=API_KEY) as server:
             _write_private(self.key_path, b"MIMIR_SEARCH_API_KEY=wrong-synthetic-key\n")
