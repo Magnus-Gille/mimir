@@ -49,9 +49,12 @@ _GATEWAY = re.compile(r'[0-9a-f]{40}')
 # systemd accepts whitespace around "=", multiline quotes and backslash escapes.
 # Only the single-line subset below is parsed; anything else is refused so the
 # command can never rewrite a different assignment from the one systemd loads.
-_ASSIGNMENT = re.compile(r'\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)')
+_ASSIGNMENT = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)=(.*)')
+# Physical lines are LF (optionally CRLF); other separators or controls are refused.
+_LINE = re.compile(r'[^\n]*\n|[^\n]+\Z')
+_CONTROL = re.compile('[\x00-\x08\x0b-\x1f\x7f\x85\u2028\u2029]')
 _VALUE = re.compile(r'[^"\'\\]*|"[^"\\]*"|\'[^\'\\]*\'')
-_PIN_LINE = re.compile(r'(\s*' + PIN_KEY + r'=\s*)(["\']?)([0-9a-f]{40}):([0-9a-f]{64})\2(\s*)')
+_PIN_LINE = re.compile(r'([ \t]*' + PIN_KEY + r'=[ \t]*)(["\']?)([0-9a-f]{40}):([0-9a-f]{64})\2([ \t]*)')
 _CODE = re.compile(r'[a-z_0-9]{1,64}')
 _RANK = {'pass': 0, 'warn': 1, 'fail': 2}
 
@@ -110,18 +113,21 @@ def parse_env(data):
     reader would load.
     """
     try:
-        lines = data.decode('utf-8').splitlines(keepends=True)
+        text = data.decode('utf-8')
     except UnicodeError:
         raise RevisionError('invalid_env_file') from None
+    if _CONTROL.search(text.replace('\r\n', '\n')):
+        raise RevisionError('unsupported_env_syntax')
+    lines = _LINE.findall(text)
     values, seen, pin = {}, set(), None
     for number, line in enumerate(lines):
-        body = line.rstrip('\r\n').strip()
+        body = line.rstrip('\r\n').strip(' \t')
         if not body or body[0] in '#;':
             continue
         match = _ASSIGNMENT.fullmatch(body)
-        if match is None or not _VALUE.fullmatch(match.group(2).strip()):
+        if match is None or not _VALUE.fullmatch(match.group(2).strip(' \t')):
             raise RevisionError('unsupported_env_syntax')
-        key, value = match.group(1), match.group(2).strip()
+        key, value = match.group(1), match.group(2).strip(' \t')
         if len(value) >= 2 and value[0] == value[-1] and value[0] in '"\'':
             value = value[1:-1]
         if key in seen and key in (PIN_KEY, *ROUTE_KEYS):

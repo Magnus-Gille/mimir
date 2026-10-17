@@ -271,6 +271,11 @@ class RepinTests(unittest.TestCase):
             'NOTE="unterminated\n' + pin + 'still note"\n',
             # Backslash continuation or escapes.
             "NOTE=one \\\n" + pin,
+            # Python-only line separators: systemd sees one comment line.
+            "# comment\u2028" + pin,
+            "# comment\x0b" + pin,
+            # Whitespace before "=" on a route key.
+            pin + "M5_TIMEOUT =3\n",
         )
         with FakeServices() as services:
             for text in cases:
@@ -278,7 +283,7 @@ class RepinTests(unittest.TestCase):
                     original = self._write_env(services, pin=text)
                     code, out, _ = self._run("--apply", "--expect-gateway", NEW)
                     self.assertEqual(code, 1)
-                    self.assertIn(json.loads(out)["error"], {"unsupported_env_syntax", "ambiguous_env_file"})
+                    self.assertEqual(json.loads(out)["error"], "unsupported_env_syntax")
                     self.assertEqual(self.env_file.read_bytes(), original)
             self.assertEqual(services.portal_calls(), [])
 

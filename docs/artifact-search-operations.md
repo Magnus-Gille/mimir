@@ -157,7 +157,8 @@ release, as the units do. Run it on the reader host as the reader user.
    and duplicate pin or route keys. It parses only single-line `KEY=value`
    assignments, unquoted or fully quoted, without backslashes. Anything that
    systemd might read differently, such as whitespace before `=`, multiline
-   quotes or escapes, is refused with `unsupported_env_syntax`. Before any network call, it hashes the
+   quotes, escapes, control characters or non-LF line separators, is refused
+   with `unsupported_env_syntax`. Before any network call, it hashes the
    installed GGUF and refuses `model_sha256_mismatch` if the model changed.
 2. Compare `new_revision` with the gateway deploy receipt, such as the deploy
    marker or the merged gille-inference SHA. Do not apply a revision you cannot
