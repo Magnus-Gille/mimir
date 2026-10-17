@@ -56,13 +56,24 @@ umask 077
 # Private state is established before the ERR trap or any logging is enabled.
 # Bootstrap failures must never echo a configured path (or recurse through a
 # logger whose destination is the thing that failed).
+send_panel() {
+  local state="$1" message="$2" token="${HEIMDALL_FLEET_TOKEN:-}"
+  [ -n "${HEIMDALL_HUB_URL:-}" ] && [ -n "$token" ] || return 0
+  case "$token" in
+    *$'\r'*|*$'\n'*)
+      printf '%s\n' 'WARN: refusing Heimdall panel push because the fleet token contains CR/LF' >&2
+      return 0
+      ;;
+  esac
+  printf 'Authorization: Bearer %s\n' "$token" |
+    curl -fsS --max-time 5 -X POST "$HEIMDALL_HUB_URL" \
+      -H @- -H "Content-Type: application/json" \
+      -d "{\"service\":\"${SERVICE}\",\"panel\":\"${PANEL}\",\"kind\":\"status\",\"label\":\"Offsite backup\",\"state\":\"${state}\",\"message\":\"${message}\"}" \
+      >/dev/null 2>&1 || true
+}
+
 bootstrap_panel() {
-  [ -n "${HEIMDALL_HUB_URL:-}" ] && [ -n "${HEIMDALL_FLEET_TOKEN:-}" ] || return 0
-  curl -fsS --max-time 5 -X POST "$HEIMDALL_HUB_URL" \
-    -H "Authorization: Bearer ${HEIMDALL_FLEET_TOKEN}" \
-    -H "Content-Type: application/json" \
-    -d "{\"service\":\"${SERVICE}\",\"panel\":\"${PANEL}\",\"kind\":\"status\",\"label\":\"Offsite backup\",\"state\":\"fail\",\"message\":\"stage=bootstrap state=fail exit=1\"}" \
-    >/dev/null 2>&1 || true
+  send_panel fail 'stage=bootstrap state=fail exit=1'
 }
 
 bootstrap_fail() {
@@ -215,12 +226,7 @@ log_event() {
 push_panel() {
   local state="$1" stage="$2" exit_code="$3" detail="${4:-}"
   local message="stage=${stage} state=${state} exit=${exit_code}${detail:+ ${detail}}"
-  [ -n "${HEIMDALL_HUB_URL:-}" ] && [ -n "${HEIMDALL_FLEET_TOKEN:-}" ] || return 0
-  curl -fsS --max-time 5 -X POST "$HEIMDALL_HUB_URL" \
-    -H "Authorization: Bearer ${HEIMDALL_FLEET_TOKEN}" \
-    -H "Content-Type: application/json" \
-    -d "{\"service\":\"${SERVICE}\",\"panel\":\"${PANEL}\",\"kind\":\"status\",\"label\":\"Offsite backup\",\"state\":\"${state}\",\"message\":\"${message}\"}" \
-    >/dev/null 2>&1 || true
+  send_panel "$state" "$message"
 }
 
 fail_event() {

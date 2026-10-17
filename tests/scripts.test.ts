@@ -799,6 +799,162 @@ esac
     expect(readFileSync(panel, "utf8")).toContain('"state":"pass"');
     expect(channels()).not.toContain("rclone-stderr-artifact-name-canary");
   });
+  function createOffsitePanelHarness() {
+    const root = tempDir();
+    const source = join(root, "mimir");
+    const state = join(root, "state");
+    const bin = join(root, "bin");
+    const rcloneCalls = join(root, "rclone.calls");
+    const curlArgs = join(root, "curl.args");
+    const curlStdin = join(root, "curl.stdin");
+    const token = "synthetic-fleet-token-0123456789";
+    mkdirSync(source);
+    mkdirSync(bin);
+    writeFileSync(join(source, "artifact.txt"), "artifact\n");
+
+    executable(
+      join(bin, "rclone"),
+      `printf '%s\\n' "$*" >> "$RCLONE_CALLS"
+case "\${1:-}" in
+  config) printf 'type = crypt\\nfilename_encryption = standard\\n' ;;
+  lsf) [[ "$*" != *"--dirs-only mimir-crypt:"* ]] || printf 'current/\\n' ;;
+  sync) exit "\${MOCK_SYNC_RC:-0}" ;;
+  *) exit 0 ;;
+esac
+`,
+    );
+    executable(
+      join(bin, "curl"),
+      `set -euo pipefail
+printf '%s\\n' "$*" >> "$CURL_ARGS"
+cat > "$CURL_STDIN"
+if [[ "$*" == *"$EXPECTED_TOKEN"* ]]; then
+  printf 'token-in-argv' > "$CURL_LEAK"
+fi
+exit "\${MOCK_CURL_RC:-0}"
+`,
+    );
+
+    return {
+      token,
+      root,
+      run(overrides: Record<string, string> = {}) {
+        const result = spawnSync("bash", [join(REPO_ROOT, "scripts/offsite-backup.sh")], {
+          cwd: REPO_ROOT,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            HOME: root,
+            PATH: `${bin}:${process.env.PATH ?? ""}`,
+            MIMIR_OFFSITE_ROOT: source,
+            MIMIR_OFFSITE_STATE_DIR: state,
+            RCLONE_BIN: join(bin, "rclone"),
+            RCLONE_CALLS: rcloneCalls,
+            HEIMDALL_HUB_URL: "http://hub.invalid/panels",
+            HEIMDALL_FLEET_TOKEN: token,
+            EXPECTED_TOKEN: token,
+            CURL_ARGS: curlArgs,
+            CURL_STDIN: curlStdin,
+            CURL_LEAK: join(root, "curl.leak"),
+            ...overrides,
+          },
+        });
+        const stateLog = join(state, "offsite-private", "offsite-backup.log");
+        return {
+          result,
+          args: existsSync(curlArgs) ? readFileSync(curlArgs, "utf8") : "",
+          stdin: existsSync(curlStdin) ? readFileSync(curlStdin, "utf8") : "",
+          log: existsSync(stateLog) ? readFileSync(stateLog, "utf8") : "",
+          leakedArgv: existsSync(join(root, "curl.leak")),
+        };
+      },
+    };
+  }
+
+  it("pipes the exact auth header without exposing the token in curl argv or logs", () => {
+    const harness = createOffsitePanelHarness();
+    const { result, args, stdin, log, leakedArgv } = harness.run();
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(args).toContain("-H @-");
+    expect(args).toContain('"state":"pass"');
+    expect(stdin).toBe(`Authorization: Bearer ${harness.token}\n`);
+    expect(args).not.toContain(harness.token);
+    expect(`${result.stdout}\n${result.stderr}\n${log}`).not.toContain(harness.token);
+    expect(leakedArgv).toBe(false);
+  });
+
+  it("keeps backup failure status when a fail-panel curl also fails", () => {
+    const harness = createOffsitePanelHarness();
+    const { result, args, stdin, log, leakedArgv } = harness.run({
+      MOCK_SYNC_RC: "23",
+      MOCK_CURL_RC: "22",
+    });
+
+    expect(result.status).toBe(23);
+    expect(args).toContain('"state":"fail"');
+    expect(stdin).toBe(`Authorization: Bearer ${harness.token}\n`);
+    expect(args).not.toContain(harness.token);
+    expect(`${result.stdout}\n${result.stderr}\n${log}`).not.toContain(harness.token);
+    expect(leakedArgv).toBe(false);
+  });
+
+  it("does not invoke curl when the fleet token is unset", () => {
+    const harness = createOffsitePanelHarness();
+    const { result, args, stdin } = harness.run({ HEIMDALL_FLEET_TOKEN: "" });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(args).toBe("");
+    expect(stdin).toBe("");
+  });
+
+  it("rejects CR/LF-containing tokens without sending or logging the token", () => {
+    const harness = createOffsitePanelHarness();
+    const invalidToken = `${harness.token}\nsecond-line`;
+    const { result, args, stdin, log } = harness.run({ HEIMDALL_FLEET_TOKEN: invalidToken });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(args).toBe("");
+    expect(stdin).toBe("");
+    expect(`${result.stdout}\n${result.stderr}\n${log}`).not.toContain(invalidToken);
+    expect(`${result.stdout}\n${result.stderr}\n${log}`).toContain(
+      "fleet token contains CR/LF",
+    );
+  });
+
+  it("uses the same private bearer transport for bootstrap failures", () => {
+    const harness = createOffsitePanelHarness();
+    const target = join(harness.root, "bootstrap-target");
+    const unsafeLog = join(harness.root, "unsafe-log");
+    writeFileSync(target, "unchanged");
+    symlinkSync(target, unsafeLog);
+    const { result, args, stdin, leakedArgv } = harness.run({ MIMIR_OFFSITE_LOG: unsafeLog });
+    expect(result.status).toBe(1);
+    expect(args).toContain("stage=bootstrap state=fail exit=1");
+    expect(args).toContain("-H @-");
+    expect(args).not.toContain(harness.token);
+    expect(stdin).toBe(`Authorization: Bearer ${harness.token}\n`);
+    expect(leakedArgv).toBe(false);
+    expect(readFileSync(target, "utf8")).toBe("unchanged");
+  });
+
+  it("rejects a multiline bearer before the bootstrap failure report", () => {
+    const harness = createOffsitePanelHarness();
+    const target = join(harness.root, "bootstrap-target");
+    const unsafeLog = join(harness.root, "unsafe-log");
+    writeFileSync(target, "unchanged");
+    symlinkSync(target, unsafeLog);
+    const invalidToken = `${harness.token}\rsecond-line`;
+    const { result, args, stdin } = harness.run({
+      MIMIR_OFFSITE_LOG: unsafeLog,
+      HEIMDALL_FLEET_TOKEN: invalidToken,
+    });
+    expect(result.status).toBe(1);
+    expect(args).toBe("");
+    expect(stdin).toBe("");
+    expect(`${result.stdout}\n${result.stderr}`).not.toContain(invalidToken);
+  });
+
 });
 
 describe("NAS deploy script", () => {
