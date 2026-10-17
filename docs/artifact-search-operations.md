@@ -154,7 +154,10 @@ release, as the units do. Run it on the reader host as the reader user.
 
    The command reads `M5_OPENAI_BASE_URL` and `M5_API_KEY` from the env file in
    process. It refuses a non-private route, a symlinked or non-`0600` env file,
-   and duplicate pin or route keys. Before any network call, it hashes the
+   and duplicate pin or route keys. It parses only single-line `KEY=value`
+   assignments, unquoted or fully quoted, without backslashes. Anything that
+   systemd might read differently, such as whitespace before `=`, multiline
+   quotes or escapes, is refused with `unsupported_env_syntax`. Before any network call, it hashes the
    installed GGUF and refuses `model_sha256_mismatch` if the model changed.
 2. Compare `new_revision` with the gateway deploy receipt, such as the deploy
    marker or the merged gille-inference SHA. Do not apply a revision you cannot
@@ -168,8 +171,11 @@ release, as the units do. Run it on the reader host as the reader user.
    The command refuses `gateway_revision_unexpected` if the live gateway no longer
    reports that SHA. It writes `runtime.env.pre-repin-<UTC>` (`0600`, exclusive)
    next to the env file, or in `--backup-dir`. It then replaces `runtime.env`
-   atomically and changes only the gateway half of the pin line. It aborts with
-   `env_file_changed` if the file changed during the run.
+   atomically and changes only the gateway half of the pin line. A lock
+   (`.runtime.env.repin.lock`) held from the read to the replace refuses a
+   concurrent re-pin with `repin_in_progress`. A hand edit made during the run
+   aborts it with `env_file_changed`. Don't edit the file by hand while
+   applying: an edit in the instant before the replace can still be lost.
 4. Restart the runtime with `systemctl --user restart mimir-search.service`. The
    vector cache rebuilds under the new identity. The old cache is inert and
    is kept. The next `semantic-check` run should report

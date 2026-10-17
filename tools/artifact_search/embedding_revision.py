@@ -17,7 +17,10 @@ Neither command prints credentials, route URLs or response bodies.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
+from http.client import HTTPException
 import json
 import os
 from pathlib import Path
@@ -43,7 +46,11 @@ GATEWAY_TIMEOUT = 8
 CHECK_SECONDS = 15
 PUSH_TIMEOUT = 4
 _GATEWAY = re.compile(r'[0-9a-f]{40}')
-_ASSIGNMENT = re.compile(r'\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)')
+# systemd accepts whitespace around "=", multiline quotes and backslash escapes.
+# Only the single-line subset below is parsed; anything else is refused so the
+# command can never rewrite a different assignment from the one systemd loads.
+_ASSIGNMENT = re.compile(r'\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)')
+_VALUE = re.compile(r'[^"\'\\]*|"[^"\\]*"|\'[^\'\\]*\'')
 _PIN_LINE = re.compile(r'(\s*' + PIN_KEY + r'=\s*)(["\']?)([0-9a-f]{40}):([0-9a-f]{64})\2(\s*)')
 _CODE = re.compile(r'[a-z_0-9]{1,64}')
 _RANK = {'pass': 0, 'warn': 1, 'fail': 2}
@@ -109,9 +116,11 @@ def parse_env(data):
     values, seen, pin = {}, set(), None
     for number, line in enumerate(lines):
         body = line.rstrip('\r\n').strip()
-        match = _ASSIGNMENT.fullmatch(body)
-        if not body or body[0] in '#;' or match is None:
+        if not body or body[0] in '#;':
             continue
+        match = _ASSIGNMENT.fullmatch(body)
+        if match is None or not _VALUE.fullmatch(match.group(2).strip()):
+            raise RevisionError('unsupported_env_syntax')
         key, value = match.group(1), match.group(2).strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in '"\'':
             value = value[1:-1]
@@ -192,11 +201,41 @@ def _replace(env_file, original, info, data):
         os.close(directory)
 
 
+@contextlib.contextmanager
+def _locked(env_file):
+    """Serialize re-pins with a stable lock held from the read to the replace."""
+    path = env_file.parent / ('.%s.repin.lock' % env_file.name)
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | getattr(os, 'O_CLOEXEC', 0), 0o600)
+    except OSError:
+        raise RevisionError('env_lock_unavailable') from None
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RevisionError('repin_in_progress') from None
+        yield
+    finally:
+        os.close(fd)
+
+
 def repin(env_file, model_file, *, apply=False, expect=None, backup_dir=None, now=time.time):
-    """Dry-run or apply a gateway re-pin. Returns a credential-free summary."""
+    """Dry-run or apply a gateway re-pin. Returns a credential-free summary.
+
+    Applying holds a lock through read, backup and replace, so concurrent
+    re-pins cannot interleave. A hand edit that ignores the lock is still
+    detected up to the final comparison before the atomic replace.
+    """
     env_file = Path(env_file)
     if apply and not (isinstance(expect, str) and _GATEWAY.fullmatch(expect)):
         raise RevisionError('expect_gateway_required')
+    if not apply:
+        return _repin(env_file, model_file, False, expect, backup_dir, now)
+    with _locked(env_file):
+        return _repin(env_file, model_file, True, expect, backup_dir, now)
+
+
+def _repin(env_file, model_file, apply, expect, backup_dir, now):
     data, info = _read_private(env_file)
     lines, values, pin, match = parse_env(data)
     old_gateway, model = match.group(3), match.group(4)
@@ -243,8 +282,12 @@ def _health(env, port):
         with error:
             if error.code != 503:
                 raise RevisionError('runtime_health_unavailable') from None
-            raw = error.read(MAX_HEALTH_BYTES + 1)
-    except (URLError, OSError):
+            try:
+                raw = error.read(MAX_HEALTH_BYTES + 1)
+            except (OSError, HTTPException, ValueError):
+                raise RevisionError('runtime_health_unavailable') from None
+    except (URLError, OSError, HTTPException, ValueError):
+        # Malformed responses carry raw response text: never surface it.
         raise RevisionError('runtime_health_unavailable') from None
     try:
         if len(raw) > MAX_HEALTH_BYTES:
@@ -327,21 +370,24 @@ def push_panel(env, panel):
     url, token = env.get('HEIMDALL_HUB_URL', ''), env.get('HEIMDALL_FLEET_TOKEN', '')
     if not url and not token:
         return None
-    parts = urlsplit(url)
-    if (parts.scheme not in {'http', 'https'} or not parts.hostname or parts.username or
-            parts.password or parts.fragment or not _printable(token)):
+    try:
+        parts = urlsplit(url) if _printable(url) else None
+        if (parts is None or parts.scheme not in {'http', 'https'} or not parts.hostname or
+                parts.username or parts.password or parts.fragment or not _printable(token)):
+            raise ValueError('invalid hub configuration')
+        opener = build_opener(ProxyHandler({}), _NoRedirect())
+        request = Request(url, data=json.dumps(panel).encode('utf-8'), method='POST',
+                          headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token})
+    except ValueError:
         print('[mimir-search] Heimdall push skipped: invalid hub configuration', file=sys.stderr)
         return False
-    opener = build_opener(ProxyHandler({}), _NoRedirect())
-    request = Request(url, data=json.dumps(panel).encode('utf-8'), method='POST',
-                      headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token})
     try:
         with opener.open(request, timeout=PUSH_TIMEOUT) as response:
             return 200 <= response.status < 300
     except HTTPError as error:
         error.close()
         print('[mimir-search] Heimdall push rejected (status=%d)' % error.code, file=sys.stderr)
-    except (URLError, OSError, ValueError):
+    except Exception:  # noqa: BLE001 - fixed diagnostic only; the fallback alert must still run.
         print('[mimir-search] Heimdall push failed', file=sys.stderr)
     return False
 
@@ -364,7 +410,10 @@ def main(argv=None):
         if not 1 <= args.port <= 65535:
             print(json.dumps({'error': 'invalid_port'}))
             return 1
-        result = semantic_check(os.environ, port=args.port)
+        try:
+            result = semantic_check(os.environ, port=args.port)
+        except Exception:  # noqa: BLE001 - an unexpected failure must still alert, without its text.
+            result = {'state': 'fail', 'codes': ['semantic_check_failed'], 'message': 'semantic_check_failed'}
         pushed = push_panel(os.environ, {'service': 'mimir', 'panel': 'search-semantic', 'kind': 'status',
                                          'label': 'Mímir semantic search', 'state': result['state'],
                                          'message': result['message'][:240]})
@@ -379,7 +428,7 @@ def main(argv=None):
         return 0
     except RevisionError as error:
         print(json.dumps({'error': _code(str(error), 'repin_failed')}))
-    except (OSError, ValueError) as error:
+    except Exception as error:  # noqa: BLE001 - bounded: never the exception text.
         print(json.dumps({'error': 'repin_failed', 'error_type': type(error).__name__}))
     return 1
 

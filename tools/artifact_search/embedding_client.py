@@ -1,6 +1,7 @@
 """Explicit private M5 API client; no credential discovery or public fallback."""
 from __future__ import annotations
 
+from http.client import HTTPException
 import ipaddress
 import json
 import os
@@ -101,8 +102,9 @@ class M5Embedder:
                     continue
                 error.close()
                 raise EmbedderUnavailable('embedding_http_error', error.code, delay) from error
-            except (URLError, OSError) as error:
-                raise EmbedderUnavailable('embedding_transport_error') from error
+            except (URLError, OSError, HTTPException) as error:
+                # HTTPException text can echo a malformed status line: keep only the code.
+                raise EmbedderUnavailable('embedding_transport_error') from None
             except (ValueError, UnicodeError) as error:
                 raise EmbedderUnavailable('embedding_invalid_json') from error
 

@@ -40,6 +40,7 @@ class FakeServices:
     def __init__(self):
         self.gateway_revision = NEW
         self.gateway_status = 200
+        self.raw_portal = None
         self.health = None
         self.health_status = 200
         self.panels = []
@@ -61,6 +62,10 @@ class FakeServices:
             def do_GET(self):
                 services.requests.append(("GET", self.path, self.headers.get("Authorization")))
                 if self.path == "/portal/me":
+                    if services.raw_portal is not None:
+                        self.wfile.write(services.raw_portal)
+                        self.close_connection = True
+                        return
                     if services.gateway_status != 200:
                         self.send(services.gateway_status, {"error": "busy " + M5_KEY})
                         return
@@ -257,6 +262,50 @@ class RepinTests(unittest.TestCase):
                     self.assertEqual(self.env_file.read_bytes(), original)
             self.assertEqual(self._backups(), [])
 
+    def test_syntax_systemd_could_read_differently_is_refused(self):
+        pin = "MIMIR_SEARCH_EMBEDDING_REVISION=%s:%s\n" % (OLD, MODEL)
+        cases = (
+            # systemd loads the later, spaced assignment: refuse instead of rewriting the first.
+            pin + "MIMIR_SEARCH_EMBEDDING_REVISION = %s:%s\n" % (OLD, MODEL),
+            # A multiline quoted value could swallow the pin line.
+            'NOTE="unterminated\n' + pin + 'still note"\n',
+            # Backslash continuation or escapes.
+            "NOTE=one \\\n" + pin,
+        )
+        with FakeServices() as services:
+            for text in cases:
+                with self.subTest(text=text):
+                    original = self._write_env(services, pin=text)
+                    code, out, _ = self._run("--apply", "--expect-gateway", NEW)
+                    self.assertEqual(code, 1)
+                    self.assertIn(json.loads(out)["error"], {"unsupported_env_syntax", "ambiguous_env_file"})
+                    self.assertEqual(self.env_file.read_bytes(), original)
+            self.assertEqual(services.portal_calls(), [])
+
+    def test_concurrent_repin_is_refused_while_another_holds_the_lock(self):
+        import fcntl
+        with FakeServices() as services:
+            original = self._write_env(services)
+            fd = os.open(self.root / ".runtime.env.repin.lock", os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                code, out, _ = self._run("--apply", "--expect-gateway", NEW)
+            finally:
+                os.close(fd)
+            self.assertEqual((code, json.loads(out)["error"]), (1, "repin_in_progress"))
+            self.assertEqual(self.env_file.read_bytes(), original)
+            self.assertEqual(self._backups(), [])
+            code, _, _ = self._run("--apply", "--expect-gateway", NEW)
+            self.assertEqual(code, 0)
+
+    def test_malformed_gateway_status_line_never_reaches_output(self):
+        with FakeServices() as services:
+            original = self._write_env(services)
+            services.raw_portal = ("GARBAGE " + M5_KEY + "\r\n\r\n").encode()
+            code, out, _ = self._run("--apply", "--expect-gateway", NEW)
+            self.assertEqual((code, json.loads(out)["error"]), (1, "embedding_transport_error"))
+            self.assertEqual(self.env_file.read_bytes(), original)
+
     def test_public_route_is_refused_before_any_request(self):
         with FakeServices() as services:
             original = self._write_env(services)
@@ -349,6 +398,32 @@ class SemanticCheckTests(unittest.TestCase):
             self.assertIsNone(result["pushed"])
             self.assertIn("ALERT", err)
             self.assertIn("embedding_gateway_revision_mismatch", err)
+
+    def test_malformed_responses_still_alert_without_echoing_them(self):
+        with FakeServices() as services:
+            services.health = _health()
+            services.raw_portal = ("GARBAGE " + M5_KEY + "\r\n\r\n").encode()
+            code, result, _ = self._run(services, self._env(services))
+            self.assertEqual(result["state"], "warn")
+            self.assertIn("embedding_unavailable", result["codes"])
+            self.assertEqual(services.panels[0]["state"], "warn")
+
+    def test_invalid_heimdall_configuration_keeps_the_fallback_alert(self):
+        for url in ("http://[broken", "http://h\u00e9st/panels", "ftp://127.0.0.1/panels"):
+            with self.subTest(url=url), FakeServices() as services:
+                services.health = _health()
+                code, result, err = self._run(services, self._env(services, HEIMDALL_HUB_URL=url))
+                self.assertEqual((code, result["pushed"]), (1, False))
+                self.assertIn("ALERT", err)
+                self.assertIn("embedding_gateway_revision_mismatch", err)
+                self.assertNotIn(url, err)
+
+    def test_unexpected_check_failure_still_alerts(self):
+        with FakeServices() as services, \
+                mock.patch.object(embedding_revision, "semantic_check", side_effect=RuntimeError(M5_KEY)):
+            code, result, err = self._run(services, self._env(services))
+            self.assertEqual((code, result["codes"]), (1, ["semantic_check_failed"]))
+            self.assertEqual(services.panels[0]["state"], "fail")
 
     def test_current_pin_is_a_pass(self):
         with FakeServices() as services:
