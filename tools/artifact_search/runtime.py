@@ -470,6 +470,10 @@ class Runtime:
         requested = self.semantic.default_mode if mode is None else mode
         if requested not in runtime_vectors.MODES:
             raise RuntimeErrorCode('invalid_query')
+        # Callers that do not ask for a mode get the exact v1 receipt, which the
+        # installed client validates field by field. Extended fields require an
+        # explicit ``mode``; a semantic default cannot be expressed in v1.
+        v1 = mode is None and requested == 'lexical'
         job = self.job()
         handoff = self.lease(job)
         if job['status'] != 'ready' or handoff['snapshot_id'] != job.get('snapshot_id'):
@@ -480,8 +484,9 @@ class Runtime:
                 raise RuntimeErrorCode('index_incomplete')
             if requested == 'lexical':
                 results, decision = index.search(query, top), {'mode': 'lexical', 'decision': 'fts5_bm25'}
-                for item in results:
-                    item['score_kind'] = 'bm25'
+                if not v1:
+                    for item in results:
+                        item['score_kind'] = 'bm25'
             else:
                 results, decision = self._semantic_search(index, job, query, top, requested)
         finally:
@@ -496,7 +501,9 @@ class Runtime:
             item['mimir_url'] = _reference(handoff['mimir_origin'], path, locator['kind'], locator['number'], locator.get('anchor'))
             item['source_id'], item['snapshot_id'] = job['source_id'], job['snapshot_id']
             item['verification'] = 'original_sha256_matched'
-        return {**decision, 'requested_mode': requested, 'results': results,
+        if not v1:
+            decision['requested_mode'] = requested
+        return {**decision, 'results': results,
                 'snapshot_id': job['snapshot_id'], 'source_id': job['source_id'],
                 'observed_at': current['observed_at'], 'expires_at': current['expires_at'],
                 'verified_at': self.clock(),

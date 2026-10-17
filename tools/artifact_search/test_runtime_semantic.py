@@ -405,6 +405,46 @@ class SemanticRuntimeTests(unittest.TestCase):
 
     # -- HTTP contract -----------------------------------------------------
 
+    # Exact v1 receipt fields required by the installed mimir-search client
+    # (client.py validate_receipt at release 833f83bf).  Never widen these for
+    # requests that omit ``mode``.
+    V1_RESPONSE = {"mode", "decision", "results", "snapshot_id", "source_id", "observed_at", "expires_at",
+                   "verified_at", "release", "package_sha256", "abstained"}
+    V1_RESULT = {"path", "artifact_id", "sha256", "locator", "title", "snippet", "score", "mimir_url",
+                 "source_id", "snapshot_id", "verification"}
+
+    def test_omitted_mode_returns_the_exact_v1_receipt_shape(self):
+        for semantic in (SemanticConfig(), _config()):
+            with self.subTest(enabled=semantic.enabled):
+                self.tearDown()
+                self.setUp()
+                runtime = self._runtime(semantic)
+                self._ready(runtime)
+                for response in (runtime.search("north star"), runtime.search("absent topic words")):
+                    self.assertEqual(set(response), self.V1_RESPONSE)
+                    self.assertEqual((response["mode"], response["decision"]), ("lexical", "fts5_bm25"))
+                    self.assertEqual(response["abstained"], not response["results"])
+                    for item in response["results"]:
+                        self.assertEqual(set(item), self.V1_RESULT)
+                        self.assertEqual(set(item["locator"]), {"kind", "number", "anchor"})
+                with _running_http(runtime, api_key="runtime-test-owner-key") as server:
+                    status, body = _http_request(server, "POST", "/search",
+                                                 json.dumps({"query": "north star", "top": 5}).encode())
+                self.assertEqual(status, 200)
+                self.assertEqual(set(body), self.V1_RESPONSE)
+                self.assertTrue(all(set(item) == self.V1_RESULT for item in body["results"]))
+
+    def test_explicit_mode_including_lexical_returns_the_extended_shape(self):
+        runtime = self._runtime(_config())
+        self._ready(runtime)
+        lexical = runtime.search("north star", mode="lexical")
+        self.assertEqual(set(lexical), self.V1_RESPONSE | {"requested_mode"})
+        self.assertEqual(lexical["requested_mode"], "lexical")
+        self.assertTrue(all(set(item) == self.V1_RESULT | {"score_kind"} for item in lexical["results"]))
+        vector = runtime.search("breeze", mode="vector")
+        self.assertLessEqual(self.V1_RESPONSE | {"requested_mode", "abstention", "embedding"}, set(vector))
+        self.assertTrue(all(self.V1_RESULT | {"score_kind", "cosine"} == set(item) for item in vector["results"]))
+
     def test_http_accepts_a_mode_and_rejects_unknown_modes(self):
         runtime = self._runtime(_config())
         self._ready(runtime)

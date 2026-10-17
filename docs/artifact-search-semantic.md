@@ -109,8 +109,12 @@ returns a mislabelled or partial semantic answer. The reasons are:
 | `embedding_unavailable` | The gateway failed, or the breaker is open. |
 | `embedding_route_unavailable` | The route environment is missing or invalid. |
 
-Every response carries `requested_mode`. Semantic results add `score_kind`,
-`cosine` and an `embedding` identity block. Originals are verified exactly as
+Requests that omit `mode` keep the exact v1 receipt, which the installed client
+validates field by field (see the [runtime contract](artifact-search-runtime.md)).
+An explicit `mode`, including `"lexical"`, returns the extended shape:
+`requested_mode` and per-result `score_kind`, plus `cosine` and an `embedding`
+identity block for semantic results. A non-lexical default therefore also needs a
+client release that accepts the extended shape. Originals are verified exactly as
 for lexical results: one stale or changed original suppresses the whole response.
 
 ### 4. Abstention for negatives

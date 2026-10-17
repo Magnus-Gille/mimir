@@ -122,10 +122,25 @@ shell command or result URL. Only the exact loopback Host is accepted.
 
 Each result contains artifact ID/path/hash, source ID, snapshot ID, original
 credential-free Mímir URL, physical page/slide/section locator, bounded title and
-snippet, score with its `score_kind` (`bm25` for lexical) and
-`verification: original_sha256_matched`. Response metadata names the effective
-and requested mode, the ranking decision, the observation deadline and whether it
-returned no results. Semantic responses add an explicit `abstention` decision. Scores are not confidence probabilities; empty results do not certify
+snippet, BM25 score and `verification: original_sha256_matched`. Response metadata
+names the lexical/BM25 decision, observation deadline and whether it returned no
+results.
+
+**Compatibility contract.** A request that omits `mode`, while the configured
+default is lexical, returns exactly this v1 shape with no added keys:
+
+- response keys: `mode`, `decision`, `results`, `snapshot_id`, `source_id`,
+  `observed_at`, `expires_at`, `verified_at`, `release`, `package_sha256`,
+  `abstained`;
+- result keys: `path`, `artifact_id`, `sha256`, `locator`, `title`, `snippet`,
+  `score`, `mimir_url`, `source_id`, `snapshot_id`, `verification`.
+
+The installed `mimir-search` client validates these exact sets. Sending any
+explicit `mode`, including `"lexical"`, opts into the extended shape:
+`requested_mode` plus per-result `score_kind`, and for semantic responses
+`fallback_reason`, `abstention`, `embedding`, `candidate_window` and `cosine`. A
+semantic configured default cannot be expressed in v1, so the client must accept
+the extended shape before any default is changed. Scores are not confidence probabilities; empty results do not certify
 that an answer is absent. Result references confer no file access: agents must
 fetch through their own authorized Mímir path and verify the byte hash again.
 
