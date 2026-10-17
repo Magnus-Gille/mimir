@@ -15,7 +15,8 @@ import tempfile
 import threading
 import time
 import unittest
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from unittest.mock import patch
 
 from tools.artifact_search import client, client_remote
@@ -27,6 +28,7 @@ from tools.artifact_search.test_runtime import (
     _Clock,
 )
 from tools.artifact_search import test_runtime
+from tools.artifact_search.snapshot import canonical
 
 
 RELEASE = "a" * 40
@@ -73,6 +75,54 @@ def client_remote_handler(runtime, api_key):
     from tools.artifact_search.runtime import handler
 
     return handler(runtime, api_key)
+
+
+@contextmanager
+def _serve_body(body: bytes, status: int = 200):
+    """Loopback stub answering every POST with fixed bytes, as the runtime would."""
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def _run_remote_main(stdin: bytes) -> bytes:
+    """Run the remote entrypoint and return exactly the bytes it wrote to stdout."""
+    output = BytesIO()
+    stdout = type("Output", (), {"buffer": output, "write": lambda self, _text: (_ for _ in ()).throw(AssertionError("text stdout used")),
+                                 "flush": lambda self: None})()
+    with patch("sys.stdin", type("Input", (), {"buffer": BytesIO(stdin)})()), patch("sys.stdout", stdout):
+        client_remote.main()
+    return output.getvalue()
+
+
+def _near_limit_receipt(profile, now, size):
+    """A receipt whose canonical runtime encoding is exactly ``size`` bytes, mostly non-ASCII."""
+    receipt = _receipt(profile, now)
+    receipt["results"][0]["snippet"] = ""
+    base = len(canonical(receipt))
+    filler = size - base
+    receipt["results"][0]["snippet"] = "\u00e9" * (filler // 2) + "x" * (filler % 2)
+    assert len(canonical(receipt)) == size
+    return receipt
 
 
 class ClientInputAndReceiptTests(unittest.TestCase):
@@ -180,6 +230,15 @@ def _receipt(profile, now, *, results=True):
     }
 
 
+class ClientRemoteSourceTests(unittest.TestCase):
+    def test_remote_source_is_ascii_without_backslashes(self):
+        # The source is shlex-quoted into a login shell on the search host.
+        source = (Path(client.__file__).with_name("client_remote.py")).read_bytes()
+        self.assertTrue(source.isascii())
+        self.assertNotIn(b"\\", source)
+        self.assertEqual(shlex.split("python3 -I -c " + shlex.quote(source.decode("ascii")))[3], source.decode("ascii"))
+
+
 class ClientRemoteIntegrationTests(unittest.TestCase):
     def test_non_ascii_query_preserves_request_byte_limit(self):
         with _serve(self.runtime) as server:
@@ -272,6 +331,45 @@ class ClientRemoteIntegrationTests(unittest.TestCase):
                 client_remote.execute({"query": "north star", "top": 5})
             self.assertEqual(raised.exception.code, "retrieval_unavailable")
 
+    def test_remote_maps_runtime_400_to_invalid_request(self):
+        with _serve(self.runtime) as server:
+            with patch.object(client_remote, "KEY_PATH", self.key_path), patch.object(client_remote, "PORT", server.server_port):
+                with self.assertRaises(client_remote.RemoteError) as raised:
+                    client_remote.execute({"query": "north star", "top": 9})
+                self.assertEqual(raised.exception.code, "invalid_request")
+                output = _run_remote_main(b'{"query":"north star","top":9}')
+        self.assertEqual(json.loads(output), {"ok": False, "error": "invalid_request"})
+        for status in (404, 500, 503):
+            with self.subTest(status=status), _serve_body(b'{"error":"synthetic detail"}', status) as server:
+                with patch.object(client_remote, "KEY_PATH", self.key_path), patch.object(client_remote, "PORT", server.server_port):
+                    output = _run_remote_main(b'{"query":"north star","top":5}')
+                self.assertEqual(json.loads(output), {"ok": False, "error": "retrieval_unavailable"})
+                self.assertNotIn(b"synthetic detail", output)
+
+    def test_remote_envelope_keeps_near_limit_non_ascii_receipt_within_client_bound(self):
+        receipt = _near_limit_receipt(_profile(), self.now, client.LIMIT)
+        with _serve_body(canonical(receipt)) as server:
+            with patch.object(client_remote, "KEY_PATH", self.key_path), patch.object(client_remote, "PORT", server.server_port):
+                output = _run_remote_main(b'{"query":"north star","top":5}')
+        self.assertEqual(json.loads(output), {"ok": True, "data": receipt})
+        audit = self.workspace / "near-limit-audit.json"
+        self._fake_ssh(audit, output)
+        with patch.dict(os.environ, {"PATH": str(self.fake_bin), "HOME": str(self.workspace)}):
+            self.assertEqual(client._transport(_profile(), b'{"query":"north star","top":5}'), receipt)
+
+        oversized = _near_limit_receipt(_profile(), self.now, client.LIMIT + 1)
+        with _serve_body(canonical(oversized)) as server:
+            with patch.object(client_remote, "KEY_PATH", self.key_path), patch.object(client_remote, "PORT", server.server_port):
+                output = _run_remote_main(b'{"query":"north star","top":5}')
+        self.assertEqual(json.loads(output), {"ok": False, "error": "invalid_response"})
+
+    def test_remote_envelope_rejects_unencodable_or_nonfinite_runtime_values(self):
+        for body in (b'{"title":"\\ud800"}', b'{"score":1e400}'):
+            with self.subTest(body=body), _serve_body(body) as server:
+                with patch.object(client_remote, "KEY_PATH", self.key_path), patch.object(client_remote, "PORT", server.server_port):
+                    output = _run_remote_main(b'{"query":"north star","top":5}')
+                self.assertEqual(json.loads(output), {"ok": False, "error": "invalid_response"})
+
     def test_remote_missing_or_insecure_credential_fails_before_request(self):
         missing = self.workspace / "missing.env"
         with patch.object(client_remote, "KEY_PATH", missing):
@@ -301,17 +399,8 @@ class ClientRemoteIntegrationTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, "retrieval_unavailable")
 
     def test_remote_entrypoint_never_echoes_synthetic_key_or_raw_failure(self):
-        from io import BytesIO, StringIO
-        from unittest.mock import patch as mock_patch
-
-        stdout = StringIO()
-        with mock_patch.object(client_remote, "KEY_PATH", self.key_path), mock_patch.object(
-            client_remote, "PORT", 1
-        ), mock_patch("sys.stdin", type("Input", (), {"buffer": BytesIO(b'{"query":"north star","top":5}')})()), mock_patch(
-            "sys.stdout", stdout
-        ):
-            client_remote.main()
-        output = stdout.getvalue()
+        with patch.object(client_remote, "KEY_PATH", self.key_path), patch.object(client_remote, "PORT", 1):
+            output = _run_remote_main(b'{"query":"north star","top":5}').decode("utf-8")
         self.assertNotIn(SYNTHETIC_KEY, output)
         self.assertNotIn("Connection refused", output)
         self.assertEqual(json.loads(output), {"ok": False, "error": "retrieval_unavailable"})
@@ -382,7 +471,7 @@ class ClientRemoteIntegrationTests(unittest.TestCase):
         self.assertNotIn(SYNTHETIC_KEY, " ".join(argv))
 
         oversized = self.workspace / "oversized-audit.json"
-        self._fake_ssh(oversized, b"x" * (client.LIMIT + 1))
+        self._fake_ssh(oversized, b"x" * (client.ENVELOPE_LIMIT + 1))
         with patch.dict(os.environ, {"PATH": str(self.fake_bin), "HOME": str(self.workspace)}):
             with self.assertRaises(client.ClientError) as raised:
                 client._transport(_profile(), payload)
@@ -391,12 +480,17 @@ class ClientRemoteIntegrationTests(unittest.TestCase):
     def test_ssh_transport_timeout_kills_child_and_returns_stable_error(self):
         audit = self.workspace / "timeout-audit.json"
         self._fake_ssh(audit, b"", sleep=True)
+        started = time.monotonic()
         with patch.dict(os.environ, {"PATH": str(self.fake_bin), "HOME": str(self.workspace)}), patch.object(
-            client.time, "monotonic", side_effect=[0.0, 46.0]
+            client, "TRANSPORT_TIMEOUT", 1.0
         ):
             with self.assertRaises(client.ClientError) as raised:
                 client._transport(_profile(), b'{"query":"north star","top":5}')
         self.assertEqual(raised.exception.code, "transport_unavailable")
+        self.assertLess(time.monotonic() - started, 10)
+        # The fake ssh sleeps 20 seconds; it must have been killed and reaped.
+        with self.assertRaises(ProcessLookupError):
+            os.kill(json.loads(audit.read_text())["pid"], 0)
 
     def test_full_cli_process_over_fake_ssh_executes_embedded_remote_payload(self):
         home = self.workspace / "synthetic-home"
@@ -503,7 +597,7 @@ exec(compile(source, 'client_remote.py', 'exec'), {{'__name__': '__main__'}})
             "#!" + os.sys.executable + "\n"
             "import base64, json, os, sys, time\n"
             "payload = sys.stdin.buffer.read()\n"
-            f"open({str(audit)!r}, 'w').write(json.dumps({{'argv': sys.argv[1:], 'stdin': payload.decode('utf-8')}}))\n"
+            f"open({str(audit)!r}, 'w').write(json.dumps({{'argv': sys.argv[1:], 'stdin': payload.decode('utf-8'), 'pid': os.getpid()}}))\n"
             + ("time.sleep(20)\n" if sleep else f"sys.stdout.buffer.write(base64.b64decode({encoded!r}))\n")
         )
         executable = self.fake_bin / "ssh"
