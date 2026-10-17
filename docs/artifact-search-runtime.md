@@ -73,14 +73,24 @@ and duration caps still apply. Only one request and one index child run at once.
 Snapshot limits remain 20 MiB/file, 256 MiB/corpus and 10,000 entries. Index limits
 include 50,000 units and one million extracted characters per artifact. State over
 512 MiB blocks further job work; pruning is explicit and never deletes originals.
-HTTP pulls retain no-redirect/no-proxy behavior and source request pacing. Shared
-IP rate exhaustion is a visible failed job, not an authorization bypass.
+HTTP pulls retain no-redirect/no-proxy behavior and source request pacing.
+
+Transient source conditions — `source_unavailable`, HTTP 408/429/5xx and a lapsed
+lease (`source_stale`) — keep the job `pending` with that error code, a
+`transient_failures` count and a `retry_after` time. The worker backs off from 5 s
+doubling to a 300 s cap and resumes by itself once the source answers or the
+refresher installs a renewed lease. The job is never ready meanwhile, so retrieval
+stays unavailable and rate exhaustion is still not an authorization bypass. Every
+other failure (authorization, missing or mismatched objects, scope changes,
+corrupt state) remains a terminal `failed` job. A job left `failed` with a
+transient code by an earlier release resumes the same way.
 
 Use the same `--state` and `--handoff` for these local control commands:
 
 - `status`: bounded health JSON; no content or credentials.
 - `cancel`: stop at the next artifact boundary; retain committed work.
-- `retry`: resume a failed/cancelled job after the underlying cause is fixed.
+- `retry`: resume a failed/cancelled job after the underlying cause is fixed;
+  it also clears any transient backoff.
 - `rebuild`: preserve the prior database under a `.saved-*` name and rebuild from
   the pinned source. This is also missing/corrupt-index recovery and full restore.
 

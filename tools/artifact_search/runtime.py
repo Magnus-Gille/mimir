@@ -26,6 +26,12 @@ from .snapshot_http import HttpSnapshotSource
 LEASE_SCHEMA = 'mimir-search-handoff-v1'
 MAX_STATE_BYTES = 512 * 1024 * 1024
 MAX_LEASE_SECONDS = 3600
+MIN_RETRY_SECONDS = 5
+MAX_RETRY_SECONDS = 300
+# Upstream outages, throttling and a lapsed lease (renewed by the refresher once
+# the source is back) are retried with backoff and never serve meanwhile. Every
+# other failure (auth, missing objects, hash or scope mismatches) fails closed.
+TRANSIENT_ERRORS = re.compile(r'source_unavailable|source_stale|source_http_(?:408|429|5[0-9]{2})')
 
 
 class RuntimeErrorCode(ValueError):
@@ -148,7 +154,20 @@ class Runtime:
                 raise RuntimeErrorCode('invalid_job_state')
         elif any(key in value for key in ('index', 'source_id', 'handoff')) or value['status'] == 'ready':
             raise RuntimeErrorCode('invalid_job_state')
+        if 'retry_after' in value or 'transient_failures' in value:
+            if (value['status'] != 'pending' or type(value.get('retry_after')) not in (int, float) or
+                    type(value.get('transient_failures')) is not int or value['transient_failures'] < 1):
+                raise RuntimeErrorCode('invalid_job_state')
         return value
+
+    @staticmethod
+    def _transient(job):
+        return isinstance(job.get('error'), str) and TRANSIENT_ERRORS.fullmatch(job['error']) is not None
+
+    @staticmethod
+    def _clear_retry(job):
+        job.pop('retry_after', None)
+        job.pop('transient_failures', None)
 
     def save(self, job):
         atomic_json(self.state / 'job.json', job)
@@ -179,8 +198,13 @@ class Runtime:
         """One artifact per durable step; a crash leaves its transaction retryable."""
         with self.locked():
             job = self.job()
+            if job['status'] == 'failed' and self._transient(job):
+                # Jobs stranded by older releases on a transient outage resume.
+                job['status'] = 'pending'
             if job['status'] in {'failed', 'cancelled'}:
                 return job['status']
+            if job['status'] == 'pending' and job.get('retry_after', 0) > self.clock():
+                return 'pending'
             try:
                 self._budget()
                 handoff = self.lease(job)
@@ -198,6 +222,8 @@ class Runtime:
                     finally:
                         index.close()
                     job['handoff'] = handoff
+                    self._clear_retry(job)
+                    job['error'] = None
                     self.save(job)
                     return 'ready'
                 job['handoff'] = handoff
@@ -222,14 +248,25 @@ class Runtime:
                 if current['snapshot_id'] != job['snapshot_id']:
                     raise RuntimeErrorCode('source_changed')
                 job['handoff'] = current
+                self._clear_retry(job)
+                job['error'] = None
                 self._budget()
                 self.save(job)
                 return job['status']
             except (OSError, ValueError, sqlite3.DatabaseError) as error:
                 # No exception text, URLs, paths, response bodies or source bytes in diagnostics.
+                code = error.args[0] if isinstance(error, (RuntimeErrorCode, SnapshotError)) and error.args else None
+                if isinstance(code, str) and TRANSIENT_ERRORS.fullmatch(code):
+                    failures = job.get('transient_failures', 0) + 1
+                    job['status'], job['error'] = 'pending', code
+                    job['transient_failures'] = failures
+                    job['retry_after'] = self.clock() + min(MAX_RETRY_SECONDS, MIN_RETRY_SECONDS * 2 ** min(failures - 1, 16))
+                    self.save(job)
+                    return 'pending'
+                self._clear_retry(job)
                 job['status'], job['error'] = 'failed', 'index_step_failed'
-                if isinstance(error, (RuntimeErrorCode, SnapshotError)) and re.fullmatch('[a-z_0-9]{1,64}', str(error)):
-                    job['error'] = str(error)
+                if isinstance(code, str) and re.fullmatch('[a-z_0-9]{1,64}', code):
+                    job['error'] = code
                 self.save(job)
                 return 'failed'
 
@@ -246,6 +283,7 @@ class Runtime:
                         if old.exists():
                             os.rename(old, self.state / (job['index'] + suffix + sidecar))
                 job['status'], job['error'] = 'pending', None
+                self._clear_retry(job)
             else:
                 raise RuntimeErrorCode('invalid_action')
             self.save(job)
@@ -462,8 +500,14 @@ def main(argv=None):
                         if child.returncode != 0 and runtime.job()['status'] != 'failed':
                             runtime.control('cancel')
                         child = None
-                        next_step = time.monotonic() + (60 if runtime.job()['status'] == 'ready' else 1.1)
-                    if runtime.job()['status'] not in {'failed', 'cancelled'} and time.monotonic() >= next_step:
+                        job = runtime.job()
+                        delay = 60 if job['status'] == 'ready' else 1.1
+                        if 'retry_after' in job:
+                            delay = max(delay, min(MAX_RETRY_SECONDS, job['retry_after'] - time.time()))
+                        next_step = time.monotonic() + delay
+                    job = runtime.job()
+                    if ((job['status'] not in {'failed', 'cancelled'} or job['status'] == 'failed' and runtime._transient(job))
+                            and time.monotonic() >= next_step):
                         entry = [sys.argv[0]] if sys.argv[0].endswith('.pyz') else ['-m', __package__ + '.runtime']
                         child = subprocess.Popen([sys.executable, *entry, 'step',
                                                   '--state', str(args.state), '--handoff', str(args.handoff)],
