@@ -76,9 +76,19 @@ case "$*" in
     done < <(find "$source" ! -type d -print)
     exit "\${MOCK_PROMOTE_RC:-0}"
     ;;
-  *"-an --delete"*)
-    i=0; while [ "$i" -lt "\${MOCK_DELETES:-0}" ]; do printf 'deleting old-%s\n' "$i"; i=$((i + 1)); done
-    i=0; while [ "$i" -lt "\${MOCK_ADDITIONS:-0}" ]; do printf 'new-%s\n' "$i"; i=$((i + 1)); done
+  *"-ani --delete --out-format=%i"*)
+    i=0; while [ "$i" -lt "\${MOCK_DELETES:-0}" ]; do
+      case "\${MOCK_DELETE_FORMAT:-filename}" in
+        bare) printf '*deleting\n' ;;
+        padded) printf '*deleting   \n' ;;
+        filename) printf '*deleting old-%s\n' "$i" ;;
+      esac
+      i=$((i + 1))
+    done
+    i=0; while [ "$i" -lt "\${MOCK_ADDITIONS:-0}" ]; do printf '>f+++++++\n'; i=$((i + 1)); done
+    if [ "\${MOCK_ADDITIONS:-0}" -gt 0 ]; then printf '>f+++++++++\n>f       \n'; fi
+    if [ -n "\${MOCK_EXTRA_OUTPUT:-}" ]; then printf '%s\n' "$MOCK_EXTRA_OUTPUT"; fi
+    if [ "\${MOCK_DRY_RC:-0}" -ne 0 ]; then printf 'mock dry-run failure\n' >&2; fi
     exit "\${MOCK_DRY_RC:-0}"
     ;;
   *"--delete --max-delete="*) exit "\${MOCK_MIRROR_RC:-0}" ;;
@@ -165,6 +175,8 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
     expect(result.status, result.stderr).toBe(0);
     const mirrors = invocations.split("\n").filter(line => line.startsWith("rsync ") && line.includes("--delete"));
     expect(mirrors).toHaveLength(2);
+    expect(mirrors[0]).toContain("-ani --delete --out-format=%i");
+    expect(mirrors[0]).not.toContain("2>/dev/null");
     for (const invocation of mirrors) {
       expect(invocation).toContain("--filter=P /artifact-snapshots/***");
       expect(invocation).toContain("--exclude=/artifact-snapshots");
@@ -195,7 +207,7 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
     const retryInvocations = second.invocations.slice(callsBeforeRetry);
     expect(second.result.status).not.toBe(0);
     expect(retryInvocations).toContain("node ");
-    expect(retryInvocations).not.toContain("-an --delete");
+    expect(retryInvocations).not.toContain("-ani --delete --out-format=%i");
     expect(retryInvocations).not.toContain("--max-delete=");
     expect(readFileSync(pending, "utf8")).toContain("staged:partial-secret.txt");
   });
@@ -207,7 +219,7 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
     });
     expect(result.status).not.toBe(0);
     expect(invocations).toContain("node ");
-    expect(invocations).not.toContain("-an --delete");
+    expect(invocations).not.toContain("-ani --delete --out-format=%i");
     expect(invocations).not.toContain("--max-delete=");
   });
 
@@ -227,11 +239,11 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
     expect(second.result.status, second.result.stderr).toBe(0);
     expect(retryInvocations).toContain("node ");
     expect(retryInvocations).toContain("import-pending/");
-    expect(retryInvocations).toContain("-an --delete");
+    expect(retryInvocations).toContain("-ani --delete --out-format=%i");
     expect(retryInvocations).toContain("--max-delete=");
     const promotionIndex = retryInvocations.lastIndexOf("import-pending/");
     expect(retryInvocations.indexOf("node ")).toBeLessThan(promotionIndex);
-    expect(promotionIndex).toBeLessThan(retryInvocations.indexOf("-an --delete"));
+    expect(promotionIndex).toBeLessThan(retryInvocations.indexOf("-ani --delete --out-format=%i"));
     expect(existsSync(pendingRoot)).toBe(false);
     expect(readFileSync(join(harness.root, "mimir", "retry-me.txt"), "utf8")).toContain("staged:retry-me.txt");
   });
@@ -249,7 +261,7 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
       join(harness.root, ".local", "state", "mimir", "import-pending", "collision.txt"),
       "utf8",
     )).toContain("staged:collision.txt");
-    expect(invocations).not.toContain("-an --delete");
+    expect(invocations).not.toContain("-ani --delete --out-format=%i");
     expect(invocations).not.toContain("--max-delete=");
   });
 
@@ -261,6 +273,48 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
     });
     expect(result.status).toBe(1);
     expect(`${result.stdout}\n${result.stderr}`).toContain("21/100 remote entries");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
+  it.each(["bare", "padded", "filename"])("counts %s rsync deletion records", (deleteFormat) => {
+    const { result, invocations } = runSyncScript(script, {
+      MOCK_REMOTE_TOTAL: "100",
+      MOCK_DELETES: "21",
+      MOCK_DELETE_FORMAT: deleteFormat,
+    });
+    expect(result.status).toBe(1);
+    expect(`${result.stdout}\n${result.stderr}`).toContain("21/100 remote entries");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
+  it("aborts when the exact delete percentage exceeds the threshold by a fraction", () => {
+    const { result, invocations } = runSyncScript(script, {
+      MOCK_REMOTE_TOTAL: "101",
+      MOCK_DELETES: "21",
+    });
+    expect(result.status).toBe(1);
+    expect(`${result.stdout}\n${result.stderr}`).toContain("21/101 remote entries (21%; max 1000 entries or 20%)");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
+  it.each(["010", "09", "08"])("treats percentage %s as decimal", (threshold) => {
+    const { result, invocations } = runSyncScript(script, {
+      MOCK_REMOTE_TOTAL: "100",
+      MOCK_DELETES: threshold === "08" ? "8" : "9",
+      MIMIR_SYNC_MAX_DELETE_PCT: threshold,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).not.toContain("value too great for base");
+    expect(invocations).toContain("--max-delete=");
+  });
+
+  it("enforces a zero-padded decimal percentage limit", () => {
+    const { result, invocations } = runSyncScript(script, {
+      MOCK_REMOTE_TOTAL: "100",
+      MOCK_DELETES: "9",
+      MIMIR_SYNC_MAX_DELETE_PCT: "08",
+    });
+    expect(result.status).toBe(1);
     expect(invocations).not.toContain("--max-delete=");
   });
 
@@ -286,6 +340,20 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
     expect(invocations).toContain("-path '/home/mimir/mimir/artifact-snapshots' -prune -o -printf .");
   });
 
+  it("stops when the dry-run fails and leaves its diagnostic visible", () => {
+    const { result, invocations } = runSyncScript(script, { MOCK_DRY_RC: "23" });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("mock dry-run failure");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
+  it("fails closed on unexpected nonempty dry-run output", () => {
+    const { result, invocations } = runSyncScript(script, { MOCK_EXTRA_OUTPUT: "deleting old.txt" });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("unrecognized rsync dry-run output");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
   it("fails closed when the remote population cannot be measured", () => {
     const { result, invocations } = runSyncScript(script, {
       MOCK_DELETES: "1",
@@ -307,6 +375,22 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
       expect(invocations).not.toContain("publish-freshness");
     }
   });
+});
+
+it.skipIf(spawnSync("rsync", ["--version"]).status !== 0)("rsync itemized dry-run format marks deletions", () => {
+  const root = tempDir();
+  const sender = join(root, "sender");
+  const receiver = join(root, "receiver");
+  mkdirSync(sender);
+  mkdirSync(receiver);
+  writeFileSync(join(receiver, "old.txt"), "old");
+
+  const result = spawnSync("rsync", ["-ani", "--delete", "--out-format=%i", `${sender}/`, `${receiver}/`], {
+    encoding: "utf8",
+  });
+  expect(result.status, result.stderr).toBe(0);
+  expect(result.stdout.split("\n").filter(line => /^\*deleting([\s]|$)/.test(line))).toHaveLength(1);
+  expect(existsSync(join(receiver, "old.txt"))).toBe(true);
 });
 
 describe("sync freshness compatibility", () => {
