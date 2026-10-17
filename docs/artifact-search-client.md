@@ -110,8 +110,10 @@ in another repository or harness is a separate integration action.
 ## Evidence and failure contract
 
 Queries are limited to 4096 characters and an 8192-byte serialized request;
-`top` is an integer from 1 to 5. The byte limit applies to the compact UTF-8 JSON
-request, so a query within 4096 characters can still be rejected as
+`top` is an integer from 1 to 5. The byte limit applies to the UTF-8 JSON request
+as the client sends it (`json.dumps` with `ensure_ascii=False` and default
+separators, for example `{"query": "...", "top": 5}`), so a query within 4096
+characters can still be rejected as
 `invalid_request` when it contains many non-ASCII or JSON-escaped characters
 (quotes, backslashes, control characters). JSON Schema cannot express a byte
 limit, so `TOOL_DEFINITION` states it in its descriptions. Runtime responses are

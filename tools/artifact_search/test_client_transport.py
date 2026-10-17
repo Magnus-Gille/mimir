@@ -346,6 +346,25 @@ class ClientRemoteIntegrationTests(unittest.TestCase):
                 self.assertEqual(json.loads(output), {"ok": False, "error": "retrieval_unavailable"})
                 self.assertNotIn(b"synthetic detail", output)
 
+    def test_remote_error_status_never_reads_the_error_body(self):
+        class Response:
+            def __init__(self, status):
+                self.status = status
+
+            def getheader(self, _name, default=None):
+                return "application/json"
+
+            def read(self, *_args):
+                raise AssertionError("error body read")
+
+        for status, code in ((400, "invalid_request"), (401, "unauthorized"), (403, "unauthorized"), (404, "retrieval_unavailable"), (503, "retrieval_unavailable")):
+            with self.subTest(status=status), patch.object(client_remote, "KEY_PATH", self.key_path), patch.object(
+                client_remote.http.client.HTTPConnection, "request"
+            ), patch.object(client_remote.http.client.HTTPConnection, "getresponse", return_value=Response(status)):
+                with self.assertRaises(client_remote.RemoteError) as raised:
+                    client_remote.execute({"query": "north star", "top": 5})
+                self.assertEqual(raised.exception.code, code)
+
     def test_remote_envelope_keeps_near_limit_non_ascii_receipt_within_client_bound(self):
         receipt = _near_limit_receipt(_profile(), self.now, client.LIMIT)
         with _serve_body(canonical(receipt)) as server:
@@ -480,17 +499,24 @@ class ClientRemoteIntegrationTests(unittest.TestCase):
     def test_ssh_transport_timeout_kills_child_and_returns_stable_error(self):
         audit = self.workspace / "timeout-audit.json"
         self._fake_ssh(audit, b"", sleep=True)
+        children = []
+        real_popen = subprocess.Popen
+
+        def spawn(*args, **kwargs):
+            children.append(real_popen(*args, **kwargs))
+            return children[-1]
+
         started = time.monotonic()
         with patch.dict(os.environ, {"PATH": str(self.fake_bin), "HOME": str(self.workspace)}), patch.object(
             client, "TRANSPORT_TIMEOUT", 1.0
-        ):
+        ), patch.object(client.subprocess, "Popen", side_effect=spawn):
             with self.assertRaises(client.ClientError) as raised:
                 client._transport(_profile(), b'{"query":"north star","top":5}')
         self.assertEqual(raised.exception.code, "transport_unavailable")
         self.assertLess(time.monotonic() - started, 10)
-        # The fake ssh sleeps 20 seconds; it must have been killed and reaped.
-        with self.assertRaises(ProcessLookupError):
-            os.kill(json.loads(audit.read_text())["pid"], 0)
+        # The fake ssh sleeps 20 seconds, so it can only have ended by being killed and reaped.
+        self.assertEqual(len(children), 1)
+        self.assertEqual(children[0].returncode, -9)
 
     def test_full_cli_process_over_fake_ssh_executes_embedded_remote_payload(self):
         home = self.workspace / "synthetic-home"
@@ -597,7 +623,7 @@ exec(compile(source, 'client_remote.py', 'exec'), {{'__name__': '__main__'}})
             "#!" + os.sys.executable + "\n"
             "import base64, json, os, sys, time\n"
             "payload = sys.stdin.buffer.read()\n"
-            f"open({str(audit)!r}, 'w').write(json.dumps({{'argv': sys.argv[1:], 'stdin': payload.decode('utf-8'), 'pid': os.getpid()}}))\n"
+            f"open({str(audit)!r}, 'w').write(json.dumps({{'argv': sys.argv[1:], 'stdin': payload.decode('utf-8')}}))\n"
             + ("time.sleep(20)\n" if sleep else f"sys.stdout.buffer.write(base64.b64decode({encoded!r}))\n")
         )
         executable = self.fake_bin / "ssh"
