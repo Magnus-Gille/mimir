@@ -12,9 +12,11 @@ import tempfile
 import threading
 import unittest
 from http.server import ThreadingHTTPServer
+from unittest import mock
 
+from tools.artifact_search import runtime as runtime_module
 from tools.artifact_search.runtime import Runtime, RuntimeErrorCode, handler, load_handoff
-from tools.artifact_search.snapshot import canonical, create_snapshot, digest
+from tools.artifact_search.snapshot import SnapshotError, canonical, create_snapshot, digest
 
 
 SOURCE_ID = "22222222-2222-4222-8222-222222222222"
@@ -253,10 +255,154 @@ class RuntimeContractTests(unittest.TestCase):
                     runtime.search("north star")
 
     def test_expiry_during_source_read_fails_closed(self) -> None:
-        runtime, _root, _result, _bundle, _handoff_path = self._runtime(clock=_Clock(150, 201))
-        self.assertEqual(runtime.step(), "failed")
-        self.assertEqual(runtime.job()["status"], "failed")
+        clock = _Clock(150, 201)
+        runtime, root, result, bundle, handoff_path = self._runtime(clock=clock)
+        self.assertEqual(runtime.step(), "pending")
+        job = runtime.job()
+        self.assertEqual((job["status"], job["error"]), ("pending", "source_stale"))
         self.assertFalse(runtime.health()["ready"])
+        with self.assertRaises(RuntimeErrorCode):
+            runtime.search("north star")
+        # Still stale after the backoff: no progress, no readiness.
+        clock.value = job["retry_after"]
+        self.assertEqual(runtime.step(), "pending")
+        self.assertFalse(runtime.health()["ready"])
+        # A renewed lease from the refresher lets the job finish.
+        clock.value = runtime.job()["retry_after"]
+        self._handoff(handoff_path, root, result, bundle, observed_at=clock.value - 1, expires_at=clock.value + 600)
+        self._complete(runtime)
+        self.assertTrue(runtime.health()["ready"])
+
+    def _flaky_source(self, *codes: str):
+        """Make the next source_for calls raise the given codes, then delegate."""
+        real = runtime_module.source_for
+        pending = list(codes)
+        calls = []
+
+        def flaky(handoff):
+            calls.append(handoff["snapshot_id"])
+            if pending:
+                raise SnapshotError(pending.pop(0))
+            return real(handoff)
+
+        return mock.patch.object(runtime_module, "source_for", flaky), calls
+
+    def test_transient_source_error_backs_off_and_recovers(self) -> None:
+        clock = _Clock(150)
+        runtime, _root, _result, _bundle, _handoff_path = self._runtime(clock=clock)
+        patch, calls = self._flaky_source("source_http_502")
+        with patch:
+            self.assertEqual(runtime.step(), "pending")
+            job = runtime.job()
+            self.assertEqual((job["status"], job["error"]), ("pending", "source_http_502"))
+            self.assertGreater(job["retry_after"], 150)
+            # Inside the backoff window the source is not contacted again.
+            self.assertEqual(runtime.step(), "pending")
+            self.assertEqual(len(calls), 1)
+            clock.value = job["retry_after"]
+            self._complete(runtime)
+        job = runtime.job()
+        self.assertEqual(job["status"], "ready")
+        self.assertNotIn("retry_after", job)
+        self.assertNotIn("transient_failures", job)
+        self.assertIsNone(job["error"])
+        self.assertTrue(runtime.health()["ready"])
+
+    def test_transient_error_on_ready_job_blocks_search_until_recovered(self) -> None:
+        clock = _Clock(150)
+        runtime, _root, _result, _bundle, _handoff_path = self._runtime(clock=clock)
+        self._complete(runtime)
+        patch, _calls = self._flaky_source("source_unavailable")
+        with patch:
+            self.assertEqual(runtime.step(), "pending")
+            self.assertFalse(runtime.health()["ready"])
+            with self.assertRaises(RuntimeErrorCode):
+                runtime.search("north star")
+            clock.value = runtime.job()["retry_after"]
+            self.assertEqual(runtime.step(), "ready")
+        self.assertTrue(runtime.search("north star")["results"])
+
+    def test_repeated_transient_errors_back_off_with_a_cap(self) -> None:
+        clock = _Clock(150)
+        runtime, root, result, bundle, handoff_path = self._runtime(clock=clock)
+        self._handoff(handoff_path, root, result, bundle, observed_at=100, expires_at=3700)
+        patch, _calls = self._flaky_source(*["source_http_503"] * 12)
+        delays = []
+        with patch:
+            for _ in range(12):
+                self.assertEqual(runtime.step(), "pending")
+                job = runtime.job()
+                delays.append(job["retry_after"] - clock.value)
+                clock.value = job["retry_after"]
+        self.assertEqual(delays, sorted(delays))
+        self.assertLess(delays[0], delays[-1])
+        self.assertLessEqual(max(delays), runtime_module.MAX_RETRY_SECONDS)
+        self.assertEqual(runtime.job()["transient_failures"], 12)
+        self.assertEqual(runtime.job()["error"], "source_http_503")
+
+    def test_permanent_source_errors_still_fail_closed(self) -> None:
+        for code in ("source_http_404", "invalid_source_response", "source_http_401"):
+            with self.subTest(code=code):
+                runtime, _root, _result, _bundle, _handoff_path = self._runtime(code.replace("_", "-"))
+                patch, _calls = self._flaky_source(code)
+                with patch:
+                    self.assertEqual(runtime.step(), "failed")
+                self.assertEqual(runtime.job()["status"], "failed")
+                self.assertEqual(runtime.step(), "failed")
+
+    def test_control_actions_on_backed_off_job_keep_state_readable(self) -> None:
+        for action in ("cancel", "retry", "rebuild"):
+            with self.subTest(action=action):
+                runtime, _root, _result, _bundle, _handoff_path = self._runtime("control-" + action)
+                patch, _calls = self._flaky_source("source_http_502")
+                with patch:
+                    self.assertEqual(runtime.step(), "pending")
+                runtime.control(action)
+                job = runtime.job()
+                self.assertNotIn("retry_after", job)
+                self.assertNotIn("transient_failures", job)
+                self.assertIn("status", runtime.health())
+                if action == "cancel":
+                    self.assertEqual(runtime.step(), "cancelled")
+                    runtime.control("retry")
+                self._complete(runtime)
+
+    def test_retry_after_is_bounded_and_finite(self) -> None:
+        clock = _Clock(150)
+        runtime, root, result, bundle, handoff_path = self._runtime(clock=clock)
+        self._handoff(handoff_path, root, result, bundle, observed_at=100, expires_at=3700)
+        patch, _calls = self._flaky_source("source_http_502")
+        with patch:
+            self.assertEqual(runtime.step(), "pending")
+        with runtime.locked():
+            job = runtime.job()
+            job["retry_after"] = clock.value + 10 ** 9
+            runtime.save(job)
+        # A wait beyond the cap (clock jump or corruption) is not honoured:
+        # the very next step does work without advancing the clock.
+        before = runtime.job().get("counts")
+        self.assertEqual(runtime.step(), "pending")
+        self.assertNotEqual(runtime.job().get("counts"), before)
+        self._complete(runtime)
+        for bad in ("Infinity", "NaN", "\"soon\""):
+            with self.subTest(bad=bad):
+                path = runtime.state / "job.json"
+                job = json.loads(path.read_text(encoding="utf-8"))
+                job.update(status="pending", transient_failures=1, error="source_http_502")
+                text = json.dumps(job).replace('"error"', '"retry_after": %s, "error"' % bad, 1)
+                path.write_text(text, encoding="utf-8")
+                with self.assertRaises(RuntimeErrorCode):
+                    runtime.job()
+
+    def test_legacy_failed_job_with_transient_error_recovers(self) -> None:
+        runtime, _root, _result, _bundle, _handoff_path = self._runtime()
+        self._complete(runtime)
+        with runtime.locked():
+            job = runtime.job()
+            job["status"], job["error"] = "failed", "source_http_502"
+            runtime.save(job)
+        self.assertEqual(runtime.step(), "ready")
+        self.assertTrue(runtime.health()["ready"])
 
     def test_corrupt_database_returns_no_content(self) -> None:
         runtime, _root, _result, _bundle, _handoff_path = self._runtime()
