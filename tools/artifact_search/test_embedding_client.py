@@ -134,3 +134,28 @@ class ClientTests(unittest.TestCase):
             client.embed(['x'])
         self.assertEqual(str(caught.exception), 'embedding_deadline_exceeded')
         self.assertLessEqual(now[0], 6.0)
+
+    def test_body_completing_after_the_deadline_is_not_accepted(self):
+        from tools.artifact_search.embedding_client import M5Embedder, EmbedderUnavailable
+        now = [0.0]
+
+        class SlowEof(io.BytesIO):
+            def read1(self, size=-1):
+                chunk = super().read1(size)
+                if not chunk:
+                    now[0] = 10.0  # e.g. a trickled chunk trailer before EOF
+                return chunk
+
+        responses = iter([io.BytesIO(json.dumps(self.release()).encode()),
+                          io.BytesIO(json.dumps(self.payload()).encode()),
+                          SlowEof(json.dumps(self.release()).encode())])
+
+        class Opener:
+            def open(self, request, timeout):
+                return next(responses)
+
+        client = M5Embedder(self.identity(), 'http://localhost/v1', 'synthetic-key', opener=Opener(),
+                            deadline=5.0, clock=lambda: now[0])
+        with self.assertRaises(EmbedderUnavailable) as caught:
+            client.embed(['x'])
+        self.assertEqual(str(caught.exception), 'embedding_deadline_exceeded')

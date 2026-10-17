@@ -37,9 +37,12 @@ are regression evidence only.
   Socket timeouts apply per read, so a gateway that trickles bytes could
   outlive them. Every model call in the step child and in the serve loop
   therefore also runs under a real-time `SIGALRM` watchdog set to the same
-  absolute deadline. Independently of signals, for example on a non-main
-  thread, the embedder reads response bodies incrementally and checks the
-  deadline between reads, so the worst overrun is a single read timeout.
+  absolute deadline. That watchdog applies on the main thread, where the
+  step child and the single-threaded serve loop run. Elsewhere, for example
+  in a threaded test server, the bound is best-effort: the embedder reads
+  bodies incrementally, checks the deadline between reads and after EOF, and
+  rejects a response that completes late. HTTP chunk framing can still take
+  several socket reads inside one check.
 - **Cached in the runtime state directory.** Each embedding identity gets one
   private (`0600`) SQLite file, `vectors-<dims>d-<identity-hash>.sqlite`. The
   identity hash covers the cache schema, model, gateway revision and

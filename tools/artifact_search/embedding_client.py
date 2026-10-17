@@ -107,10 +107,11 @@ class M5Embedder:
                 raise EmbedderUnavailable('embedding_invalid_json') from error
 
     def _read_body(self, response, limit):
-        """Read incrementally so a trickled body cannot outlive the absolute deadline.
+        """Read incrementally and refuse a body that finishes past the deadline.
 
-        Socket timeouts apply per read; checking the deadline between bounded
-        reads caps the overrun at one read timeout without relying on signals.
+        This bounds trickled bodies without signals, but HTTP chunk framing can
+        take several socket reads inside one ``read1``, so it is best-effort; the
+        runtime's main-thread watchdog is what makes the bound absolute.
         """
         reader = getattr(response, 'read1', None)
         if self.deadline is None or reader is None:
@@ -123,6 +124,7 @@ class M5Embedder:
                 break
             chunks.append(chunk)
             size += len(chunk)
+        self._remaining()  # never accept a response that completed too late
         return b''.join(chunks)
 
     def _verify_release(self):
