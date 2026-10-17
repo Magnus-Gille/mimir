@@ -271,6 +271,9 @@ class RepinTests(unittest.TestCase):
             'NOTE="unterminated\n' + pin + 'still note"\n',
             # Backslash continuation or escapes.
             "NOTE=one \\\n" + pin,
+            # A comment continued by a backslash swallows the pin in systemd.
+            "# continued comment \\\n" + pin,
+            "; continued comment \\\n" + pin,
             # Python-only line separators: systemd sees one comment line.
             "# comment\u2028" + pin,
             "# comment\x0b" + pin,

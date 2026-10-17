@@ -116,7 +116,8 @@ def parse_env(data):
         text = data.decode('utf-8')
     except UnicodeError:
         raise RevisionError('invalid_env_file') from None
-    if _CONTROL.search(text.replace('\r\n', '\n')):
+    # Backslashes escape or continue lines even inside systemd comments.
+    if _CONTROL.search(text.replace('\r\n', '\n')) or '\\' in text:
         raise RevisionError('unsupported_env_syntax')
     lines = _LINE.findall(text)
     values, seen, pin = {}, set(), None

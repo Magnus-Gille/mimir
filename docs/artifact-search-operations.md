@@ -155,7 +155,8 @@ release, as the units do. Run it on the reader host as the reader user.
    The command reads `M5_OPENAI_BASE_URL` and `M5_API_KEY` from the env file in
    process. It refuses a non-private route, a symlinked or non-`0600` env file,
    and duplicate pin or route keys. It parses only single-line `KEY=value`
-   assignments, unquoted or fully quoted, without backslashes. Anything that
+   assignments, unquoted or fully quoted, and no backslash anywhere in the file,
+   comments included. Anything that
    systemd might read differently, such as whitespace before `=`, multiline
    quotes, escapes, control characters or non-LF line separators, is refused
    with `unsupported_env_syntax`. Before any network call, it hashes the
