@@ -112,7 +112,11 @@ const INLINE_TYPES = new Set([
   "video/mp4",
   "video/webm",
 ]);
-const SAFE_OPEN_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW;
+// O_NONBLOCK keeps an attacker-placed FIFO from stalling the request before
+// the opened handle can be type-checked. It is meaningful on the POSIX
+// platforms Mímir supports; on platforms that ignore it, the post-open type
+// check still rejects non-regular entries before streaming.
+const SAFE_OPEN_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
 
 async function serveFile(
   req: express.Request,
@@ -142,6 +146,10 @@ async function serveFile(
       const stats = await file.stat();
       if (stats.isDirectory()) {
         res.status(400).json({ error: "Path is a directory. Use /list/ for directory listings, /files/ for individual files." });
+        return;
+      }
+      if (!stats.isFile()) {
+        res.status(400).json({ error: "Path is not a regular file." });
         return;
       }
 
@@ -416,6 +424,7 @@ export function createApp(config?: {
             const entry = await open(realEntryPath, SAFE_OPEN_FLAGS).catch(() => null);
             if (!entry) return null;
             const entryStat = await entry.stat().finally(() => entry.close());
+            if (!entryStat.isDirectory() && !entryStat.isFile()) return null;
             const isDirectory = entryStat.isDirectory();
             return {
               name: isDirectory ? e.name + "/" : e.name,
