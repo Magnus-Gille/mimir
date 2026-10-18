@@ -40,6 +40,21 @@ The mirror path is fail-loud: any error exits non-zero **and** pushes a `fail` p
 Archive pruning is best-effort — a prune failure logs a warning but still reports `pass`,
 so transient retention drift can't mask an otherwise-healthy backup.
 
+Operational output is deliberately content-blind. The private log and inherited
+stderr contain only UTC timestamps, stage/state/exit code, and numeric change
+metrics; rclone output, source/destination/remote/config/log paths, archive names,
+artifact filenames, and artifact content are discarded. Heimdall receives the same
+bounded status fields. The configured state directory may be shared with other
+Mímir state surfaces and is never tightened by this job; the default offsite
+state is kept in its private `offsite-private` child with mode `0700`. The log
+and heartbeat are owner-only `0600` files, and the service uses `UMask=0077`.
+Custom `MIMIR_OFFSITE_LOG` and `MIMIR_OFFSITE_STAMP` locations are accepted only
+when their directly used parent directories are real, owner-controlled private
+directories. Symlinked, non-regular, foreign-owned, or multiply-linked existing
+state files are rejected before any write. Existing historical root-level logs
+and stamps are not deleted or moved automatically; inspect and migrate or retain
+them explicitly as a deployment follow-up.
+
 ---
 
 ## One-time setup
@@ -139,8 +154,8 @@ rclone config. Optional overrides (defaults shown):
 # MIMIR_OFFSITE_SERVICE=mimir                      # Heimdall service id (sibling repos override)
 # MIMIR_OFFSITE_PANEL=offsite                      # Heimdall panel id
 # MIMIR_OFFSITE_STATE_DIR=$HOME/.local/state/mimir       # systemd uses /var/lib/mimir
-# MIMIR_OFFSITE_STAMP=$MIMIR_OFFSITE_STATE_DIR/offsite.stamp
-# MIMIR_OFFSITE_LOG=$MIMIR_OFFSITE_STATE_DIR/offsite-backup.log
+# MIMIR_OFFSITE_STAMP=$MIMIR_OFFSITE_STATE_DIR/offsite-private/offsite.stamp
+# MIMIR_OFFSITE_LOG=$MIMIR_OFFSITE_STATE_DIR/offsite-private/offsite-backup.log
 # MIMIR_OFFSITE_DRYRUN=1                            # same as passing --dry-run
 # RCLONE_BIN=rclone                                # rclone binary path
 ```
@@ -156,6 +171,11 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now mimir-offsite.timer
 systemctl list-timers mimir-offsite.timer   # confirm next run
 ```
+
+The checked-in unit renders the shared `StateDirectory=mimir` traversal and
+`UMask=0077`; the script creates and secures its dedicated `offsite-private`
+child. Do not grant Heimdall access to this log or state directory; use the fixed
+metadata-only freshness surface when a restricted probe needs backup health.
 
 ---
 

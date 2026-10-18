@@ -24,6 +24,7 @@ case "$MAX_DELETE" in ''|*[!0-9]*) echo "ERROR: MIMIR_SYNC_MAX_DELETE must be a 
 [ "$MAX_DELETE" -ge 1 ] || { echo "ERROR: MIMIR_SYNC_MAX_DELETE must be at least 1." >&2; exit 1; }
 case "$MAX_DELETE_PCT" in ''|*[!0-9]*) echo "ERROR: MIMIR_SYNC_MAX_DELETE_PCT must be an integer from 0 to 100." >&2; exit 1;; esac
 [ "$MAX_DELETE_PCT" -le 100 ] || { echo "ERROR: MIMIR_SYNC_MAX_DELETE_PCT must be at most 100." >&2; exit 1; }
+MAX_DELETE_PCT=$((10#$MAX_DELETE_PCT))
 
 # Keep imports outside the mirrored/servable tree until the scanner has
 # accepted them. The pending tree itself is the durable recovery record: if
@@ -39,18 +40,12 @@ if ! rsync -a --ignore-existing --remove-source-files "$INBOX" "$PENDING/"; then
   exit 1
 fi
 
-PENDING_FILES=$(cd "$PENDING" && find . ! -type d -print | sed 's#^\./##')
-
 # Step 1.5: Secret-scan every pending file, including files left by an older
 # failed invocation. Hits are quarantined outside both staging and $LOCAL.
-if [ -n "$PENDING_FILES" ]; then
-  echo "==> Scanning pending imports for secrets..."
-  if ! printf '%s\n' "$PENDING_FILES" | node "$(dirname "$0")/../dist/cli/secret-scan.js" --stdin "$PENDING" "$QUARANTINE"; then
-    echo "ERROR: secret scan failed; pending files remain staged at $PENDING; refusing to mirror." >&2
-    exit 1
-  fi
-else
-  echo "==> No pending files — skipping secret scan."
+echo "==> Scanning pending imports for secrets..."
+if ! node "$(dirname "$0")/../dist/cli/secret-scan.js" "$PENDING" "$QUARANTINE"; then
+  echo "ERROR: secret scan failed; pending files remain staged at $PENDING; refusing to mirror." >&2
+  exit 1
 fi
 
 # Step 1.6: Promote only verified content. --ignore-existing prevents an
@@ -74,19 +69,26 @@ rmdir "$PENDING"
 # Step 2: Mirror laptop → NAS (laptop is source of truth)
 # Safety: abort if --delete would remove >20% of remote files
 echo "==> Pushing laptop → NAS (with --delete)..."
-DRY_OUTPUT=$(rsync -an --delete --filter='P /artifact-snapshots/***' --exclude='/artifact-snapshots' "$LOCAL" "$REMOTE" 2>/dev/null)
-DELETES=$(printf '%s\n' "$DRY_OUTPUT" | awk '/^deleting / { n++ } END { print n + 0 }')
+DRY_OUTPUT=$(rsync -ani --delete --out-format='%i' --filter='P /artifact-snapshots/***' --exclude='/artifact-snapshots' "$LOCAL" "$REMOTE")
+DELETES=$(printf '%s\n' "$DRY_OUTPUT" | awk '
+  /^\*deleting([[:space:]]|$)/ { n++; next }
+  /^$/ { next }
+  /^[<>ch.][fdLDS][cstTpoguaxnb.+? ]{7}([[:space:]]|$)/ { next }
+  /^[<>ch.][fdLDS][cstTpoguaxnb.+? ]{9}([[:space:]]|$)/ { next }
+  { print "ERROR: unrecognized rsync dry-run output; refusing mirror." > "/dev/stderr"; invalid = 1; exit 2 }
+  END { if (invalid) exit 2; print n + 0 }
+')
 if [ "$DELETES" -gt 0 ]; then
   # Count the actual remote population, not rsync's changed-line output. A
   # delete mixed with many additions must not dilute the safety percentage.
   REMOTE_POPULATION=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$NAS" "find '$REMOTE_ROOT' -mindepth 1 -path '$REMOTE_ROOT/artifact-snapshots' -prune -o -printf .")
   REMOTE_TOTAL=${#REMOTE_POPULATION}
   if [ "$REMOTE_TOTAL" -gt 0 ]; then
-    PCT=$(( DELETES * 100 / REMOTE_TOTAL ))
+    PCT=$(( (DELETES * 100 + REMOTE_TOTAL - 1) / REMOTE_TOTAL ))
   else
     PCT=100
   fi
-  if [ "$DELETES" -ge "$MAX_DELETE" ] || [ "$PCT" -gt "$MAX_DELETE_PCT" ]; then
+  if [ "$DELETES" -ge "$MAX_DELETE" ] || [ "$(( DELETES * 100 ))" -gt "$(( MAX_DELETE_PCT * REMOTE_TOTAL ))" ]; then
     echo "ERROR: --delete would remove $DELETES/$REMOTE_TOTAL remote entries ($PCT%; max $MAX_DELETE entries or $MAX_DELETE_PCT%). Aborting." >&2
     echo "Run with caution: rsync -av --delete $LOCAL $REMOTE" >&2
     exit 1

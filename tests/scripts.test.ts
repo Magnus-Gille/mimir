@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -66,19 +66,29 @@ case "$*" in
     previous=""
     for argument in "$@"; do source="$previous"; previous="$argument"; done
     destination="$previous"
-    while IFS= read -r staged; do
+    while IFS= read -r -d '' staged; do
       relative="\${staged#"$source"}"
       target="$destination$relative"
       if [ ! -e "$target" ] && [ ! -L "$target" ]; then
         mkdir -p "$(dirname "$target")"
         mv "$staged" "$target"
       fi
-    done < <(find "$source" ! -type d -print)
+    done < <(find "$source" ! -type d -print0)
     exit "\${MOCK_PROMOTE_RC:-0}"
     ;;
-  *"-an --delete"*)
-    i=0; while [ "$i" -lt "\${MOCK_DELETES:-0}" ]; do printf 'deleting old-%s\n' "$i"; i=$((i + 1)); done
-    i=0; while [ "$i" -lt "\${MOCK_ADDITIONS:-0}" ]; do printf 'new-%s\n' "$i"; i=$((i + 1)); done
+  *"-ani --delete --out-format=%i"*)
+    i=0; while [ "$i" -lt "\${MOCK_DELETES:-0}" ]; do
+      case "\${MOCK_DELETE_FORMAT:-filename}" in
+        bare) printf '*deleting\n' ;;
+        padded) printf '*deleting   \n' ;;
+        filename) printf '*deleting old-%s\n' "$i" ;;
+      esac
+      i=$((i + 1))
+    done
+    i=0; while [ "$i" -lt "\${MOCK_ADDITIONS:-0}" ]; do printf '>f+++++++\n'; i=$((i + 1)); done
+    if [ "\${MOCK_ADDITIONS:-0}" -gt 0 ]; then printf '>f+++++++++\n>f       \n'; fi
+    if [ -n "\${MOCK_EXTRA_OUTPUT:-}" ]; then printf '%s\n' "$MOCK_EXTRA_OUTPUT"; fi
+    if [ "\${MOCK_DRY_RC:-0}" -ne 0 ]; then printf 'mock dry-run failure\n' >&2; fi
     exit "\${MOCK_DRY_RC:-0}"
     ;;
   *"--delete --max-delete="*) exit "\${MOCK_MIRROR_RC:-0}" ;;
@@ -89,7 +99,11 @@ exit 0
   executable(
     join(bin, "node"),
     `printf 'node %s\n' "$*" >> "$SYNC_CALLS"
-while IFS= read -r _line; do :; done
+if [ "\${MOCK_REAL_SCAN:-0}" = 1 ]; then
+  shift
+  exec "$REAL_NODE" --import tsx "$REAL_SCAN_CLI" "$@"
+fi
+cat >/dev/null
 exit "\${MOCK_SCAN_RC:-0}"
 `,
   );
@@ -116,6 +130,8 @@ function createSyncHarness(script: (typeof SYNC_SCRIPTS)[number]) {
           PATH: `${bin}:${process.env.PATH ?? ""}`,
           MIMIR_NAS: "test-nas",
           SYNC_CALLS: calls,
+          REAL_NODE: process.execPath,
+          REAL_SCAN_CLI: join(REPO_ROOT, "src", "cli", "secret-scan.ts"),
           ...overrides,
         },
       });
@@ -165,6 +181,8 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
     expect(result.status, result.stderr).toBe(0);
     const mirrors = invocations.split("\n").filter(line => line.startsWith("rsync ") && line.includes("--delete"));
     expect(mirrors).toHaveLength(2);
+    expect(mirrors[0]).toContain("-ani --delete --out-format=%i");
+    expect(mirrors[0]).not.toContain("2>/dev/null");
     for (const invocation of mirrors) {
       expect(invocation).toContain("--filter=P /artifact-snapshots/***");
       expect(invocation).toContain("--exclude=/artifact-snapshots");
@@ -195,7 +213,7 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
     const retryInvocations = second.invocations.slice(callsBeforeRetry);
     expect(second.result.status).not.toBe(0);
     expect(retryInvocations).toContain("node ");
-    expect(retryInvocations).not.toContain("-an --delete");
+    expect(retryInvocations).not.toContain("-ani --delete --out-format=%i");
     expect(retryInvocations).not.toContain("--max-delete=");
     expect(readFileSync(pending, "utf8")).toContain("staged:partial-secret.txt");
   });
@@ -207,7 +225,29 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
     });
     expect(result.status).not.toBe(0);
     expect(invocations).toContain("node ");
-    expect(invocations).not.toContain("-an --delete");
+    expect(invocations).not.toContain("-ani --delete --out-format=%i");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
+  it("keeps binary and oversized imports staged and blocks promotion and mirroring", () => {
+    const harness = createSyncHarness(script);
+    const pendingRoot = join(harness.root, ".local", "state", "mimir", "import-pending");
+    mkdirSync(pendingRoot, { recursive: true });
+    writeFileSync(join(pendingRoot, "binary.bin"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]));
+    writeFileSync(join(pendingRoot, "oversized.txt"), Buffer.alloc(10 * 1024 * 1024 + 1, "x"));
+
+    const { result, invocations } = harness.run({ MOCK_REAL_SCAN: "1" });
+    const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+
+    expect(result.status).not.toBe(0);
+    expect(output).toContain("incomplete 2 item(s)");
+    expect(output).toContain("binary=1");
+    expect(output).toContain("oversized=1");
+    expect(existsSync(join(pendingRoot, "binary.bin"))).toBe(true);
+    expect(existsSync(join(pendingRoot, "oversized.txt"))).toBe(true);
+    expect(existsSync(join(harness.root, "mimir", "binary.bin"))).toBe(false);
+    expect(existsSync(join(harness.root, "mimir", "oversized.txt"))).toBe(false);
+    expect(invocations).not.toContain("-ani --delete --out-format=%i");
     expect(invocations).not.toContain("--max-delete=");
   });
 
@@ -227,13 +267,53 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
     expect(second.result.status, second.result.stderr).toBe(0);
     expect(retryInvocations).toContain("node ");
     expect(retryInvocations).toContain("import-pending/");
-    expect(retryInvocations).toContain("-an --delete");
+    expect(retryInvocations).toContain("-ani --delete --out-format=%i");
     expect(retryInvocations).toContain("--max-delete=");
     const promotionIndex = retryInvocations.lastIndexOf("import-pending/");
     expect(retryInvocations.indexOf("node ")).toBeLessThan(promotionIndex);
-    expect(promotionIndex).toBeLessThan(retryInvocations.indexOf("-an --delete"));
+    expect(promotionIndex).toBeLessThan(retryInvocations.indexOf("-ani --delete --out-format=%i"));
     expect(existsSync(pendingRoot)).toBe(false);
     expect(readFileSync(join(harness.root, "mimir", "retry-me.txt"), "utf8")).toContain("staged:retry-me.txt");
+  });
+
+  it("scans exact staged paths with newline, whitespace, and CR characters before promotion", () => {
+    const harness = createSyncHarness(script);
+    const pending = join(harness.root, ".local", "state", "mimir", "import-pending");
+    const quarantine = join(harness.root, "mimir-quarantine");
+    mkdirSync(pending, { recursive: true });
+
+    const riskyPaths = [
+      join(pending, "nested", "line\nbreak.txt"),
+      join(pending, " leading-and-trailing "),
+      join(pending, "carriage\rreturn"),
+    ];
+    for (const path of riskyPaths) {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, "AKIAABCDEFGHIJKLMNOP\n");
+    }
+
+    const cleanPath = join(pending, "ordinary\n nested ", " clean\r file ");
+    mkdirSync(dirname(cleanPath), { recursive: true });
+    writeFileSync(cleanPath, "ordinary content\n");
+    const nestedControl = join(pending, "ordinary", "nested", "control.txt");
+    mkdirSync(dirname(nestedControl), { recursive: true });
+    writeFileSync(nestedControl, "nested control\n");
+
+    const { result, invocations } = harness.run({ MOCK_REAL_SCAN: "1" });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(invocations).toContain("secret-scan.js ");
+    expect(invocations).not.toContain("--stdin");
+    for (const path of riskyPaths) {
+      const relative = path.slice(pending.length + 1);
+      expect(existsSync(path)).toBe(false);
+      expect(existsSync(join(quarantine, relative))).toBe(true);
+    }
+    expect(readFileSync(join(harness.root, "mimir", "ordinary\n nested ", " clean\r file "), "utf8"))
+      .toBe("ordinary content\n");
+    expect(readFileSync(join(harness.root, "mimir", "ordinary", "nested", "control.txt"), "utf8"))
+      .toBe("nested control\n");
+    expect(existsSync(pending)).toBe(false);
   });
 
   it("preserves both files and refuses to mirror when a pending path collides locally", () => {
@@ -249,7 +329,7 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
       join(harness.root, ".local", "state", "mimir", "import-pending", "collision.txt"),
       "utf8",
     )).toContain("staged:collision.txt");
-    expect(invocations).not.toContain("-an --delete");
+    expect(invocations).not.toContain("-ani --delete --out-format=%i");
     expect(invocations).not.toContain("--max-delete=");
   });
 
@@ -261,6 +341,48 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
     });
     expect(result.status).toBe(1);
     expect(`${result.stdout}\n${result.stderr}`).toContain("21/100 remote entries");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
+  it.each(["bare", "padded", "filename"])("counts %s rsync deletion records", (deleteFormat) => {
+    const { result, invocations } = runSyncScript(script, {
+      MOCK_REMOTE_TOTAL: "100",
+      MOCK_DELETES: "21",
+      MOCK_DELETE_FORMAT: deleteFormat,
+    });
+    expect(result.status).toBe(1);
+    expect(`${result.stdout}\n${result.stderr}`).toContain("21/100 remote entries");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
+  it("aborts when the exact delete percentage exceeds the threshold by a fraction", () => {
+    const { result, invocations } = runSyncScript(script, {
+      MOCK_REMOTE_TOTAL: "101",
+      MOCK_DELETES: "21",
+    });
+    expect(result.status).toBe(1);
+    expect(`${result.stdout}\n${result.stderr}`).toContain("21/101 remote entries (21%; max 1000 entries or 20%)");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
+  it.each(["010", "09", "08"])("treats percentage %s as decimal", (threshold) => {
+    const { result, invocations } = runSyncScript(script, {
+      MOCK_REMOTE_TOTAL: "100",
+      MOCK_DELETES: threshold === "08" ? "8" : "9",
+      MIMIR_SYNC_MAX_DELETE_PCT: threshold,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).not.toContain("value too great for base");
+    expect(invocations).toContain("--max-delete=");
+  });
+
+  it("enforces a zero-padded decimal percentage limit", () => {
+    const { result, invocations } = runSyncScript(script, {
+      MOCK_REMOTE_TOTAL: "100",
+      MOCK_DELETES: "9",
+      MIMIR_SYNC_MAX_DELETE_PCT: "08",
+    });
+    expect(result.status).toBe(1);
     expect(invocations).not.toContain("--max-delete=");
   });
 
@@ -286,6 +408,20 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
     expect(invocations).toContain("-path '/home/mimir/mimir/artifact-snapshots' -prune -o -printf .");
   });
 
+  it("stops when the dry-run fails and leaves its diagnostic visible", () => {
+    const { result, invocations } = runSyncScript(script, { MOCK_DRY_RC: "23" });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("mock dry-run failure");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
+  it("fails closed on unexpected nonempty dry-run output", () => {
+    const { result, invocations } = runSyncScript(script, { MOCK_EXTRA_OUTPUT: "deleting old.txt" });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("unrecognized rsync dry-run output");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
   it("fails closed when the remote population cannot be measured", () => {
     const { result, invocations } = runSyncScript(script, {
       MOCK_DELETES: "1",
@@ -307,6 +443,22 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
       expect(invocations).not.toContain("publish-freshness");
     }
   });
+});
+
+it.skipIf(spawnSync("rsync", ["--version"]).status !== 0)("rsync itemized dry-run format marks deletions", () => {
+  const root = tempDir();
+  const sender = join(root, "sender");
+  const receiver = join(root, "receiver");
+  mkdirSync(sender);
+  mkdirSync(receiver);
+  writeFileSync(join(receiver, "old.txt"), "old");
+
+  const result = spawnSync("rsync", ["-ani", "--delete", "--out-format=%i", `${sender}/`, `${receiver}/`], {
+    encoding: "utf8",
+  });
+  expect(result.status, result.stderr).toBe(0);
+  expect(result.stdout.split("\n").filter(line => /^\*deleting([\s]|$)/.test(line))).toHaveLength(1);
+  expect(existsSync(join(receiver, "old.txt"))).toBe(true);
 });
 
 describe("sync freshness compatibility", () => {
@@ -360,6 +512,27 @@ describe("local backup script", () => {
 });
 
 describe("offsite backup script", () => {
+  it.skipIf(process.platform !== "darwin")("removes access ACLs from an existing private custom log parent", () => {
+    const root = tempDir();
+    const parent = join(root, "custom-private");
+    const fakeRclone = join(root, "rclone");
+    mkdirSync(parent, { mode: 0o700 });
+    const acl = spawnSync("/bin/chmod", ["+a", "everyone allow list,search,add_file", parent], { encoding: "utf8" });
+    expect(acl.status, acl.stderr).toBe(0);
+    expect(spawnSync("/bin/ls", ["-lde", parent], { encoding: "utf8" }).stdout).toMatch(/\d+: .* allow /);
+    executable(fakeRclone, `case "$1" in config) printf 'type = crypt\\nfilename_encryption = standard\\n';; esac\n`);
+    const result = spawnSync("bash", [join(REPO_ROOT, "scripts/offsite-backup.sh"), "--dry-run"], {
+      encoding: "utf8",
+      env: {
+        ...process.env, HOME: root, MIMIR_OFFSITE_ROOT: root,
+        MIMIR_OFFSITE_STATE_DIR: join(root, "state"),
+        MIMIR_OFFSITE_LOG: join(parent, "backup.log"), RCLONE_BIN: fakeRclone,
+      },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(spawnSync("/bin/ls", ["-lde", parent], { encoding: "utf8" }).stdout).not.toMatch(/\d+: .* allow /);
+  });
+
   it("keeps runtime state outside the deploy tree and bounds encrypted archive depth", () => {
     const root = tempDir();
     const source = join(root, "mimir");
@@ -369,6 +542,12 @@ describe("offsite backup script", () => {
     const fakeDate = join(root, "date");
     mkdirSync(source);
     writeFileSync(join(source, "artifact.txt"), "artifact\n");
+    mkdirSync(state);
+    chmodSync(state, 0o755);
+    writeFileSync(join(state, "offsite-backup.log"), "prior\n");
+    writeFileSync(join(state, "offsite.stamp"), "prior\n");
+    chmodSync(join(state, "offsite-backup.log"), 0o644);
+    chmodSync(join(state, "offsite.stamp"), 0o644);
     mkdirSync(join(source, "project", ".git", "refs"), { recursive: true });
     writeFileSync(join(source, "project", ".git", "refs", "checkpoint"), "transient\n");
     executable(
@@ -393,7 +572,7 @@ esac
 `,
     );
 
-    const result = spawnSync("bash", [join(REPO_ROOT, "scripts/offsite-backup.sh")], {
+    const result = spawnSync("bash", ["-c", "umask 0022; exec bash \"$1\"", "offsite-test", join(REPO_ROOT, "scripts/offsite-backup.sh")], {
       cwd: REPO_ROOT,
       encoding: "utf8",
       env: {
@@ -407,11 +586,18 @@ esac
     });
 
     expect(result.status, result.stderr).toBe(0);
-    expect(existsSync(join(state, "offsite.stamp"))).toBe(true);
-    expect(existsSync(join(state, "offsite-backup.log"))).toBe(true);
-    expect(readFileSync(join(state, "offsite-backup.log"), "utf8")).toContain(
-      "offsite backup complete: 1 files mirrored",
+    const privateState = join(state, "offsite-private");
+    expect(statSync(state).mode & 0o777).toBe(0o755);
+    expect(readFileSync(join(state, "offsite-backup.log"), "utf8")).toBe("prior\n");
+    expect(readFileSync(join(state, "offsite.stamp"), "utf8")).toBe("prior\n");
+    expect(statSync(privateState).mode & 0o777).toBe(0o700);
+    expect(existsSync(join(privateState, "offsite.stamp"))).toBe(true);
+    expect(existsSync(join(privateState, "offsite-backup.log"))).toBe(true);
+    expect(readFileSync(join(privateState, "offsite-backup.log"), "utf8")).toContain(
+      "stage=complete state=pass exit=0 files=1",
     );
+    expect(statSync(join(privateState, "offsite.stamp")).mode & 0o777).toBe(0o600);
+    expect(statSync(join(privateState, "offsite-backup.log")).mode & 0o777).toBe(0o600);
     const invocations = readFileSync(calls, "utf8");
     expect(invocations).toContain("--exclude **/.git/**");
     expect(invocations).toMatch(/--backup-dir mimir-crypt:a[0-9A-Za-z]{6}(?:\s|$)/);
@@ -454,10 +640,343 @@ esac
     });
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("cannot list mimir-crypt:current");
+    expect(result.stderr).toMatch(/stage=delete_gate state=fail exit=1/);
     expect(readFileSync(calls, "utf8")).not.toMatch(/^sync /m);
     expect(existsSync(join(state, "offsite.stamp"))).toBe(false);
   });
+
+  it("rejects symlinked, non-regular, and multiply-linked log files before target writes", () => {
+    for (const kind of ["symlink", "directory", "hardlink"]) {
+      const root = tempDir();
+      const source = join(root, "source");
+      const state = join(root, "state");
+      const fakeRclone = join(root, "rclone");
+      const log = join(state, "offsite-backup.log");
+      const target = join(root, "target");
+      mkdirSync(source);
+      mkdirSync(state);
+      chmodSync(state, 0o700);
+      if (kind === "symlink") {
+        writeFileSync(target, "sentinel\n");
+        symlinkSync(target, log);
+      } else if (kind === "directory") {
+        writeFileSync(target, "sentinel\n");
+        mkdirSync(log);
+      } else {
+        writeFileSync(log, "sentinel\n");
+        linkSync(log, target);
+      }
+      executable(fakeRclone, "printf 'type = crypt\\nfilename_encryption = standard\\n'");
+
+      const result = spawnSync("bash", [join(REPO_ROOT, "scripts/offsite-backup.sh")], {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HOME: root,
+          PATH: `${root}:${process.env.PATH ?? ""}`,
+          MIMIR_OFFSITE_ROOT: source,
+          MIMIR_OFFSITE_STATE_DIR: state,
+          MIMIR_OFFSITE_LOG: log,
+          MIMIR_OFFSITE_STAMP: join(state, "offsite.stamp"),
+          RCLONE_BIN: fakeRclone,
+        },
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe("ERROR: offsite backup private state unavailable\n");
+      expect(readFileSync(target, "utf8")).toBe("sentinel\n");
+    }
+  });
+
+  it("reports a fixed bootstrap panel without a log file or path details", () => {
+    const root = tempDir();
+    const source = join(root, "source");
+    const state = join(root, "state");
+    const log = join(state, "offsite-backup.log");
+    const target = join(root, "bootstrap-path-canary");
+    const panel = join(root, "panel.calls");
+    const fakeCurl = join(root, "curl");
+    const fakeRclone = join(root, "rclone");
+    mkdirSync(source);
+    mkdirSync(state);
+    chmodSync(state, 0o700);
+    writeFileSync(target, "sentinel\n");
+    symlinkSync(target, log);
+    executable(fakeCurl, `printf '%s\\n' "$*" > "$PANEL_CALLS"
+exit 17
+`);
+    executable(fakeRclone, "printf 'type = crypt\\nfilename_encryption = standard\\n'");
+
+    const result = spawnSync("bash", [join(REPO_ROOT, "scripts/offsite-backup.sh")], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: root,
+        PATH: `${root}:${process.env.PATH ?? ""}`,
+        MIMIR_OFFSITE_ROOT: source,
+        MIMIR_OFFSITE_STATE_DIR: state,
+        MIMIR_OFFSITE_LOG: log,
+        MIMIR_OFFSITE_STAMP: join(state, "offsite.stamp"),
+        RCLONE_BIN: fakeRclone,
+        PANEL_CALLS: panel,
+        HEIMDALL_HUB_URL: "http://panel.invalid",
+        HEIMDALL_FLEET_TOKEN: "fleet-token",
+      },
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe("ERROR: offsite backup private state unavailable\n");
+    expect(readFileSync(panel, "utf8")).toContain("stage=bootstrap state=fail exit=1");
+    expect(readFileSync(panel, "utf8")).not.toContain("bootstrap-path-canary");
+    expect(readFileSync(target, "utf8")).toBe("sentinel\n");
+    expect(lstatSync(log).isSymbolicLink()).toBe(true);
+    expect(existsSync(join(state, "offsite.stamp"))).toBe(false);
+  });
+
+  it("keeps rclone output and configured paths out of normal channels", () => {
+    const root = tempDir();
+    const source = join(root, "source-path-canary");
+    const state = join(root, "state");
+    const calls = join(root, "rclone.calls");
+    const panel = join(root, "panel.calls");
+    const fakeRclone = join(root, "rclone");
+    const fakeCurl = join(root, "curl");
+    const fakeDate = join(root, "date");
+    mkdirSync(source);
+    writeFileSync(join(source, "artifact.txt"), "artifact\n");
+    executable(
+      fakeRclone,
+      `printf '%s\\n' "$*" >> "$RCLONE_CALLS"
+printf '%s\\n' 'rclone-stdout-artifact-name-canary'
+printf '%s\\n' 'rclone-stderr-artifact-name-canary' >&2
+case "\${1:-}" in
+  config) printf 'type = crypt\\nfilename_encryption = standard\\n' ;;
+  lsf)
+    if [[ "$*" == *"--dirs-only"* ]]; then printf 'a000000/\\n'; else printf 'artifact.txt\\n'; fi
+    ;;
+  purge) exit "\${MOCK_PURGE_RC:-0}" ;;
+  sync) exit "\${MOCK_SYNC_RC:-0}" ;;
+  *) exit 0 ;;
+esac
+`,
+    );
+    executable(fakeCurl, `printf '%s\\n' "$*" > "$PANEL_CALLS"`);
+    executable(
+      fakeDate,
+      `case "$*" in
+  "-u +%s") printf '1780000000\\n' ;;
+  "-u -d 30 days ago +%s") printf '1700000000\\n' ;;
+  "-u -d @1700000000 +%Y-%m-%dT%H%M%SZ") printf '2023-11-14T221320Z\\n' ;;
+  "+%s") printf '1780000000\\n' ;;
+  *) printf '2026-07-10T10:00:00Z\\n' ;;
+esac
+`,
+    );
+
+    const run = (overrides: Record<string, string> = {}) => spawnSync(
+      "bash",
+      [join(REPO_ROOT, "scripts/offsite-backup.sh")],
+      {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HOME: root,
+          PATH: `${root}:${process.env.PATH ?? ""}`,
+          MIMIR_OFFSITE_ROOT: source,
+          MIMIR_OFFSITE_STATE_DIR: state,
+          MIMIR_OFFSITE_REMOTE: "remote-canary",
+          RCLONE_BIN: fakeRclone,
+          RCLONE_CALLS: calls,
+          PANEL_CALLS: panel,
+          HEIMDALL_HUB_URL: "http://panel.invalid",
+          HEIMDALL_FLEET_TOKEN: "fleet-token",
+          ...overrides,
+        },
+      },
+    );
+    const channels = () => `${readFileSync(join(state, "offsite-private", "offsite-backup.log"), "utf8")}\n${readFileSync(panel, "utf8")}`;
+
+    const success = run();
+    expect(success.status, success.stderr).toBe(0);
+    expect(`${success.stdout}\n${success.stderr}\n${channels()}`).not.toContain("rclone-stdout-artifact-name-canary");
+    expect(`${success.stdout}\n${success.stderr}\n${channels()}`).not.toContain("source-path-canary");
+    expect(readFileSync(calls, "utf8")).not.toContain("--log-file");
+    expect(readFileSync(calls, "utf8")).not.toContain("--log-level");
+    expect(readFileSync(panel, "utf8")).toContain('"state":"pass"');
+
+    const failure = run({ MOCK_SYNC_RC: "23" });
+    expect(failure.status).toBe(23);
+    expect(failure.stderr).toMatch(/stage=sync state=fail exit=23/);
+    expect(`${failure.stdout}\n${failure.stderr}\n${channels()}`).not.toContain("rclone-stderr-artifact-name-canary");
+    expect(readFileSync(panel, "utf8")).toContain('"state":"fail"');
+
+    const prune = run({ MOCK_PURGE_RC: "17" });
+    expect(prune.status).toBe(0);
+    expect(readFileSync(join(state, "offsite-private", "offsite-backup.log"), "utf8")).toMatch(
+      /stage=prune state=warning exit=1/,
+    );
+    expect(readFileSync(panel, "utf8")).toContain('"state":"pass"');
+    expect(channels()).not.toContain("rclone-stderr-artifact-name-canary");
+  });
+  function createOffsitePanelHarness() {
+    const root = tempDir();
+    const source = join(root, "mimir");
+    const state = join(root, "state");
+    const bin = join(root, "bin");
+    const rcloneCalls = join(root, "rclone.calls");
+    const curlArgs = join(root, "curl.args");
+    const curlStdin = join(root, "curl.stdin");
+    const token = "synthetic-fleet-token-0123456789";
+    mkdirSync(source);
+    mkdirSync(bin);
+    writeFileSync(join(source, "artifact.txt"), "artifact\n");
+
+    executable(
+      join(bin, "rclone"),
+      `printf '%s\\n' "$*" >> "$RCLONE_CALLS"
+case "\${1:-}" in
+  config) printf 'type = crypt\\nfilename_encryption = standard\\n' ;;
+  lsf) [[ "$*" != *"--dirs-only mimir-crypt:"* ]] || printf 'current/\\n' ;;
+  sync) exit "\${MOCK_SYNC_RC:-0}" ;;
+  *) exit 0 ;;
+esac
+`,
+    );
+    executable(
+      join(bin, "curl"),
+      `set -euo pipefail
+printf '%s\\n' "$*" >> "$CURL_ARGS"
+cat > "$CURL_STDIN"
+if [[ "$*" == *"$EXPECTED_TOKEN"* ]]; then
+  printf 'token-in-argv' > "$CURL_LEAK"
+fi
+exit "\${MOCK_CURL_RC:-0}"
+`,
+    );
+
+    return {
+      token,
+      root,
+      run(overrides: Record<string, string> = {}) {
+        const result = spawnSync("bash", [join(REPO_ROOT, "scripts/offsite-backup.sh")], {
+          cwd: REPO_ROOT,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            HOME: root,
+            PATH: `${bin}:${process.env.PATH ?? ""}`,
+            MIMIR_OFFSITE_ROOT: source,
+            MIMIR_OFFSITE_STATE_DIR: state,
+            RCLONE_BIN: join(bin, "rclone"),
+            RCLONE_CALLS: rcloneCalls,
+            HEIMDALL_HUB_URL: "http://hub.invalid/panels",
+            HEIMDALL_FLEET_TOKEN: token,
+            EXPECTED_TOKEN: token,
+            CURL_ARGS: curlArgs,
+            CURL_STDIN: curlStdin,
+            CURL_LEAK: join(root, "curl.leak"),
+            ...overrides,
+          },
+        });
+        const stateLog = join(state, "offsite-private", "offsite-backup.log");
+        return {
+          result,
+          args: existsSync(curlArgs) ? readFileSync(curlArgs, "utf8") : "",
+          stdin: existsSync(curlStdin) ? readFileSync(curlStdin, "utf8") : "",
+          log: existsSync(stateLog) ? readFileSync(stateLog, "utf8") : "",
+          leakedArgv: existsSync(join(root, "curl.leak")),
+        };
+      },
+    };
+  }
+
+  it("pipes the exact auth header without exposing the token in curl argv or logs", () => {
+    const harness = createOffsitePanelHarness();
+    const { result, args, stdin, log, leakedArgv } = harness.run();
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(args).toContain("-H @-");
+    expect(args).toContain('"state":"pass"');
+    expect(stdin).toBe(`Authorization: Bearer ${harness.token}\n`);
+    expect(args).not.toContain(harness.token);
+    expect(`${result.stdout}\n${result.stderr}\n${log}`).not.toContain(harness.token);
+    expect(leakedArgv).toBe(false);
+  });
+
+  it("keeps backup failure status when a fail-panel curl also fails", () => {
+    const harness = createOffsitePanelHarness();
+    const { result, args, stdin, log, leakedArgv } = harness.run({
+      MOCK_SYNC_RC: "23",
+      MOCK_CURL_RC: "22",
+    });
+
+    expect(result.status).toBe(23);
+    expect(args).toContain('"state":"fail"');
+    expect(stdin).toBe(`Authorization: Bearer ${harness.token}\n`);
+    expect(args).not.toContain(harness.token);
+    expect(`${result.stdout}\n${result.stderr}\n${log}`).not.toContain(harness.token);
+    expect(leakedArgv).toBe(false);
+  });
+
+  it("does not invoke curl when the fleet token is unset", () => {
+    const harness = createOffsitePanelHarness();
+    const { result, args, stdin } = harness.run({ HEIMDALL_FLEET_TOKEN: "" });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(args).toBe("");
+    expect(stdin).toBe("");
+  });
+
+  it("rejects CR/LF-containing tokens without sending or logging the token", () => {
+    const harness = createOffsitePanelHarness();
+    const invalidToken = `${harness.token}\nsecond-line`;
+    const { result, args, stdin, log } = harness.run({ HEIMDALL_FLEET_TOKEN: invalidToken });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(args).toBe("");
+    expect(stdin).toBe("");
+    expect(`${result.stdout}\n${result.stderr}\n${log}`).not.toContain(invalidToken);
+    expect(`${result.stdout}\n${result.stderr}\n${log}`).toContain(
+      "fleet token contains CR/LF",
+    );
+  });
+
+  it("uses the same private bearer transport for bootstrap failures", () => {
+    const harness = createOffsitePanelHarness();
+    const target = join(harness.root, "bootstrap-target");
+    const unsafeLog = join(harness.root, "unsafe-log");
+    writeFileSync(target, "unchanged");
+    symlinkSync(target, unsafeLog);
+    const { result, args, stdin, leakedArgv } = harness.run({ MIMIR_OFFSITE_LOG: unsafeLog });
+    expect(result.status).toBe(1);
+    expect(args).toContain("stage=bootstrap state=fail exit=1");
+    expect(args).toContain("-H @-");
+    expect(args).not.toContain(harness.token);
+    expect(stdin).toBe(`Authorization: Bearer ${harness.token}\n`);
+    expect(leakedArgv).toBe(false);
+    expect(readFileSync(target, "utf8")).toBe("unchanged");
+  });
+
+  it("rejects a multiline bearer before the bootstrap failure report", () => {
+    const harness = createOffsitePanelHarness();
+    const target = join(harness.root, "bootstrap-target");
+    const unsafeLog = join(harness.root, "unsafe-log");
+    writeFileSync(target, "unchanged");
+    symlinkSync(target, unsafeLog);
+    const invalidToken = `${harness.token}\rsecond-line`;
+    const { result, args, stdin } = harness.run({
+      MIMIR_OFFSITE_LOG: unsafeLog,
+      HEIMDALL_FLEET_TOKEN: invalidToken,
+    });
+    expect(result.status).toBe(1);
+    expect(args).toBe("");
+    expect(stdin).toBe("");
+    expect(`${result.stdout}\n${result.stderr}`).not.toContain(invalidToken);
+  });
+
 });
 
 describe("NAS deploy script", () => {

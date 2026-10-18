@@ -229,6 +229,11 @@ quarantined, or the collision is resolved. The scanner detects known secret
 formats, including AWS, GitHub, Slack, Stripe, Google keys, private key blocks, JWTs,
 and generic quoted `key=value` assignments.
 
+During ingest, binary, oversized, symlink, non-regular, unreadable, and
+unsupported-encoding inputs are reported as incomplete and keep the affected new
+import in durable staging for trusted inspection. This leaves existing archive files
+untouched.
+
 Hits are moved to `MIMIR_QUARANTINE_DIR` and logged loudly. If Heimdall variables are
 configured, a fail-state panel is pushed as well.
 

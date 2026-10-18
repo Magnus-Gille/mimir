@@ -32,8 +32,9 @@ RETENTION_DAYS="${MIMIR_OFFSITE_RETENTION_DAYS:-30}"      # archive prune horizo
 MAX_DELETE="${MIMIR_OFFSITE_MAX_DELETE:-1000}"            # abort if a run would remove ≥ this many files
 MAX_DELETE_PCT="${MIMIR_OFFSITE_MAX_DELETE_PCT:-25}"      # ...or more than this % of current/
 STATE_DIR="${MIMIR_OFFSITE_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/mimir}"
-STAMP="${MIMIR_OFFSITE_STAMP:-$STATE_DIR/offsite.stamp}"
-LOG="${MIMIR_OFFSITE_LOG:-$STATE_DIR/offsite-backup.log}"
+PRIVATE_STATE_DIR="$STATE_DIR/offsite-private"
+STAMP="${MIMIR_OFFSITE_STAMP:-$PRIVATE_STATE_DIR/offsite.stamp}"
+LOG="${MIMIR_OFFSITE_LOG:-$PRIVATE_STATE_DIR/offsite-backup.log}"
 RCLONE="${RCLONE_BIN:-rclone}"
 
 # Git internals are transient workspace state, not Mimir artifacts. Deep Codex
@@ -45,58 +46,222 @@ if [ "${1:-}" = "--dry-run" ] || [ "${MIMIR_OFFSITE_DRYRUN:-}" = "1" ]; then
   DRY_RUN="--dry-run"
 fi
 
-ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
-log() { echo "$(ts) $*" | tee -a "$LOG" >&2; }
+# Panel identity is a fixed deployment label, never a path or free-form text.
+# Sanitize it before any bootstrap failure can attempt a panel update.
+case "$SERVICE" in ''|*[!A-Za-z0-9_.-]*) SERVICE=mimir;; esac
+case "$PANEL" in ''|*[!A-Za-z0-9_.-]*) PANEL=offsite;; esac
+
+umask 077
+
+# Private state is established before the ERR trap or any logging is enabled.
+# Bootstrap failures must never echo a configured path (or recurse through a
+# logger whose destination is the thing that failed).
+send_panel() {
+  local state="$1" message="$2" token="${HEIMDALL_FLEET_TOKEN:-}"
+  [ -n "${HEIMDALL_HUB_URL:-}" ] && [ -n "$token" ] || return 0
+  case "$token" in
+    *$'\r'*|*$'\n'*)
+      printf '%s\n' 'WARN: refusing Heimdall panel push because the fleet token contains CR/LF' >&2
+      return 0
+      ;;
+  esac
+  printf 'Authorization: Bearer %s\n' "$token" |
+    curl -fsS --max-time 5 -X POST "$HEIMDALL_HUB_URL" \
+      -H @- -H "Content-Type: application/json" \
+      -d "{\"service\":\"${SERVICE}\",\"panel\":\"${PANEL}\",\"kind\":\"status\",\"label\":\"Offsite backup\",\"state\":\"${state}\",\"message\":\"${message}\"}" \
+      >/dev/null 2>&1 || true
+}
+
+bootstrap_panel() {
+  send_panel fail 'stage=bootstrap state=fail exit=1'
+}
+
+bootstrap_fail() {
+  trap - ERR
+  bootstrap_panel
+  printf '%s\n' 'ERROR: offsite backup private state unavailable' >&2
+  exit 1
+}
+
+stat_value() {
+  local format="$1" path="$2" value
+  if value=$(stat -c "$format" -- "$path" 2>/dev/null); then
+    printf '%s' "$value"
+    return 0
+  fi
+  if value=$(stat -f "$format" "$path" 2>/dev/null); then
+    printf '%s' "$value"
+    return 0
+  fi
+  return 1
+}
+
+stat_mode() {
+  local path="$1" value
+  if value=$(stat -c '%a' -- "$path" 2>/dev/null); then
+    printf '%s' "$value"
+    return 0
+  fi
+  if value=$(stat -f '%Lp' "$path" 2>/dev/null); then
+    printf '%s' "$value"
+    return 0
+  fi
+  return 1
+}
+
+remove_darwin_acl() {
+  [ "$(uname -s 2>/dev/null || printf unknown)" = "Darwin" ] || return 0
+  chmod -N "$1" 2>/dev/null || return 1
+}
+
+tighten_dir() {
+  chmod 700 "$1" 2>/dev/null || return 1
+  remove_darwin_acl "$1"
+}
+
+tighten_file() {
+  chmod 600 "$1" 2>/dev/null || return 1
+  remove_darwin_acl "$1"
+}
+
+path_is_present() {
+  [ -e "$1" ] || [ -L "$1" ]
+}
+
+# Create only missing components, with private permissions. Existing ancestors
+# are never chmodded: they may be shared system or home directories. The
+# dedicated offsite child is tightened in place; custom LOG/STAMP parents must
+# already be private or be newly created.
+ensure_private_parent() {
+  local path="$1" dedicated="$2" current=/ component parent_path parent_uid parent_mode mode_num created_final=0
+  local -a components
+
+  [[ "$path" = /* && "$path" != / && "$path" != *'//'* ]] || bootstrap_fail
+  IFS='/' read -r -a components <<< "${path#/}"
+  for component in "${components[@]}"; do
+    case "$component" in
+      ''|.|..) bootstrap_fail ;;
+    esac
+    parent_path="$current"
+    current="${current%/}/$component"
+    if [ -L "$current" ]; then
+      # macOS exposes /var through a system symlink. The directly used final
+      # parent is still rejected when it is a symlink; trusted ancestors may
+      # be traversed for portability.
+      [ "$current" != "$path" ] || bootstrap_fail
+    elif path_is_present "$current"; then
+      [ -d "$current" ] || bootstrap_fail
+    else
+      parent_uid=$(stat_value '%u' "$parent_path" 2>/dev/null) || bootstrap_fail
+      parent_mode=$(stat_mode "$parent_path" 2>/dev/null) || bootstrap_fail
+      mode_num=$((0$parent_mode))
+      # Do not create a private child below a group/world-writable parent.
+      if (( (mode_num & 0022) != 0 )) && [ "$parent_uid" != "$EUID" ]; then
+        bootstrap_fail
+      fi
+      mkdir "$current" 2>/dev/null || bootstrap_fail
+      tighten_dir "$current" || bootstrap_fail
+      created_final=1
+    fi
+  done
+
+  parent_uid=$(stat_value '%u' "$path" 2>/dev/null) || bootstrap_fail
+  [ "$parent_uid" = "$EUID" ] || bootstrap_fail
+  if [ "$dedicated" = 1 ] || [ "$created_final" = 1 ]; then
+    tighten_dir "$path" || bootstrap_fail
+  else
+    parent_mode=$(stat_mode "$path" 2>/dev/null) || bootstrap_fail
+    [ "$parent_mode" = 700 ] || bootstrap_fail
+    # macOS access ACLs can grant other users access despite mode 0700.
+    # This directly configured, owned private parent is safe to tighten;
+    # existing shared ancestors remain untouched.
+    tighten_dir "$path" || bootstrap_fail
+  fi
+}
+
+prepare_private_file() {
+  local path="$1" create="${2:-1}" file_uid file_links
+  if [ -L "$path" ]; then
+    bootstrap_fail
+  fi
+  if path_is_present "$path"; then
+    [ -f "$path" ] || bootstrap_fail
+    file_uid=$(stat_value '%u' "$path" 2>/dev/null) || bootstrap_fail
+    file_links=$(stat_value '%h' "$path" 2>/dev/null || stat_value '%l' "$path" 2>/dev/null) || bootstrap_fail
+    [ "$file_uid" = "$EUID" ] || bootstrap_fail
+    [ "$file_links" = 1 ] || bootstrap_fail
+  else
+    [ "$create" = 1 ] || return 0
+    # umask 077 plus an explicit chmod establishes the mode before the first
+    # byte is written. The private parent removes the practical race window.
+    (set -C; : > "$path") 2>/dev/null || bootstrap_fail
+  fi
+  tighten_file "$path" || bootstrap_fail
+}
+
+LOG_PARENT=$(dirname "$LOG")
+STAMP_PARENT=$(dirname "$STAMP")
+ensure_private_parent "$PRIVATE_STATE_DIR" 1
+ensure_private_parent "$LOG_PARENT" 0
+ensure_private_parent "$STAMP_PARENT" 0
+[ "$LOG" != "$STAMP" ] || bootstrap_fail
+prepare_private_file "$LOG"
+prepare_private_file "$STAMP" 0
+if ! { exec 9>>"$LOG"; } 2>/dev/null; then
+  bootstrap_fail
+fi
+
+ts() { date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown; }
+
+log_event() {
+  local stage="$1" state="$2" exit_code="$3" detail="${4:-}"
+  local line
+  line="$(ts) stage=${stage} state=${state} exit=${exit_code}${detail:+ ${detail}}"
+  printf '%s\n' "$line" >&9 2>/dev/null || true
+  printf '%s\n' "$line" >&2 || true
+}
 
 # Push a Heimdall status panel. Optional (no-op if the hub env vars are unset).
 # Never logs the token; curl output is discarded.
 push_panel() {
-  local state="$1" message="$2"
-  [ -n "${HEIMDALL_HUB_URL:-}" ] && [ -n "${HEIMDALL_FLEET_TOKEN:-}" ] || return 0
-  curl -fsS --max-time 5 -X POST "$HEIMDALL_HUB_URL" \
-    -H "Authorization: Bearer ${HEIMDALL_FLEET_TOKEN}" \
-    -H "Content-Type: application/json" \
-    -d "{\"service\":\"${SERVICE}\",\"panel\":\"${PANEL}\",\"kind\":\"status\",\"label\":\"Offsite backup\",\"state\":\"${state}\",\"message\":\"${message}\"}" \
-    >/dev/null 2>&1 || true
+  local state="$1" stage="$2" exit_code="$3" detail="${4:-}"
+  local message="stage=${stage} state=${state} exit=${exit_code}${detail:+ ${detail}}"
+  send_panel "$state" "$message"
 }
 
-# Expected failure: log, push a fail panel, exit. (ERR trap disabled to avoid
-# a double report.) Used for every preflight/validation failure so a silent
-# dashboard is impossible — the doc's "any error → fail panel" is literal.
-die() {
+fail_event() {
+  local stage="$1" exit_code="${2:-1}" detail="${3:-}"
   trap - ERR
-  log "ERROR: $*"
-  push_panel fail "$* — see ${LOG}"
-  exit 1
+  log_event "$stage" fail "$exit_code" "$detail"
+  push_panel fail "$stage" "$exit_code" "$detail"
+  exit "$exit_code"
 }
 
 # Unexpected command failure after preflight (e.g. rclone sync aborts).
 on_err() {
   local rc=$?
   trap - ERR
-  log "ERROR: offsite backup failed (exit ${rc})"
-  push_panel fail "backup failed (exit ${rc}) — see ${LOG}"
+  log_event runtime fail "$rc"
+  push_panel fail runtime "$rc"
   exit "${rc}"
 }
 trap on_err ERR
 
-mkdir -p "$(dirname "$LOG")" "$(dirname "$STAMP")"
-
 # ---- Preflight ----
-case "$RETENTION_DAYS" in ''|*[!0-9]*) die "MIMIR_OFFSITE_RETENTION_DAYS must be a positive integer";; esac
-[ "$RETENTION_DAYS" -ge 1 ] || die "MIMIR_OFFSITE_RETENTION_DAYS must be at least 1"
-case "$MAX_DELETE" in ''|*[!0-9]*) die "MIMIR_OFFSITE_MAX_DELETE must be a non-negative integer";; esac
-case "$MAX_DELETE_PCT" in ''|*[!0-9]*) die "MIMIR_OFFSITE_MAX_DELETE_PCT must be an integer from 0 to 100";; esac
-[ "$MAX_DELETE_PCT" -le 100 ] || die "MIMIR_OFFSITE_MAX_DELETE_PCT must be at most 100"
-command -v "$RCLONE" >/dev/null 2>&1 || die "rclone not found (RCLONE_BIN=$RCLONE)"
-[ -d "$SOURCE" ] || die "source dir missing: $SOURCE"
-case "$REMOTE" in *:*|*/*) die "MIMIR_OFFSITE_REMOTE must be a remote NAME only, got '$REMOTE'";; esac
+case "$RETENTION_DAYS" in ''|*[!0-9]*) fail_event preflight 1;; esac
+[ "$RETENTION_DAYS" -ge 1 ] || fail_event preflight 1
+case "$MAX_DELETE" in ''|*[!0-9]*) fail_event preflight 1;; esac
+case "$MAX_DELETE_PCT" in ''|*[!0-9]*) fail_event preflight 1;; esac
+[ "$MAX_DELETE_PCT" -le 100 ] || fail_event preflight 1
+command -v "$RCLONE" >/dev/null 2>&1 || fail_event preflight 1
+[ -d "$SOURCE" ] || fail_event preflight 1
+case "$REMOTE" in *:*|*/*) fail_event preflight 1;; esac
 
 # Warn (don't fail) if the rclone config is group/world-readable — it holds secrets.
 CONF="${RCLONE_CONFIG:-$HOME/.config/rclone/rclone.conf}"
 if [ -f "$CONF" ]; then
-  PERM=$(stat -c '%a' "$CONF" 2>/dev/null || stat -f '%Lp' "$CONF" 2>/dev/null || echo "")
-  case "$PERM" in ""|600|400) ;; *) log "WARN: $CONF is mode $PERM — should be 600 (holds OAuth token + crypt password)";; esac
+  PERM=$(stat_mode "$CONF" 2>/dev/null || true)
+  case "$PERM" in ""|600|400) ;; *) log_event config warning 0 "mode=${PERM}";; esac
 fi
 
 # Fail CLOSED unless the remote is provably a crypt remote with filename encryption.
@@ -105,9 +270,9 @@ fi
 CONF_SHOW=$("$RCLONE" config show "$REMOTE" 2>/dev/null || true)
 RTYPE=$(printf '%s\n' "$CONF_SHOW" | awk -F' = ' '/^type =/{print $2; exit}')
 FENC=$(printf '%s\n' "$CONF_SHOW" | awk -F' = ' '/^filename_encryption =/{print $2; exit}')
-[ "$RTYPE" = "crypt" ] || die "remote '$REMOTE' is type '${RTYPE:-unknown}', not crypt — refusing to upload plaintext"
+[ "$RTYPE" = "crypt" ] || fail_event preflight 1
 case "$FENC" in
-  off) die "remote '$REMOTE' has filename_encryption=off — refusing (names would leak)";;
+  off) fail_event preflight 1;;
 esac
 
 archive_id() {
@@ -119,14 +284,14 @@ archive_id() {
     out="${alphabet:remainder:1}${out}"
     n=$((n / 62))
   done
-  [ "${#out}" -le 6 ] || die "cannot encode archive timestamp in six base-62 digits"
+  [ "${#out}" -le 6 ] || return 1
   while [ "${#out}" -lt 6 ]; do out="0${out}"; done
   printf 'a%s' "$out"
 }
 
 DEST="${REMOTE}:current"
-RUN_EPOCH=$(date -u +%s)
-ARCHIVE_ID=$(archive_id "$RUN_EPOCH")
+RUN_EPOCH=$(date -u +%s 2>/dev/null) || fail_event preflight 1
+ARCHIVE_ID=$(archive_id "$RUN_EPOCH") || fail_event preflight 1
 # A tagged seven-character sibling keeps the encrypted archive path no longer
 # than the existing `current` component. archive/<timestamp> pushed otherwise
 # otherwise-valid provider paths over common encrypted-path limits.
@@ -134,9 +299,13 @@ ARCHIVE="${REMOTE}:${ARCHIVE_ID}"
 
 # Connectivity + ensure destination exists (mkdir is idempotent and proves auth/write).
 if [ -z "$DRY_RUN" ]; then
-  "$RCLONE" mkdir "$DEST" 2>>"$LOG" || die "cannot reach/create ${DEST} — check rclone config / network"
+  if ! "$RCLONE" mkdir "$DEST" >/dev/null 2>&1; then
+    fail_event connect 1
+  fi
 else
-  "$RCLONE" lsd "${REMOTE}:" >/dev/null 2>>"$LOG" || log "WARN: dry-run remote check failed (remote may be new/empty)"
+  if ! "$RCLONE" lsd "${REMOTE}:" >/dev/null 2>&1; then
+    log_event connect warning 1
+  fi
 fi
 
 # ---- Preflight delete-count gate (mirrors sync-artifacts.sh's rsync safety) ----
@@ -145,39 +314,43 @@ fi
 # change set (e.g. the source got wiped) should STOP and alert, not silently mirror an
 # empty current/ and report success. Skipped on dry-run and on the first run (empty dest).
 if [ -z "$DRY_RUN" ]; then
-  if ! DEST_LIST=$("$RCLONE" lsf -R --files-only "$DEST" "${RCLONE_FILTERS[@]}" 2>>"$LOG" | sort); then
-    die "cannot list ${DEST} for delete-count preflight — refusing to sync"
+  if ! DEST_LIST=$("$RCLONE" lsf -R --files-only "$DEST" "${RCLONE_FILTERS[@]}" 2>/dev/null | sort); then
+    fail_event delete_gate 1
   fi
-  if ! SRC_LIST=$("$RCLONE" lsf -R --files-only "$SOURCE" "${RCLONE_FILTERS[@]}" 2>>"$LOG" | sort); then
-    die "cannot list ${SOURCE} for delete-count preflight — refusing to sync"
+  if ! SRC_LIST=$("$RCLONE" lsf -R --files-only "$SOURCE" "${RCLONE_FILTERS[@]}" 2>/dev/null | sort); then
+    fail_event delete_gate 1
   fi
   DEST_N=$(printf '%s\n' "$DEST_LIST" | grep -c . || true)
   DELETES=$(comm -23 <(printf '%s\n' "$DEST_LIST") <(printf '%s\n' "$SRC_LIST") | grep -c . || true)
   if [ "$DEST_N" -gt 0 ] && [ "$DELETES" -gt 0 ]; then
     PCT=$(( DELETES * 100 / DEST_N ))
     if [ "$DELETES" -ge "$MAX_DELETE" ] || [ "$PCT" -gt "$MAX_DELETE_PCT" ]; then
-      die "aborting: sync would remove ${DELETES}/${DEST_N} files (${PCT}%) from current/ — over threshold (max ${MAX_DELETE} or ${MAX_DELETE_PCT}%)"
+      fail_event delete_gate 1 "deletes=${DELETES} delete_pct=${PCT}"
     fi
-    log "delete-count gate ok: ${DELETES}/${DEST_N} files (${PCT}%) would move to archive"
+    log_event delete_gate pass 0 "deletes=${DELETES} delete_pct=${PCT}"
   fi
 fi
 
-log "starting offsite backup ${DRY_RUN:+(dry-run) }${SOURCE} → ${DEST} (archive: ${ARCHIVE})"
+log_event sync running 0 "${DRY_RUN:+dry_run=1}"
 
 # Mirror the current state. Overwritten/deleted files are MOVED into the per-run
 # archive dir (never destroyed). --max-delete is a second-line guard behind the
 # preflight gate above.
 # shellcheck disable=SC2086
-"$RCLONE" sync "${SOURCE}/" "$DEST" \
+if "$RCLONE" sync "${SOURCE}/" "$DEST" \
   --backup-dir "$ARCHIVE" \
   --max-delete "$MAX_DELETE" \
   --transfers 4 --checkers 8 \
   "${RCLONE_FILTERS[@]}" \
-  --log-file "$LOG" --log-level INFO \
-  --stats 0 $DRY_RUN
+  --stats 0 $DRY_RUN >/dev/null 2>&1; then
+  :
+else
+  sync_rc=$?
+  fail_event sync "$sync_rc"
+fi
 
 if [ -n "$DRY_RUN" ]; then
-  log "dry-run complete — no changes made, stamp/prune/panel skipped"
+  log_event complete pass 0 "dry_run=1"
   exit 0
 fi
 
@@ -189,17 +362,20 @@ prune_archive() {
   local cutoff_epoch cutoff_id legacy_cutoff d
   cutoff_epoch=$(date -u -d "${RETENTION_DAYS} days ago" +%s 2>/dev/null || true)
   if [ -z "$cutoff_epoch" ]; then
-    log "WARN: cannot compute retention cutoff (non-GNU date?) — skipping prune"
+    log_event prune warning 1
     return 0
   fi
-  cutoff_id=$(archive_id "$cutoff_epoch")
+  cutoff_id=$(archive_id "$cutoff_epoch") || {
+    log_event prune warning 1
+    return 0
+  }
   while IFS= read -r d; do
     d="${d%/}"; [ -n "$d" ] || continue
     if [[ "$d" =~ ^a[0-9A-Za-z]{6}$ ]] && [[ "$d" < "$cutoff_id" ]]; then
-      if "$RCLONE" purge "${REMOTE}:${d}" 2>>"$LOG"; then
-        log "pruned archive ${d} (older than ${RETENTION_DAYS}d)"
+      if "$RCLONE" purge "${REMOTE}:${d}" >/dev/null 2>&1; then
+        log_event prune pass 0
       else
-        log "WARN: purge archive ${d} failed — will retry next run"
+        log_event prune warning 1
       fi
     fi
   done < <("$RCLONE" lsf --dirs-only "${REMOTE}:" 2>/dev/null || true)
@@ -209,10 +385,10 @@ prune_archive() {
   while IFS= read -r d; do
     d="${d%/}"; [ -n "$d" ] || continue
     if [[ "$d" < "$legacy_cutoff" ]]; then
-      if "$RCLONE" purge "${REMOTE}:archive/${d}" 2>>"$LOG"; then
-        log "pruned archive/${d} (older than ${RETENTION_DAYS}d)"
+      if "$RCLONE" purge "${REMOTE}:archive/${d}" >/dev/null 2>&1; then
+        log_event prune pass 0
       else
-        log "WARN: purge archive/${d} failed — will retry next run"
+        log_event prune warning 1
       fi
     fi
   done < <("$RCLONE" lsf --dirs-only "${REMOTE}:archive" 2>/dev/null || true)
@@ -220,7 +396,28 @@ prune_archive() {
 prune_archive
 
 # Heartbeat + success panel.
-date +%s > "$STAMP"
-COUNT=$(find "$SOURCE" -type f ! -path '*/.git/*' | wc -l | tr -d ' ')
-log "offsite backup complete: ${COUNT} files mirrored to ${DEST}"
-push_panel pass "${COUNT} files, $(ts)"
+publish_stamp() {
+  local temporary stamp_value
+  temporary=$(mktemp "$STAMP_PARENT/.offsite-stamp.XXXXXX" 2>/dev/null) || return 1
+  if ! tighten_file "$temporary"; then
+    rm -f "$temporary" 2>/dev/null || true
+    return 1
+  fi
+  stamp_value=$(date +%s 2>/dev/null) || {
+    rm -f "$temporary" 2>/dev/null || true
+    return 1
+  }
+  if ! printf '%s\n' "$stamp_value" > "$temporary" 2>/dev/null; then
+    rm -f "$temporary" 2>/dev/null || true
+    return 1
+  fi
+  if ! mv -f "$temporary" "$STAMP" 2>/dev/null; then
+    rm -f "$temporary" 2>/dev/null || true
+    return 1
+  fi
+}
+
+publish_stamp || fail_event stamp 1
+COUNT=$(find "$SOURCE" -type f ! -path '*/.git/*' 2>/dev/null | wc -l | tr -d ' ')
+log_event complete pass 0 "files=${COUNT}"
+push_panel pass complete 0 "files=${COUNT}"

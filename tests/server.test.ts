@@ -3,12 +3,100 @@ import request from "supertest";
 import { createApp, HEIMDALL_DESCRIPTOR } from "../src/index.js";
 import { generateToken } from "../src/share-token.js";
 import { mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
 import { join, relative } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const TEST_ROOT = join(import.meta.dirname, "__test_fixtures__");
 const TEST_OUTSIDE_ROOT = join(import.meta.dirname, "__test_fixtures_outside__");
 const TEST_API_KEY = "test-key-for-mimir";
 const TEST_SHARE_SECRET = "test-share-secret-for-mimir-32bytes!";
+const FIFO_REQUEST_TIMEOUT_MS = 750;
+
+function createFifo(name: string): string {
+  const fifoPath = join(TEST_ROOT, name);
+  const result = spawnSync("mkfifo", [fifoPath]);
+  if (result.status !== 0) {
+    throw new Error(`mkfifo failed: ${result.stderr.toString()}`);
+  }
+  return fifoPath;
+}
+
+async function stopProbeServer(child: ReturnType<typeof spawn>): Promise<void> {
+  if (child.exitCode !== null) return;
+  child.kill("SIGTERM");
+  await Promise.race([
+    new Promise<void>((resolve) => child.once("exit", () => resolve())),
+    new Promise<void>((resolve) => setTimeout(resolve, 500)),
+  ]);
+  if (child.exitCode === null) child.kill("SIGKILL");
+}
+
+async function startProbeServer(): Promise<{ child: ReturnType<typeof spawn>; baseUrl: string }> {
+  const indexUrl = pathToFileURL(join(process.cwd(), "src/index.ts")).href;
+  const script = `
+    import { createApp } from ${JSON.stringify(indexUrl)};
+    const app = createApp({
+      apiKey: process.argv[1],
+      rootDir: process.argv[3],
+      shareSecret: process.argv[2],
+      rateLimitMax: 1000,
+    });
+    const server = app.listen(0, "127.0.0.1", () => {
+      process.stdout.write(String(server.address().port) + "\\n");
+    });
+  `;
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", "--input-type=module", "-e", script, TEST_API_KEY, TEST_SHARE_SECRET, TEST_ROOT],
+    {
+      cwd: process.cwd(),
+      env: { PATH: process.env.PATH, NODE_ENV: "test" },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+
+  try {
+    const port = await new Promise<number>((resolve, reject) => {
+      let output = "";
+      const timer = setTimeout(() => reject(new Error(`probe server did not start: ${output}`)), 5_000);
+      child.stdout?.on("data", (chunk: Buffer) => {
+        output += chunk.toString();
+        const match = output.match(/(^|\n)(\d+)\n/);
+        if (!match) return;
+        clearTimeout(timer);
+        resolve(Number(match[2]));
+      });
+      child.once("error", (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      child.once("exit", (code, signal) => {
+        clearTimeout(timer);
+        reject(new Error(`probe server exited before start (${code ?? signal})`));
+      });
+    });
+    return { child, baseUrl: `http://127.0.0.1:${port}` };
+  } catch (error) {
+    await stopProbeServer(child);
+    throw error;
+  }
+}
+
+async function probeRequest(url: string, headers?: Record<string, string>): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FIFO_REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(url, { headers, signal: controller.signal });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`request exceeded ${FIFO_REQUEST_TIMEOUT_MS}ms: ${url}`, { cause: error });
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function setup() {
   // Create test fixture directory
@@ -263,6 +351,67 @@ describe("file serving: /files/*", () => {
       .set(auth)
       .set("Range", "bytes=9999-");
     expect(res.status).toBe(416);
+  });
+});
+
+describe("special file hardening", () => {
+  it.skipIf(process.platform === "win32")("rejects a FIFO from /files without blocking", async () => {
+    const fifoName = `serve-${process.pid}.fifo`;
+    const fifoPath = createFifo(fifoName);
+    const probe = await startProbeServer();
+    try {
+      const res = await probeRequest(`${probe.baseUrl}/files/${encodeURIComponent(fifoName)}`, auth);
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/regular file/i);
+    } finally {
+      await stopProbeServer(probe.child);
+      rmSync(fifoPath, { force: true });
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("rejects a FIFO from a signed share without blocking", async () => {
+    const fifoName = `share-${process.pid}.fifo`;
+    const fifoPath = createFifo(fifoName);
+    const probe = await startProbeServer();
+    try {
+      const token = generateToken(fifoName, 3600, TEST_SHARE_SECRET);
+      const res = await probeRequest(`${probe.baseUrl}/share/${token}`);
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/regular file/i);
+    } finally {
+      await stopProbeServer(probe.child);
+      rmSync(fifoPath, { force: true });
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("rejects a FIFO path from /list without blocking", async () => {
+    const fifoName = `list-${process.pid}.fifo`;
+    const fifoPath = createFifo(fifoName);
+    const probe = await startProbeServer();
+    try {
+      const res = await probeRequest(`${probe.baseUrl}/list/${encodeURIComponent(fifoName)}`, auth);
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/not a directory/i);
+    } finally {
+      await stopProbeServer(probe.child);
+      rmSync(fifoPath, { force: true });
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("omits a FIFO sibling from directory listings", async () => {
+    const fifoName = `sibling-${process.pid}.fifo`;
+    const fifoPath = createFifo(fifoName);
+    const probe = await startProbeServer();
+    try {
+      const res = await probeRequest(`${probe.baseUrl}/list/`, auth);
+      expect(res.status).toBe(200);
+      const names = (await res.json()).entries.map((entry: { name: string }) => entry.name);
+      expect(names).not.toContain(fifoName);
+      expect(names).toContain("hello.txt");
+    } finally {
+      await stopProbeServer(probe.child);
+      rmSync(fifoPath, { force: true });
+    }
   });
 });
 

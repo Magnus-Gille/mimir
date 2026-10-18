@@ -19,8 +19,10 @@ IOSchedulingClass=idle
 # Sandboxing
 ProtectSystem=strict
 # rclone may rewrite rclone.conf when it refreshes an OAuth token, so its
-# config dir must be writable. StateDirectory owns the deployment-stable log/stamp.
+# config dir must be writable. The script keeps its log/stamp in a private child
+# below the shared StateDirectory.
 StateDirectory=mimir
+UMask=0077
 ReadWritePaths=/home/mimir/.config/rclone
 ReadOnlyPaths=/home/mimir/mimir
 NoNewPrivileges=true

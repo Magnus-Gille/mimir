@@ -16,12 +16,12 @@
  * Quarantine dir defaults to MIMIR_QUARANTINE_DIR, or a `-quarantine`
  * sibling of the target dir.
  *
- * Exit 0: scan ran (any hits were quarantined and alerted).
- * Exit 1: the scan itself failed (I/O error) — caller must not assume the
- *         tree is clean.
+ * Exit 0: every input was scanned completely (any hits were quarantined and alerted).
+ * Exit 1: an input could not be completely scanned or the scan itself failed —
+ *         caller must not assume the tree is clean.
  */
 import { resolve } from "node:path";
-import { scanAndQuarantine, alertSecretsFound } from "../secret-scan.js";
+import { scanAndQuarantine, alertSecretsFound, SCAN_INCOMPLETE_REASONS } from "../secret-scan.js";
 
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
@@ -60,12 +60,28 @@ async function main(): Promise<void> {
     }
   }
 
-  const { findings, quarantined } = await scanAndQuarantine(targetDir, quarantineDir, relativeFiles);
+  const { findings, quarantined, incomplete } = await scanAndQuarantine(targetDir, quarantineDir, relativeFiles);
 
   if (quarantined.length > 0) {
     await alertSecretsFound(findings, quarantineDir);
     console.log(`[mimir] secret-scan: quarantined ${quarantined.length} file(s) — see log above.`);
-  } else {
+  }
+
+  if (incomplete.length > 0) {
+    const counts = SCAN_INCOMPLETE_REASONS
+      .map((reason) => [reason, incomplete.filter((item) => item.reason === reason).length] as const)
+      .filter(([, count]) => count > 0)
+      .map(([reason, count]) => `${reason}=${count}`)
+      .join(", ");
+    console.error(`[mimir] secret-scan: incomplete ${incomplete.length} item(s): ${counts}`);
+    for (const item of incomplete) {
+      console.error(`[mimir] secret-scan: ${JSON.stringify(item.file)} [${item.reason}]`);
+    }
+    process.exitCode = 1;
+    return;
+  }
+
+  if (quarantined.length === 0) {
     console.log(`[mimir] secret-scan: clean (${relativeFiles ? relativeFiles.length + " file(s)" : targetDir}).`);
   }
 }
