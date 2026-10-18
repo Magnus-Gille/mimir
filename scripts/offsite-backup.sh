@@ -336,16 +336,78 @@ log_event sync running 0 "${DRY_RUN:+dry_run=1}"
 # Mirror the current state. Overwritten/deleted files are MOVED into the per-run
 # archive dir (never destroyed). --max-delete is a second-line guard behind the
 # preflight gate above.
-# shellcheck disable=SC2086
-if "$RCLONE" sync "${SOURCE}/" "$DEST" \
-  --backup-dir "$ARCHIVE" \
-  --max-delete "$MAX_DELETE" \
-  --transfers 4 --checkers 8 \
-  "${RCLONE_FILTERS[@]}" \
-  --stats 0 $DRY_RUN >/dev/null 2>&1; then
-  :
-else
-  sync_rc=$?
+#
+# rclone's log names artifacts, so it is never stored or forwarded. It is
+# streamed as JSON straight into an in-memory counter of provider path-length
+# rejections (mimir#58). Only per-object error records count, once per distinct
+# `object` field; the rejection class is read from the separate `msg` field, so
+# summary records (no object) and retries are not counted. rclone's output can
+# reach only awk's input: awk prints a single number, and the exit statuses are
+# printed by the shell afterwards, so the log cannot forge a status.
+# shellcheck disable=SC2016
+PATHLEN_AWK='
+  # Value of a top-level string field in one compact JSON record, prefixed with
+  # "=" when present. In valid JSON a raw `,"` or `{"` only occurs between
+  # fields, never inside a string, so the first match is structural.
+  function field(s, key,   p, i, c, out) {
+    p = index(s, "{\"" key "\":\"")
+    if (p == 0) p = index(s, ",\"" key "\":\"")
+    if (p == 0) return ""
+    out = "="
+    for (i = p + length(key) + 5; i <= length(s); i++) {
+      c = substr(s, i, 1)
+      if (c == "\"") return out
+      if (c == "\\") { out = out substr(s, i, 2); i++ } else out = out c
+    }
+    return ""
+  }
+  {
+    if (tolower(field($0, "level")) != "=error") next
+    object = field($0, "object")
+    if (object == "" || object == "=") next
+    msg = field($0, "msg")
+    # Anchored error shapes only: OS errors embed pathnames in msg, so a bare
+    # substring match would let a filename choose the class.
+    # OneDrive/SharePoint: "Failed to copy: invalidRequest: pathIsTooLong: ...".
+    # ENAMETOOLONG: "Failed to copy: open <path>: file name too long".
+    if (msg !~ /^=Failed to [a-z ]+: invalidRequest: pathIsTooLong: / &&
+        msg !~ /^=Failed to [a-z ]+: (open|mkdir|lstat|stat|rename|remove|chtimes) .*: file name too long$/) next
+    if (!(object in seen)) { seen[object] = 1; n++ }
+  }
+  END { print n + 0 }
+'
+run_sync() {
+  local -a status
+  # shellcheck disable=SC2086
+  if "$RCLONE" sync "${SOURCE}/" "$DEST" \
+    --backup-dir "$ARCHIVE" \
+    --max-delete "$MAX_DELETE" \
+    --transfers 4 --checkers 8 \
+    "${RCLONE_FILTERS[@]}" \
+    --use-json-log --stats 0 $DRY_RUN 2>&1 >/dev/null |
+    awk "$PATHLEN_AWK" 2>/dev/null; then
+    status=(0 0)
+  else
+    status=("${PIPESTATUS[@]}")
+  fi
+  printf '\n%s %s\n' "${status[0]:-unknown}" "${status[1]:-unknown}"
+}
+sync_rc=unknown
+counter_rc=unknown
+pathlen_rejections=""
+if SYNC_RESULT=$(run_sync); then
+  pathlen_rejections=$(printf '%s\n' "$SYNC_RESULT" | sed -n '1p')
+  read -r sync_rc counter_rc <<< "$(printf '%s\n' "$SYNC_RESULT" | sed -n '$p')" || true
+fi
+# An unreadable status is a failed sync, never a success.
+case "$sync_rc" in ''|*[!0-9]*) fail_event sync 1;; esac
+# A failed counter reports nothing rather than a guess.
+[ "$counter_rc" = 0 ] || pathlen_rejections=""
+case "$pathlen_rejections" in ''|*[!0-9]*) pathlen_rejections=0;; esac
+if [ "$sync_rc" -ne 0 ]; then
+  if [ "$pathlen_rejections" -gt 0 ]; then
+    fail_event sync "$sync_rc" "pathlen_rejections=${pathlen_rejections} doc=offsite-backup.md#path-length-budget"
+  fi
   fail_event sync "$sync_rc"
 fi
 

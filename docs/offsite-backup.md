@@ -43,7 +43,13 @@ so transient retention drift can't mask an otherwise-healthy backup.
 Operational output is deliberately content-blind. The private log and inherited
 stderr contain only UTC timestamps, stage/state/exit code, and numeric change
 metrics; rclone output, source/destination/remote/config/log paths, archive names,
-artifact filenames, and artifact content are discarded. Heimdall receives the same
+artifact filenames, and artifact content are discarded. The one exception is a
+count: rclone's sync log (`--use-json-log`) is streamed through an in-memory
+counter, and when a failed sync includes recognized provider path-length
+rejections the `sync` fail event adds
+`pathlen_rejections=N doc=offsite-backup.md#path-length-budget` (see
+[Path-length budget](#path-length-budget)). The rclone log itself is never written
+to disk, the log, the journal or Heimdall. Heimdall receives the same
 bounded status fields. The configured state directory may be shared with other
 Mímir state surfaces and is never tightened by this job; the default offsite
 state is kept in its private `offsite-private` child with mode `0700`. The log
@@ -230,6 +236,54 @@ Dry-run any time without touching the remote: `./scripts/offsite-backup.sh --dry
    (step 4). The remote path and `filename_encoding` must match what the entry records
    (for example `storage:encrypted/mimir` and `base32768`, set under advanced config).
 3. `rclone copy mimir-crypt:current ~/mimir-restored` → plaintext archive back.
+
+## Path-length budget
+
+Crypt encodes every encrypted path segment, and providers limit the length of the
+*encoded* path, not the plaintext one. With `filename_encoding = base32`, each segment
+is padded to a 16-byte block and base32-encoded, so a 64-character segment becomes 128
+characters. Deep or hash-named trees can then exceed a provider limit even when the
+plaintext paths look short. OneDrive allows 400 characters for the whole path,
+including the crypt remote's base path, and 255 per segment. `base32768` (the setup
+default above) keeps encoded names much shorter, but a deep enough tree can still
+exceed the limit.
+
+**Symptoms**
+
+- The `sync` stage fails, typically with rclone exit 6 (non-retryable errors):
+  `stage=sync state=fail exit=6 pathlen_rejections=N doc=offsite-backup.md#path-length-budget`
+  in the log, the journal and the Heimdall panel. N is the number of distinct
+  objects (rclone's `object` field) whose error record in this run carries a
+  recognized path-length rejection: OneDrive/SharePoint `pathIsTooLong`, or a
+  `file name too long` (ENAMETOOLONG) error. Retries and rclone's summary records
+  are not counted. Names are never reported.
+- Everything else still uploads, but rclone withholds **all deletions** for a run
+  with IO errors, so `current/` keeps files that no longer exist in the source and
+  the archive gets no moved-aside versions for them.
+- No heartbeat stamp is written, so freshness checks go stale as well.
+
+A sync failure without `pathlen_rejections` had no *recognized* path-length
+rejection; another provider may phrase it differently, so check the encrypted path
+lengths below if the failure persists.
+
+**Finding the affected paths** (operator only, in a private terminal; never paste
+the output into tickets, logs or Munin): list deep plaintext paths with
+`rclone lsf -R --files-only ~/mimir --exclude '**/.git/**'`, then count the
+characters of a candidate's encrypted path with
+`printf '%s' "$(rclone backend encode mimir-crypt: 'current/<plaintext path>')" | LC_ALL=C.UTF-8 wc -m`
+and add the length of the crypt remote's base path (for example `encrypted/mimir/`). No upload is needed.
+
+The affected files are not backed up offsite until the budget problem is fixed.
+Remedies need an owner decision:
+
+1. **Shorter encoding:** if the remote still uses `base32`, create a new crypt remote
+   with `filename_encoding = base32768` (step 3), upload into it once, verify it
+   (cryptcheck and a restore test), and switch `MIMIR_OFFSITE_REMOTE`. The new remote
+   needs its own key-custody entry (step 4). Retiring the old remote deletes data and
+   is a separate destructive-action decision. mimir#58 was fixed this way.
+2. **Shorten or relocate** the deep subtrees in the archive so the encrypted paths fit.
+3. **Exclude** them (`RCLONE_FILTERS` in the script). This clears the error but loses
+   offsite coverage for those files.
 
 ## Reuse (munin-memory#172, brokkr#1)
 
