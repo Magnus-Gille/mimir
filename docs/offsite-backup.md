@@ -113,9 +113,18 @@ Password or pass phrase for encryption:
   g) Generate random password  → choose a LONG one (or paste your own)
 Password or pass phrase for salt (password2):
   g) Generate random password  → generate a separate salt
+Edit advanced config? y
+filename_encoding> base32768            ← shortest encrypted names; ⏎ for the rest
 Edit advanced config? n
 Yes this is OK> y
 ```
+
+Use `filename_encoding = base32768` for providers that count characters rather than
+bytes (OneDrive, Dropbox). The default `base32` roughly doubles every path segment and
+can push deep trees past the provider's path limit (OneDrive: 400 characters for the whole
+path; mimir#58). The encoding cannot be changed later on an
+existing crypt remote: every object name would change, so switching requires a new
+remote and a full re-upload.
 
 > **Use the same `mimir-crypt` remote name the script defaults to**, or set
 > `MIMIR_OFFSITE_REMOTE` in `.env` to whatever you named it.
@@ -129,7 +138,9 @@ and you don't have them elsewhere, every byte in cloud storage is permanently un
 - Reveal them once: `rclone config show mimir-crypt` (shows `password` / `password2`
   in obscured form) — or better, note the *plaintext* password + salt you set in step 3.
 - Store the **plaintext password + salt** in your password manager (and/or the
-  fireproof safe), under an entry like `mimir-crypt (rclone offsite key)`.
+  fireproof safe), under an entry like `mimir-crypt (rclone offsite key)`. Record the
+  **remote path** and the **`filename_encoding`** in the same entry: a restore with the
+  wrong encoding or path finds nothing, without an obvious error.
 - **Never** commit them, never write them to `~/mimir/` (that would encrypt the key
   into the very backup it unlocks), never store them in Munin.
 
@@ -216,7 +227,8 @@ Dry-run any time without touching the remote: `./scripts/offsite-backup.sh --dry
 1. On any machine: `brew install rclone` (or the install script).
 2. `rclone config` → recreate the `storage` remote (re-authorize) **and** the
    `mimir-crypt` remote using the **password + salt from your password manager**
-   (step 4). The remote path must match: `storage:encrypted/mimir`.
+   (step 4). The remote path and `filename_encoding` must match what the entry records
+   (for example `storage:encrypted/mimir` and `base32768`, set under advanced config).
 3. `rclone copy mimir-crypt:current ~/mimir-restored` → plaintext archive back.
 
 ## Reuse (munin-memory#172, brokkr#1)
