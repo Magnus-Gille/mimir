@@ -366,9 +366,12 @@ PATHLEN_AWK='
     object = field($0, "object")
     if (object == "" || object == "=") next
     msg = field($0, "msg")
-    # OneDrive/SharePoint: "invalidRequest: pathIsTooLong: ...".
-    # Local or SFTP-style ENAMETOOLONG: "...: file name too long".
-    if (msg !~ /(^=|[ :])pathIsTooLong:/ && msg !~ /: file name too long$/) next
+    # Anchored error shapes only: OS errors embed pathnames in msg, so a bare
+    # substring match would let a filename choose the class.
+    # OneDrive/SharePoint: "Failed to copy: invalidRequest: pathIsTooLong: ...".
+    # ENAMETOOLONG: "Failed to copy: open <path>: file name too long".
+    if (msg !~ /^=Failed to [a-z ]+: invalidRequest: pathIsTooLong: / &&
+        msg !~ /^=Failed to [a-z ]+: (open|mkdir|lstat|stat|rename|remove|chtimes) .*: file name too long$/) next
     if (!(object in seen)) { seen[object] = 1; n++ }
   }
   END { print n + 0 }

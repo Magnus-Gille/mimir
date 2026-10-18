@@ -1030,7 +1030,10 @@ exit "\${MOCK_CURL_RC:-0}"
     expect(args).toContain(`"message":"${event}"`);
     expect(`${result.stdout}\n${result.stderr}\n${log}\n${args}`).not.toMatch(/name-canary|pathIsTooLong|Failed to/);
     expect(privateFiles).toEqual(["offsite-backup.log"]);
-    expect(readFileSync(join(harness.root, "rclone.calls"), "utf8")).toMatch(/^sync .*--use-json-log/m);
+    const calls = readFileSync(join(harness.root, "rclone.calls"), "utf8");
+    expect(calls).toMatch(/^sync .*--use-json-log/m);
+    // A failed sync publishes no heartbeat and prunes nothing.
+    expect(calls).not.toMatch(/^(purge|lsf --dirs-only)/m);
   });
 
   it("does not let filenames decide the rejection class", () => {
@@ -1040,6 +1043,9 @@ exit "\${MOCK_CURL_RC:-0}"
       rcloneRecord("error", "Failed to copy: unauthenticated: token expired", "report-path too long-name-canary.txt"),
       rcloneRecord("error", "Failed to copy: unauthenticated: token expired", "x: pathIsTooLong: file name too long-name-canary"),
       rcloneRecord("error", "Failed to copy: open /src/file name too long-name-canary.txt: permission denied", "y-name-canary"),
+      rcloneRecord("error", "Failed to copy: open /src/report pathIsTooLong: name-canary.txt: permission denied", "report pathIsTooLong: name-canary.txt"),
+      rcloneRecord("error", "Failed to copy: open /src/a: file name too long: b-name-canary: permission denied", "a: file name too long: b-name-canary"),
+      rcloneRecord("error", "Failed to copy: wrapped: invalidRequest: pathIsTooLong: name-canary", "wrapped-name-canary"),
       rcloneRecord("notice", ONEDRIVE_PATHLEN, "notice-level-name-canary"),
       // A string value cannot smuggle a structural field.
       `{"level":"error","msg":"Failed to copy: denied","object":"z\\",\\"msg\\":\\"pathIsTooLong: name-canary"}`,
