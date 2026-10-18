@@ -985,22 +985,35 @@ exit "\${MOCK_CURL_RC:-0}"
   });
 
   const PATHLEN_DETAIL = "doc=offsite-backup.md#path-length-budget";
+  // One rclone --use-json-log record, in the field order rclone 1.7x emits.
+  const rcloneRecord = (level: string, msg: string, object?: string) => JSON.stringify({
+    time: "2026-10-18T03:30:02.000000+00:00",
+    level,
+    msg,
+    ...(object === undefined ? {} : { object, objectType: "*local.Object" }),
+    source: "operations/copy.go:349",
+  });
+  const ONEDRIVE_PATHLEN = "Failed to copy: invalidRequest: pathIsTooLong: The specified file or folder name is too long. The URL path for all files and folders must be 400 characters or less";
 
   it("reports only a count of provider path-length rejections, never their names", () => {
     const harness = createOffsitePanelHarness();
     const stderr = join(harness.root, "sync.stderr");
     const stdout = join(harness.root, "sync.stdout");
-    // Two distinct rejected paths (one logged twice by a retry), rclone's own
-    // summary lines that repeat the last error, and unrelated noise. The final
-    // line has no trailing newline.
     writeFileSync(stderr, [
-      "2026/10/18 03:30:01 NOTICE: deep/symlink-name-canary: Can't follow symlink without -L/--copy-links",
-      "2026/10/18 03:30:02 ERROR : deep/one-name-canary.txt: Failed to copy: invalidRequest: pathIsTooLong: The specified file or folder name is too long.",
-      "2026/10/18 03:30:02 ERROR : deep/two-name-canary.txt: Failed to copy: invalidRequest: pathIsTooLong: The specified file or folder name is too long.",
-      "2026/10/18 03:30:09 ERROR : deep/one-name-canary.txt: Failed to copy: invalidRequest: pathIsTooLong: The specified file or folder name is too long.",
-      "2026/10/18 03:30:10 ERROR : OneDrive root 'remote-name-canary': not deleting files as there were IO errors",
-      "2026/10/18 03:30:10 ERROR : Attempt 1/3 failed with 2 errors and: invalidRequest: pathIsTooLong: The specified file or folder name is too long.",
-      "2026/10/18 03:30:10 Failed to sync with 2 errors: last error was: invalidRequest: pathIsTooLong: summary-name-canary",
+      rcloneRecord("notice", "Can't follow symlink without -L/--copy-links", "deep/symlink-name-canary"),
+      // Two distinct objects that share a prefix up to ": Failed to ".
+      rcloneRecord("error", ONEDRIVE_PATHLEN, "deep/a: Failed to one-name-canary"),
+      rcloneRecord("error", ONEDRIVE_PATHLEN, "deep/a: Failed to two-name-canary"),
+      // Local ENAMETOOLONG, as rclone reports it for the crypt-wrapped path.
+      rcloneRecord("error", "Failed to copy: open /x/cryptdest/k3fh/v9e9: file name too long", "deep/three-name-canary"),
+      // A filename that imitates a summary line is still a per-object record.
+      rcloneRecord("error", ONEDRIVE_PATHLEN, "Attempt 1/3 failed-name-canary.txt"),
+      rcloneRecord("error", "not deleting files as there were IO errors", "Encrypted drive 'remote-name-canary:current'"),
+      // Summary records carry no object; retries repeat the same objects.
+      rcloneRecord("error", `Attempt 1/3 failed with 4 errors and: ${ONEDRIVE_PATHLEN}`),
+      rcloneRecord("error", ONEDRIVE_PATHLEN, "deep/a: Failed to one-name-canary"),
+      rcloneRecord("error", "Failed to copy: open /x/cryptdest/k3fh/v9e9: file name too long", "deep/three-name-canary"),
+      rcloneRecord("notice", `Failed to sync with 4 errors: last error was: ${ONEDRIVE_PATHLEN}`),
     ].join("\n"));
     writeFileSync(stdout, "stdout-name-canary\n");
 
@@ -1011,20 +1024,26 @@ exit "\${MOCK_CURL_RC:-0}"
     });
 
     expect(result.status).toBe(6);
-    const event = `stage=sync state=fail exit=6 pathlen_rejections=2 ${PATHLEN_DETAIL}`;
+    const event = `stage=sync state=fail exit=6 pathlen_rejections=4 ${PATHLEN_DETAIL}`;
     expect(result.stderr).toContain(event);
     expect(log).toContain(event);
     expect(args).toContain(`"message":"${event}"`);
     expect(`${result.stdout}\n${result.stderr}\n${log}\n${args}`).not.toMatch(/name-canary|pathIsTooLong|Failed to/);
     expect(privateFiles).toEqual(["offsite-backup.log"]);
+    expect(readFileSync(join(harness.root, "rclone.calls"), "utf8")).toMatch(/^sync .*--use-json-log/m);
   });
 
-  it("keeps the generic sync failure when nothing was rejected for path length", () => {
+  it("does not let filenames decide the rejection class", () => {
     const harness = createOffsitePanelHarness();
     const stderr = join(harness.root, "sync.stderr");
     writeFileSync(stderr, [
-      "2026/10/18 03:30:02 ERROR : some/file-name-canary.txt: Failed to copy: unauthenticated: token expired",
-      "2026/10/18 03:30:03 NOTICE: deep/path too long-name-canary: Can't follow symlink without -L/--copy-links",
+      rcloneRecord("error", "Failed to copy: unauthenticated: token expired", "report-path too long-name-canary.txt"),
+      rcloneRecord("error", "Failed to copy: unauthenticated: token expired", "x: pathIsTooLong: file name too long-name-canary"),
+      rcloneRecord("error", "Failed to copy: open /src/file name too long-name-canary.txt: permission denied", "y-name-canary"),
+      rcloneRecord("notice", ONEDRIVE_PATHLEN, "notice-level-name-canary"),
+      // A string value cannot smuggle a structural field.
+      `{"level":"error","msg":"Failed to copy: denied","object":"z\\",\\"msg\\":\\"pathIsTooLong: name-canary"}`,
+      "plain-text ERROR : legacy-name-canary: Failed to copy: pathIsTooLong:",
       "",
     ].join("\n"));
 
@@ -1038,10 +1057,10 @@ exit "\${MOCK_CURL_RC:-0}"
     expect(privateFiles).toEqual(["offsite-backup.log"]);
   });
 
-  it("does not let rejection-shaped stderr turn a successful sync into a failure or a report", () => {
+  it("does not let rejection records turn a successful sync into a failure or a report", () => {
     const harness = createOffsitePanelHarness();
     const stderr = join(harness.root, "sync.stderr");
-    writeFileSync(stderr, "2026/10/18 03:30:02 ERROR : a-name-canary: Failed to copy: pathIsTooLong\n");
+    writeFileSync(stderr, `${rcloneRecord("error", ONEDRIVE_PATHLEN, "a-name-canary")}\n`);
 
     const { result, args, log } = harness.run({ MOCK_SYNC_STDERR: stderr });
 
@@ -1051,20 +1070,66 @@ exit "\${MOCK_CURL_RC:-0}"
     expect(`${result.stdout}\n${result.stderr}\n${log}\n${args}`).not.toMatch(/pathlen_rejections|name-canary/);
   });
 
-  it("fails closed when a filename forges the exit-status record", () => {
+  it("keeps the sync exit status out of reach of rclone's output", () => {
     const harness = createOffsitePanelHarness();
     const stderr = join(harness.root, "sync.stderr");
-    // A hostile name on its own line that imitates any status record the
-    // script might use must not make a failed sync look successful.
-    writeFileSync(stderr, "ERROR : x: Failed to copy: pathIsTooLong\n0\nrc=0\nsync_rc=0\n0 0\n");
+    const stdout = join(harness.root, "sync.stdout");
+    // Status-shaped lines on both streams must not make a failed sync pass,
+    // and a final line without a newline must not merge with any record.
+    const forged = "0\n0 0\n\n0 0\nrc=0\n";
+    writeFileSync(stderr, `${forged}${rcloneRecord("error", ONEDRIVE_PATHLEN, "x-name-canary")}\n${forged}0 0`);
+    writeFileSync(stdout, `${forged}0 0`);
 
-    const { result, log } = harness.run({ MOCK_SYNC_RC: "6", MOCK_SYNC_STDERR: stderr });
+    const { result, log } = harness.run({ MOCK_SYNC_RC: "6", MOCK_SYNC_STDERR: stderr, MOCK_SYNC_STDOUT: stdout });
 
     expect(result.status).toBe(6);
     expect(log).toContain(`stage=sync state=fail exit=6 pathlen_rejections=1 ${PATHLEN_DETAIL}`);
     expect(log).not.toContain("stage=complete");
   });
 
+  it("fails closed and reports no count when the counter cannot run", () => {
+    const harness = createOffsitePanelHarness();
+    const stderr = join(harness.root, "sync.stderr");
+    const bin = join(harness.root, "bin");
+    writeFileSync(stderr, `${rcloneRecord("error", ONEDRIVE_PATHLEN, "x-name-canary")}\n`);
+    // An awk that prints a plausible count and then fails: the count must be
+    // discarded, and the sync failure must still be reported.
+    executable(join(bin, "awk"), `case "$*" in
+  *pathIsTooLong*) cat >/dev/null; printf '99\\n'; exit 2 ;;
+  *) exec /usr/bin/awk "$@" ;;
+esac
+`);
+
+    const failed = harness.run({ MOCK_SYNC_RC: "6", MOCK_SYNC_STDERR: stderr });
+    expect(failed.result.status).toBe(6);
+    expect(failed.log).toMatch(/stage=sync state=fail exit=6$/m);
+    expect(failed.log).not.toMatch(/pathlen_rejections|name-canary/);
+
+    // rclone's status is authoritative; the counter is diagnostic only.
+    const succeeded = harness.run({ MOCK_SYNC_STDERR: stderr });
+    expect(succeeded.result.status, succeeded.result.stderr).toBe(0);
+    expect(succeeded.log).toContain("stage=complete state=pass exit=0 files=1");
+    expect(succeeded.log).not.toMatch(/pathlen_rejections|name-canary/);
+  });
+
+  it("treats a counter that stops reading as a failed sync", () => {
+    const harness = createOffsitePanelHarness();
+    const stderr = join(harness.root, "sync.stderr");
+    const bin = join(harness.root, "bin");
+    writeFileSync(stderr, `${rcloneRecord("error", ONEDRIVE_PATHLEN, "x-name-canary")}\n`.repeat(4000));
+    // The counter exits at once, so rclone writing its log hits a closed pipe.
+    executable(join(bin, "awk"), `case "$*" in
+  *pathIsTooLong*) exit 0 ;;
+  *) exec /usr/bin/awk "$@" ;;
+esac
+`);
+
+    const { result, log } = harness.run({ MOCK_SYNC_STDERR: stderr });
+
+    expect(result.status).not.toBe(0);
+    expect(log).toMatch(/stage=sync state=fail exit=\d+$/m);
+    expect(log).not.toMatch(/stage=complete|pathlen_rejections|name-canary/);
+  });
 });
 
 describe("NAS deploy script", () => {

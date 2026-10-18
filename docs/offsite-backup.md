@@ -44,11 +44,12 @@ Operational output is deliberately content-blind. The private log and inherited
 stderr contain only UTC timestamps, stage/state/exit code, and numeric change
 metrics; rclone output, source/destination/remote/config/log paths, archive names,
 artifact filenames, and artifact content are discarded. The one exception is a
-count: rclone's sync stderr is streamed through an in-memory counter, and when a
-failed sync includes provider path-length rejections the `sync` fail event adds
+count: rclone's sync log (`--use-json-log`) is streamed through an in-memory
+counter, and when a failed sync includes recognized provider path-length
+rejections the `sync` fail event adds
 `pathlen_rejections=N doc=offsite-backup.md#path-length-budget` (see
-[Path-length budget](#path-length-budget)). The stderr itself is never written to
-disk, the log, the journal or Heimdall. Heimdall receives the same
+[Path-length budget](#path-length-budget)). The rclone log itself is never written
+to disk, the log, the journal or Heimdall. Heimdall receives the same
 bounded status fields. The configured state directory may be shared with other
 Mímir state surfaces and is never tightened by this job; the default offsite
 state is kept in its private `offsite-private` child with mode `0700`. The log
@@ -252,14 +253,18 @@ exceed the limit.
 - The `sync` stage fails, typically with rclone exit 6 (non-retryable errors):
   `stage=sync state=fail exit=6 pathlen_rejections=N doc=offsite-backup.md#path-length-budget`
   in the log, the journal and the Heimdall panel. N is the number of distinct
-  objects that the provider rejected for path length in this run. Names are
-  never reported.
+  objects (rclone's `object` field) whose error record in this run carries a
+  recognized path-length rejection: OneDrive/SharePoint `pathIsTooLong`, or a
+  `file name too long` (ENAMETOOLONG) error. Retries and rclone's summary records
+  are not counted. Names are never reported.
 - Everything else still uploads, but rclone withholds **all deletions** for a run
   with IO errors, so `current/` keeps files that no longer exist in the source and
   the archive gets no moved-aside versions for them.
 - No heartbeat stamp is written, so freshness checks go stale as well.
 
-A sync failure without `pathlen_rejections` has some other cause.
+A sync failure without `pathlen_rejections` had no *recognized* path-length
+rejection; another provider may phrase it differently, so check the encrypted path
+lengths below if the failure persists.
 
 **Finding the affected paths** (operator only, in a private terminal; never paste
 the output into tickets, logs or Munin): list deep plaintext paths with
