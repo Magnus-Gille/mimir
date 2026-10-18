@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, linkSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -840,7 +840,11 @@ esac
 case "\${1:-}" in
   config) printf 'type = crypt\\nfilename_encryption = standard\\n' ;;
   lsf) [[ "$*" != *"--dirs-only mimir-crypt:"* ]] || printf 'current/\\n' ;;
-  sync) exit "\${MOCK_SYNC_RC:-0}" ;;
+  sync)
+    [ -z "\${MOCK_SYNC_STDERR:-}" ] || cat "$MOCK_SYNC_STDERR" >&2
+    [ -z "\${MOCK_SYNC_STDOUT:-}" ] || cat "$MOCK_SYNC_STDOUT"
+    exit "\${MOCK_SYNC_RC:-0}"
+    ;;
   *) exit 0 ;;
 esac
 `,
@@ -884,6 +888,9 @@ exit "\${MOCK_CURL_RC:-0}"
         const stateLog = join(state, "offsite-private", "offsite-backup.log");
         return {
           result,
+          privateFiles: existsSync(join(state, "offsite-private"))
+            ? readdirSync(join(state, "offsite-private")).sort()
+            : [],
           args: existsSync(curlArgs) ? readFileSync(curlArgs, "utf8") : "",
           stdin: existsSync(curlStdin) ? readFileSync(curlStdin, "utf8") : "",
           log: existsSync(stateLog) ? readFileSync(stateLog, "utf8") : "",
@@ -975,6 +982,87 @@ exit "\${MOCK_CURL_RC:-0}"
     expect(args).toBe("");
     expect(stdin).toBe("");
     expect(`${result.stdout}\n${result.stderr}`).not.toContain(invalidToken);
+  });
+
+  const PATHLEN_DETAIL = "doc=offsite-backup.md#path-length-budget";
+
+  it("reports only a count of provider path-length rejections, never their names", () => {
+    const harness = createOffsitePanelHarness();
+    const stderr = join(harness.root, "sync.stderr");
+    const stdout = join(harness.root, "sync.stdout");
+    // Two distinct rejected paths (one logged twice by a retry), rclone's own
+    // summary lines that repeat the last error, and unrelated noise. The final
+    // line has no trailing newline.
+    writeFileSync(stderr, [
+      "2026/10/18 03:30:01 NOTICE: deep/symlink-name-canary: Can't follow symlink without -L/--copy-links",
+      "2026/10/18 03:30:02 ERROR : deep/one-name-canary.txt: Failed to copy: invalidRequest: pathIsTooLong: The specified file or folder name is too long.",
+      "2026/10/18 03:30:02 ERROR : deep/two-name-canary.txt: Failed to copy: invalidRequest: pathIsTooLong: The specified file or folder name is too long.",
+      "2026/10/18 03:30:09 ERROR : deep/one-name-canary.txt: Failed to copy: invalidRequest: pathIsTooLong: The specified file or folder name is too long.",
+      "2026/10/18 03:30:10 ERROR : OneDrive root 'remote-name-canary': not deleting files as there were IO errors",
+      "2026/10/18 03:30:10 ERROR : Attempt 1/3 failed with 2 errors and: invalidRequest: pathIsTooLong: The specified file or folder name is too long.",
+      "2026/10/18 03:30:10 Failed to sync with 2 errors: last error was: invalidRequest: pathIsTooLong: summary-name-canary",
+    ].join("\n"));
+    writeFileSync(stdout, "stdout-name-canary\n");
+
+    const { result, args, log, privateFiles } = harness.run({
+      MOCK_SYNC_RC: "6",
+      MOCK_SYNC_STDERR: stderr,
+      MOCK_SYNC_STDOUT: stdout,
+    });
+
+    expect(result.status).toBe(6);
+    const event = `stage=sync state=fail exit=6 pathlen_rejections=2 ${PATHLEN_DETAIL}`;
+    expect(result.stderr).toContain(event);
+    expect(log).toContain(event);
+    expect(args).toContain(`"message":"${event}"`);
+    expect(`${result.stdout}\n${result.stderr}\n${log}\n${args}`).not.toMatch(/name-canary|pathIsTooLong|Failed to/);
+    expect(privateFiles).toEqual(["offsite-backup.log"]);
+  });
+
+  it("keeps the generic sync failure when nothing was rejected for path length", () => {
+    const harness = createOffsitePanelHarness();
+    const stderr = join(harness.root, "sync.stderr");
+    writeFileSync(stderr, [
+      "2026/10/18 03:30:02 ERROR : some/file-name-canary.txt: Failed to copy: unauthenticated: token expired",
+      "2026/10/18 03:30:03 NOTICE: deep/path too long-name-canary: Can't follow symlink without -L/--copy-links",
+      "",
+    ].join("\n"));
+
+    const { result, args, log, privateFiles } = harness.run({ MOCK_SYNC_RC: "7", MOCK_SYNC_STDERR: stderr });
+
+    expect(result.status).toBe(7);
+    expect(result.stderr).toMatch(/stage=sync state=fail exit=7$/m);
+    expect(log).toMatch(/stage=sync state=fail exit=7$/m);
+    expect(args).toContain('"message":"stage=sync state=fail exit=7"');
+    expect(`${result.stdout}\n${result.stderr}\n${log}\n${args}`).not.toMatch(/pathlen_rejections|name-canary/);
+    expect(privateFiles).toEqual(["offsite-backup.log"]);
+  });
+
+  it("does not let rejection-shaped stderr turn a successful sync into a failure or a report", () => {
+    const harness = createOffsitePanelHarness();
+    const stderr = join(harness.root, "sync.stderr");
+    writeFileSync(stderr, "2026/10/18 03:30:02 ERROR : a-name-canary: Failed to copy: pathIsTooLong\n");
+
+    const { result, args, log } = harness.run({ MOCK_SYNC_STDERR: stderr });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(log).toContain("stage=complete state=pass exit=0 files=1");
+    expect(args).toContain('"state":"pass"');
+    expect(`${result.stdout}\n${result.stderr}\n${log}\n${args}`).not.toMatch(/pathlen_rejections|name-canary/);
+  });
+
+  it("fails closed when a filename forges the exit-status record", () => {
+    const harness = createOffsitePanelHarness();
+    const stderr = join(harness.root, "sync.stderr");
+    // A hostile name on its own line that imitates any status record the
+    // script might use must not make a failed sync look successful.
+    writeFileSync(stderr, "ERROR : x: Failed to copy: pathIsTooLong\n0\nrc=0\nsync_rc=0\n0 0\n");
+
+    const { result, log } = harness.run({ MOCK_SYNC_RC: "6", MOCK_SYNC_STDERR: stderr });
+
+    expect(result.status).toBe(6);
+    expect(log).toContain(`stage=sync state=fail exit=6 pathlen_rejections=1 ${PATHLEN_DETAIL}`);
+    expect(log).not.toContain("stage=complete");
   });
 
 });

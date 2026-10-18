@@ -336,16 +336,50 @@ log_event sync running 0 "${DRY_RUN:+dry_run=1}"
 # Mirror the current state. Overwritten/deleted files are MOVED into the per-run
 # archive dir (never destroyed). --max-delete is a second-line guard behind the
 # preflight gate above.
-# shellcheck disable=SC2086
-if "$RCLONE" sync "${SOURCE}/" "$DEST" \
-  --backup-dir "$ARCHIVE" \
-  --max-delete "$MAX_DELETE" \
-  --transfers 4 --checkers 8 \
-  "${RCLONE_FILTERS[@]}" \
-  --stats 0 $DRY_RUN >/dev/null 2>&1; then
-  :
-else
-  sync_rc=$?
+#
+# rclone's stderr names artifacts, so it is never stored or forwarded. It is
+# streamed through an in-memory counter of provider path-length rejections
+# (mimir#58) and the only output is "<rc> <count>": the exit-status record is
+# printed after rclone exits and the LAST record wins, so stderr cannot forge it.
+run_sync() {
+  {
+    local rc=0
+    # shellcheck disable=SC2086
+    "$RCLONE" sync "${SOURCE}/" "$DEST" \
+      --backup-dir "$ARCHIVE" \
+      --max-delete "$MAX_DELETE" \
+      --transfers 4 --checkers 8 \
+      "${RCLONE_FILTERS[@]}" \
+      --stats 0 $DRY_RUN 2>&1 >/dev/null || rc=$?
+    printf '\n%s%s\n' "$SYNC_RC_RECORD" "$rc"
+  } | awk -v record="$SYNC_RC_RECORD" '
+    index($0, record) == 1 { rc = substr($0, length(record) + 1); next }
+    {
+      # Per-object ERROR lines only; rclone summary lines repeat the last error.
+      p = index($0, "ERROR : ")
+      if (p == 0) next
+      key = substr($0, p + 8)
+      if (key ~ /^Attempt [0-9]+\/[0-9]+ failed/) next
+      if (tolower(key) !~ /pathistoolong|path\/too_long|(name|path)( is)? too long/) next
+      sub(/: Failed to .*$/, "", key)
+      if (!(key in seen)) { seen[key] = 1; n++ }
+    }
+    END { printf "%s %d\n", (rc == "" ? "unknown" : rc), n }
+  '
+}
+SYNC_RC_RECORD="mimir-offsite-sync-rc-${RANDOM}${RANDOM}="
+sync_rc=unknown
+pathlen_rejections=0
+if SYNC_RESULT=$(run_sync); then
+  read -r sync_rc pathlen_rejections <<< "$SYNC_RESULT" || true
+fi
+# An unreadable status is a failed sync, never a success.
+case "$sync_rc" in ''|*[!0-9]*) fail_event sync 1;; esac
+case "$pathlen_rejections" in ''|*[!0-9]*) pathlen_rejections=0;; esac
+if [ "$sync_rc" -ne 0 ]; then
+  if [ "$pathlen_rejections" -gt 0 ]; then
+    fail_event sync "$sync_rc" "pathlen_rejections=${pathlen_rejections} doc=offsite-backup.md#path-length-budget"
+  fi
   fail_event sync "$sync_rc"
 fi
 
