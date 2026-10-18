@@ -120,6 +120,16 @@ def source_for(handoff):
                               access_client_secret=os.environ.get('MIMIR_CF_ACCESS_CLIENT_SECRET', ''))
 
 
+def _finite_number(value):
+    """A finite int or float; huge ints that overflow float conversion are rejected."""
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 class Runtime:
     def __init__(self, state, handoff, clock=time.time, semantic=None, embedder_factory=None):
         self.state = _private_store(Path(state))
@@ -168,8 +178,7 @@ class Runtime:
         if 'vectors' in value and not runtime_vectors.valid_state(value['vectors']):
             del value['vectors']
         if 'retry_after' in value or 'transient_failures' in value:
-            if (value['status'] != 'pending' or type(value.get('retry_after')) not in (int, float) or
-                    not math.isfinite(value['retry_after']) or
+            if (value['status'] != 'pending' or not _finite_number(value.get('retry_after')) or
                     type(value.get('transient_failures')) is not int or value['transient_failures'] < 1):
                 raise RuntimeErrorCode('invalid_job_state')
         return value

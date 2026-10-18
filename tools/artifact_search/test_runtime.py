@@ -384,15 +384,23 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(runtime.step(), "pending")
         self.assertNotEqual(runtime.job().get("counts"), before)
         self._complete(runtime)
-        for bad in ("Infinity", "NaN", "\"soon\""):
+        # A huge integer overflows float conversion; it must be rejected as
+        # invalid state rather than crash the loader with OverflowError.
+        for bad in ("Infinity", "NaN", "\"soon\"", "1" + "0" * 400, "-" + "9" * 400):
             with self.subTest(bad=bad):
                 path = runtime.state / "job.json"
                 job = json.loads(path.read_text(encoding="utf-8"))
+                job.pop("retry_after", None)
                 job.update(status="pending", transient_failures=1, error="source_http_502")
                 text = json.dumps(job).replace('"error"', '"retry_after": %s, "error"' % bad, 1)
                 path.write_text(text, encoding="utf-8")
-                with self.assertRaises(RuntimeErrorCode):
+                # Keep the file private so validation, not the ownership
+                # check, is what rejects the value.
+                os.chmod(path, 0o600)
+                with self.assertRaises(RuntimeErrorCode) as caught:
                     runtime.job()
+                self.assertEqual(str(caught.exception), "invalid_job_state")
+                self.assertNotEqual(runtime.health().get("status"), "ready")
 
     def test_legacy_failed_job_with_transient_error_recovers(self) -> None:
         runtime, _root, _result, _bundle, _handoff_path = self._runtime()
