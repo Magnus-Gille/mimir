@@ -36,6 +36,12 @@ PRIVATE_STATE_DIR="$STATE_DIR/offsite-private"
 STAMP="${MIMIR_OFFSITE_STAMP:-$PRIVATE_STATE_DIR/offsite.stamp}"
 LOG="${MIMIR_OFFSITE_LOG:-$PRIVATE_STATE_DIR/offsite-backup.log}"
 RCLONE="${RCLONE_BIN:-rclone}"
+# no-cloud markers (classification policy v1.1, decision D). The file travels
+# with the archive; when it is absent the run proceeds with zero exclusions
+# unless MIMIR_OFFSITE_CLASSIFICATION_REQUIRED=1.
+CLASSIFICATION="${MIMIR_OFFSITE_CLASSIFICATION:-$SOURCE/classification.yaml}"
+CLASSIFICATION_REQUIRED="${MIMIR_OFFSITE_CLASSIFICATION_REQUIRED:-0}"
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd) || SCRIPT_DIR=""
 
 # Git internals are transient workspace state, not Mimir artifacts. Deep Codex
 # checkpoint refs can exceed provider-specific encrypted path limits.
@@ -256,6 +262,33 @@ case "$MAX_DELETE_PCT" in ''|*[!0-9]*) fail_event preflight 1;; esac
 command -v "$RCLONE" >/dev/null 2>&1 || fail_event preflight 1
 [ -d "$SOURCE" ] || fail_event preflight 1
 case "$REMOTE" in *:*|*/*) fail_event preflight 1;; esac
+case "$CLASSIFICATION_REQUIRED" in 0|1) ;; *) fail_event preflight 1;; esac
+# shellcheck source=scripts/no-cloud-filter.sh
+. "$SCRIPT_DIR/no-cloud-filter.sh" 2>/dev/null || fail_event preflight 1
+
+# ---- no-cloud exclusions (before any remote call) ----
+# Folders whose contract forbids third-party storage never reach the remote.
+# The same rules filter the sync and both sides of the delete gate, so marking
+# a folder neither uploads it nor counts its earlier copies as deletions; those
+# copies stay in current/ and the archive until the explicit, owner-approved
+# offsite-purge-no-cloud.sh removes them. Only counts are reported: marked
+# paths name clients. An unreadable or invalid file aborts the run.
+if ! no_cloud_load "$CLASSIFICATION"; then
+  fail_event classification 1 "$(no_cloud_failure_detail)"
+fi
+if [ "$NO_CLOUD_SOURCE" = absent ] && [ "$CLASSIFICATION_REQUIRED" = 1 ]; then
+  fail_event classification 1 "reason=absent"
+fi
+no_cloud_patterns || fail_event classification 1 "$(no_cloud_failure_detail)"
+NO_CLOUD_UNMATCHED=0
+for no_cloud_path in ${NO_CLOUD_PATHS[@]+"${NO_CLOUD_PATHS[@]}"}; do
+  path_is_present "$SOURCE/${no_cloud_path%/}" || NO_CLOUD_UNMATCHED=$((NO_CLOUD_UNMATCHED + 1))
+done
+for no_cloud_pattern in ${NO_CLOUD_PATTERNS[@]+"${NO_CLOUD_PATTERNS[@]}"}; do
+  RCLONE_FILTERS+=(--exclude "$no_cloud_pattern")
+done
+NO_CLOUD_MARKERS=${#NO_CLOUD_PATHS[@]}
+log_event classification pass 0 "no_cloud_markers=${NO_CLOUD_MARKERS} source=${NO_CLOUD_SOURCE} no_cloud_unmatched=${NO_CLOUD_UNMATCHED}"
 
 # Warn (don't fail) if the rclone config is group/world-readable — it holds secrets.
 CONF="${RCLONE_CONFIG:-$HOME/.config/rclone/rclone.conf}"
@@ -412,7 +445,7 @@ if [ "$sync_rc" -ne 0 ]; then
 fi
 
 if [ -n "$DRY_RUN" ]; then
-  log_event complete pass 0 "dry_run=1"
+  log_event complete pass 0 "dry_run=1 no_cloud_markers=${NO_CLOUD_MARKERS}"
   exit 0
 fi
 
@@ -481,5 +514,5 @@ publish_stamp() {
 
 publish_stamp || fail_event stamp 1
 COUNT=$(find "$SOURCE" -type f ! -path '*/.git/*' 2>/dev/null | wc -l | tr -d ' ')
-log_event complete pass 0 "files=${COUNT}"
-push_panel pass complete 0 "files=${COUNT}"
+log_event complete pass 0 "files=${COUNT} no_cloud_markers=${NO_CLOUD_MARKERS}"
+push_panel pass complete 0 "files=${COUNT} no_cloud_markers=${NO_CLOUD_MARKERS}"

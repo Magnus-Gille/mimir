@@ -23,18 +23,22 @@ Assume an archive may contain sensitive data. The cloud copy is therefore
 1. Preflight: rclone present, source exists, and the remote is a **verified crypt
    remote** with filename encryption on — fails *closed* otherwise, so a misconfig
    can never upload plaintext.
-2. Delete-count gate: if the sync would move an implausible share of `current/` to the
+2. No-cloud exclusions: folders marked `no-cloud` in the archive's
+   `classification.yaml` are excluded from every following step, before any remote
+   call. An unreadable or invalid classification file aborts the run (see
+   [No-cloud folders](#no-cloud-folders-policy-decision-d)).
+3. Delete-count gate: if the sync would move an implausible share of `current/` to the
    archive (e.g. the source was wiped), it aborts *before* touching the remote.
-3. `rclone sync /home/mimir/mimir/ → mimir-crypt:current` — mirrors the current state (the
+4. `rclone sync /home/mimir/mimir/ → mimir-crypt:current` — mirrors the current state (the
    destination is auto-created on first run).
-4. Overwritten/deleted files are **moved** to a compact per-run sibling of `current/`
+5. Overwritten/deleted files are **moved** to a compact per-run sibling of `current/`
    via `--backup-dir` (never destroyed), giving **30-day version history**. The
    tagged seven-character base-62 timestamp avoids adding encrypted path depth under
    common provider path limits. `--max-delete` is a second-line guard.
-5. Prunes whole archive run-dirs older than 30 days **by their encoded timestamp** — not
+6. Prunes whole archive run-dirs older than 30 days **by their encoded timestamp** — not
    by object mtime (sync preserves source mtimes, so mtime-based pruning would wrongly
    delete a just-archived *old* file the moment it was archived).
-6. Writes a heartbeat stamp and pushes a `pass`/`fail` **Heimdall status panel**.
+7. Writes a heartbeat stamp and pushes a `pass`/`fail` **Heimdall status panel**.
 
 The mirror path is fail-loud: any error exits non-zero **and** pushes a `fail` panel.
 Archive pruning is best-effort — a prune failure logs a warning but still reports `pass`,
@@ -42,8 +46,9 @@ so transient retention drift can't mask an otherwise-healthy backup.
 
 Operational output is deliberately content-blind. The private log and inherited
 stderr contain only UTC timestamps, stage/state/exit code, and numeric change
-metrics; rclone output, source/destination/remote/config/log paths, archive names,
-artifact filenames, and artifact content are discarded. The one exception is a
+metrics (including `no_cloud_markers` and `no_cloud_unmatched` counts); rclone
+output, source/destination/remote/config/log paths, archive names, artifact
+filenames, marked folder names, and artifact content are discarded. The one exception is a
 count: rclone's sync log (`--use-json-log`) is streamed through an in-memory
 counter, and when a failed sync includes recognized provider path-length
 rejections the `sync` fail event adds
@@ -174,6 +179,8 @@ rclone config. Optional overrides (defaults shown):
 # MIMIR_OFFSITE_STAMP=$MIMIR_OFFSITE_STATE_DIR/offsite-private/offsite.stamp
 # MIMIR_OFFSITE_LOG=$MIMIR_OFFSITE_STATE_DIR/offsite-private/offsite-backup.log
 # MIMIR_OFFSITE_DRYRUN=1                            # same as passing --dry-run
+# MIMIR_OFFSITE_CLASSIFICATION=$MIMIR_OFFSITE_ROOT/classification.yaml  # no-cloud markers
+# MIMIR_OFFSITE_CLASSIFICATION_REQUIRED=0          # 1: an absent file aborts the run
 # RCLONE_BIN=rclone                                # rclone binary path
 ```
 
@@ -208,11 +215,15 @@ rclone ls storage:encrypted/mimir | head       # filenames must be opaque
 
 # b) Integrity: cryptcheck compares hashes THROUGH the crypt layer (plain `check`
 #    can silently degrade to size/modtime on a crypt remote).
+#    Once a folder is marked no-cloud, add its exclusions (see No-cloud folders):
+#    --filter-from <(scripts/no-cloud-filter.sh --exclude /home/mimir/mimir/classification.yaml)
 rclone cryptcheck /home/mimir/mimir/ mimir-crypt:current --exclude '**/.git/**'
 
 # c) RESTORE TEST — decrypt to a scratch dir, diff against source.
 rclone copy mimir-crypt:current /tmp/mimir-restore
 diff -r --exclude=.git /home/mimir/mimir/ /tmp/mimir-restore && echo "RESTORE OK"; rm -rf /tmp/mimir-restore
+#    With no-cloud markers the restore lacks those folders by design; compare against
+#    a copy of the source made with the same --filter-from exclusions.
 
 # d) 30-day history: change a file across two runs, confirm the prior version is
 #    preserved in the most recent archive run-dir.
@@ -236,6 +247,8 @@ Dry-run any time without touching the remote: `./scripts/offsite-backup.sh --dry
    (step 4). The remote path and `filename_encoding` must match what the entry records
    (for example `storage:encrypted/mimir` and `base32768`, set under advanced config).
 3. `rclone copy mimir-crypt:current ~/mimir-restored` → plaintext archive back.
+4. Folders marked `no-cloud` are not in the cloud by design. Restore them from the
+   newest offline medium (see [Offline copy](#offline-copy-of-no-cloud-folders)).
 
 ## Path-length budget
 
@@ -285,6 +298,170 @@ Remedies need an owner decision:
 3. **Exclude** them (`RCLONE_FILTERS` in the script). This clears the error but loses
    offsite coverage for those files.
 
+## No-cloud folders (policy decision D)
+
+Data-classification policy v1.1 (in force since 2026-10-20; the policy lives in
+the archive at `mgc/internal/compliance/data-classification-policy.md`) allows
+client-side-encrypted cloud backup of L3 material, **except** folders whose
+contract forbids any third-party storage, even encrypted. Those folders are marked
+`no-cloud`, never reach the offsite remote, and get a copy on a local offline
+medium instead.
+
+### The marker
+
+The classification file is `<archive root>/classification.yaml`: `~/mimir/` on the
+laptop and `/home/mimir/mimir/` on the NAS, where it arrives with the normal sync.
+`MIMIR_OFFSITE_CLASSIFICATION` overrides the path (tests use this). A folder is
+marked with the flow-mapping form; plain entries carry no marker:
+
+```yaml
+default: client-confidential
+paths:
+  mgc/customers/:          client-confidential               # no marker
+  mgc/customers/<client>/: {level: client-restricted, no-cloud: true}
+```
+
+`scripts/no-cloud-filter.sh` parses exactly this schema with a strict, dependency-free
+parser (awk), so a typo fails closed instead of uploading the folder:
+
+- Accepted: blank lines and `#` comments; `default: <level>` at most once; `paths:`
+  exactly once; below it, one `<path>: <level>` or `<path>: {level: <level>, no-cloud: true|false}`
+  entry per line, all at the same space indentation, each with an optional ` # comment`.
+- A marked `<path>` must be a relative folder path ending in `/`, with no `.`, `..`
+  or empty segments. Levels are lowercase tokens.
+- **Invalid**: any other key or top-level key (for example `no_cloud`, `version`),
+  a value other than `true`/`false`, duplicates, tabs, CR line endings, a byte-order
+  mark, quotes, block mappings, lists, and a file without `paths:` (an empty or
+  truncated file is invalid).
+- Marked paths are matched exactly and case-sensitively. Glob characters in folder
+  names are escaped. Non-ASCII letters match both their precomposed (NFC) and
+  decomposed (NFD, as macOS Finder often stores them) spellings. This needs the
+  standard-library `unicodedata` of `python3`, used only when a marked path is
+  non-ASCII; without it, the run fails closed with `reason=unicode`.
+
+### What the nightly job does with it
+
+| Classification file | Result |
+|---|---|
+| Absent | Proceeds with zero exclusions and logs `no_cloud_markers=0 source=absent`. Set `MIMIR_OFFSITE_CLASSIFICATION_REQUIRED=1` once the first folder is marked, so a lost file aborts the run instead. |
+| Present and valid | Each marked folder becomes rclone `--exclude` rules for the sync **and both sides of the delete gate**. Logs `stage=classification state=pass exit=0 no_cloud_markers=N source=file no_cloud_unmatched=M`; the complete event and the Heimdall panel carry `no_cloud_markers=N`. |
+| Unreadable (symlink, not a regular file, no read access) | Aborts before any remote call: `stage=classification state=fail exit=1 reason=unreadable`, plus a fail panel. |
+| Invalid | Aborts the same way with `reason=invalid line=N` (`line=0`: the whole file, for example no `paths:` section). |
+
+`no_cloud_unmatched` counts markers whose folder does not exist in the archive (a
+typo, or a folder not synced yet); only the count is reported. The dry run
+(`offsite-backup.sh --dry-run`) prints the same counts without touching the remote.
+`files=` on the complete event still counts the whole source tree, marked folders
+included.
+
+Excluding a folder never deletes anything in the cloud: rclone leaves excluded
+destination files alone, and the delete gate ignores them on both sides. Copies
+uploaded before the marker therefore stay in `current/` and in archive run-dirs
+until the owner removes them (below). The delete gate keeps working unchanged.
+
+### Marking a folder (runbook)
+
+1. Add the marker to `~/mimir/classification.yaml` **before** the folder's content
+   is added to the archive, or at least before the next NAS sync, and let it sync.
+2. On the NAS, check the counts:
+   `sudo -u mimir env MIMIR_OFFSITE_STATE_DIR=/var/lib/mimir /home/mimir/mimir-server/scripts/offsite-backup.sh --dry-run`
+   must show `no_cloud_markers` with the new count and `no_cloud_unmatched=0`.
+   Then set `MIMIR_OFFSITE_CLASSIFICATION_REQUIRED=1` in `.env`.
+3. If the folder had already been uploaded, remove its cloud copies (below).
+4. Make the offline copy (below), and repeat it whenever the folder changes.
+5. Record the decision (date, folder, contract reason) where the policy requires.
+
+To see the exclusions themselves, only in a private terminal (they name clients):
+`scripts/no-cloud-filter.sh --exclude <archive root>/classification.yaml`.
+
+### Removing earlier cloud copies
+
+`scripts/offsite-purge-no-cloud.sh` deletes the objects under the marked folders
+from `current/`, every tagged archive run-dir and the legacy `archive/<ts>` layout.
+It is never a side effect of the nightly run. Run it on the NAS as the backup user,
+outside the 03:30 window, and **only the owner** runs the execute step:
+
+```bash
+cd /home/mimir/mimir-server
+export MIMIR_OFFSITE_STATE_DIR=/var/lib/mimir
+scripts/offsite-purge-no-cloud.sh                  # plan: deletes nothing
+#   stage=plan state=pass exit=0 no_cloud_markers=1 current_objects=12 archive_objects=3 archive_dirs=2 plan=<id> expires=<UTC>
+scripts/offsite-purge-no-cloud.sh --execute <id>   # the owner's approval of that plan
+#   stage=execute state=pass exit=0 planned_objects=15 remaining_objects=0 receipt=<id>
+```
+
+- **Plan** counts the matching objects per directory, deletes nothing and writes a
+  single-use plan valid for 24 hours to
+  `$MIMIR_OFFSITE_STATE_DIR/offsite-private/no-cloud-purge/plan-<id>` (mode `0600`).
+  The plan stores counts and a digest salted with a random nonce, never paths.
+- **Execute** claims the plan, recounts, and refuses (`reason=plan_mismatch`) when
+  the markers, the remote or any per-directory count changed since the plan; an
+  expired, unknown or reused plan is refused too. Each `rclone delete` is confined
+  to the marked folders by filters and capped by `--max-delete` at the planned
+  count, then empty marked directories are removed with `rmdirs`. It then counts
+  again and writes `receipt-<id>` (mode `0600`): plan id, plan and execution times,
+  marker and object counts, `delete_failures`, `rmdirs_warnings`,
+  `remaining_objects`, `outcome`, and `provider_trash=owner_action_required`. It
+  exits non-zero unless every delete succeeded and nothing remains.
+- **Provider recycle bin**: most providers keep deleted files for a while (OneDrive:
+  the recycle bin, plus the second-stage bin on business accounts). Empty it in the
+  provider's UI to finish. On OneDrive for Business/SharePoint,
+  `RCLONE_ONEDRIVE_HARD_DELETE=true` before `--execute` deletes permanently instead.
+  Record the step next to the receipt.
+
+Agents never run `--execute`; it permanently deletes cloud data and needs the
+owner's just-in-time approval.
+
+### Offline copy of no-cloud folders
+
+`scripts/offline-copy-no-cloud.sh` keeps the marked folders on a local offline
+medium such as an external SSD, which is attached only for the copy. It is
+owner-invoked, typically on the laptop where `~/mimir` is the primary copy.
+
+**One-time setup**
+
+1. Format the medium (an encrypted APFS or LUKS volume adds a second layer).
+2. Create a separate crypt remote whose `remote =` is a directory on the medium,
+   with its **own** password and salt in the password manager (never the offsite key):
+   ```
+   [mimir-offline-crypt]
+   type = crypt
+   remote = /Volumes/MimirOffline/vault
+   filename_encryption = standard
+   directory_name_encryption = true
+   filename_encoding = base32
+   password = <obscured>
+   password2 = <obscured>
+   ```
+   Use `base32` here: local filesystems limit names to 255 bytes, and macOS volumes
+   are usually case-insensitive, which rules out `base64`.
+
+**Each copy**
+
+```bash
+MIMIR_OFFLINE_MOUNT=/Volumes/MimirOffline scripts/offline-copy-no-cloud.sh
+```
+
+The script fails closed and writes nothing until every preflight passes: the
+classification is valid, the medium is a mount point, and the remote is a crypt
+remote with filename encryption whose `remote =` path, after resolving symlinks, lies
+on the medium (it can never send data to the cloud). A marker that matches no file
+fails the run, because macOS matches names case- and normalization-insensitively
+while rclone filters do not; `--allow-unmatched` overrides this. Then it:
+
+1. syncs only the marked folders into `<remote>:current`, moving replaced or deleted
+   files into `<remote>:history/<UTC id>` (nothing is pruned);
+2. verifies with `rclone cryptcheck --one-way`;
+3. writes a receipt to `~/.local/state/mimir/offline-private/receipts/` (mode
+   `0600`) and an encrypted copy to `<remote>:receipts/`, with counts, the history id
+   and the verification result only;
+4. unmounts the medium (`--keep-mounted` skips this; a failed unmount exits 3 after
+   the receipt exists).
+
+Store the medium offline, away from the NAS. Restore with
+`rclone copy mimir-offline-crypt:current <target>` using the key from the password
+manager.
+
 ## Reuse (munin-memory#172, brokkr#1)
 
 Copy `scripts/offsite-backup.sh` into the target repo and adjust the config block:
@@ -296,3 +473,5 @@ Copy `scripts/offsite-backup.sh` into the target repo and adjust the config bloc
   live DB file mid-write. See munin-memory#172.
 - **Photos:** `--backup-dir`/history is wasted on append-only media — drop it and use a
   plain mirror. See brokkr#1.
+- **no-cloud markers** are Mímir-specific: a copy that has no `classification.yaml`
+  can drop the classification stage and `no-cloud-filter.sh`.

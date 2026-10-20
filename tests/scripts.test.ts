@@ -1138,6 +1138,262 @@ esac
   });
 });
 
+describe("offsite backup no-cloud markers", () => {
+  const MARKED = "mgc/customers/secret-client/";
+  const CLASSIFICATION = `default: client-confidential
+paths:
+  mgc/customers/: client-confidential
+  ${MARKED}: {level: client-restricted, no-cloud: true}
+  mgc/customers/ghost-client/: {level: client-restricted, no-cloud: true}
+  mgc/internal/: internal
+`;
+
+  function createNoCloudHarness(classification: string | null) {
+    const root = tempDir();
+    const source = join(root, "mimir");
+    const state = join(root, "state");
+    const bin = join(root, "bin");
+    const calls = join(root, "rclone.calls");
+    const panel = join(root, "panel.calls");
+    mkdirSync(join(source, MARKED), { recursive: true });
+    mkdirSync(join(source, "mgc", "internal"), { recursive: true });
+    mkdirSync(bin);
+    writeFileSync(join(source, MARKED, "contract.pdf"), "restricted\n");
+    writeFileSync(join(source, "mgc", "internal", "notes.md"), "internal\n");
+    if (classification !== null) writeFileSync(join(source, "classification.yaml"), classification);
+    executable(
+      join(bin, "rclone"),
+      `printf '%s\\n' "$*" >> "$RCLONE_CALLS"
+case "\${1:-}" in
+  config) printf 'type = crypt\\nfilename_encryption = standard\\n' ;;
+  lsf)
+    if [[ "$*" == *"--dirs-only"* ]]; then printf 'current/\\n'
+    elif [ -n "\${MOCK_DEST_FILES:-}" ] && [[ "$*" == *"mimir-crypt:current"* ]]; then
+      for i in $(seq 1 "$MOCK_DEST_FILES"); do printf 'keep/%s\\n' "$i"; done
+    fi
+    ;;
+  *) exit 0 ;;
+esac
+`,
+    );
+    executable(join(bin, "curl"), `printf '%s\\n' "$*" >> "$PANEL_CALLS"`);
+    return {
+      root,
+      source,
+      run(args: string[] = [], overrides: Record<string, string> = {}) {
+        const result = spawnSync("bash", [join(REPO_ROOT, "scripts/offsite-backup.sh"), ...args], {
+          cwd: REPO_ROOT,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            HOME: root,
+            PATH: `${bin}:${process.env.PATH ?? ""}`,
+            MIMIR_OFFSITE_ROOT: source,
+            MIMIR_OFFSITE_STATE_DIR: state,
+            RCLONE_BIN: join(bin, "rclone"),
+            RCLONE_CALLS: calls,
+            PANEL_CALLS: panel,
+            HEIMDALL_HUB_URL: "http://hub.invalid/panels",
+            HEIMDALL_FLEET_TOKEN: "token",
+            ...overrides,
+          },
+        });
+        const logFile = join(state, "offsite-private", "offsite-backup.log");
+        return {
+          result,
+          calls: existsSync(calls) ? readFileSync(calls, "utf8") : "",
+          panel: existsSync(panel) ? readFileSync(panel, "utf8") : "",
+          log: existsSync(logFile) ? readFileSync(logFile, "utf8") : "",
+        };
+      },
+    };
+  }
+
+  const syncCalls = (calls: string) => calls.split("\n").filter((line) => line.startsWith("sync "));
+  const listCalls = (calls: string) => calls.split("\n").filter((line) => line.startsWith("lsf -R "));
+
+  it("excludes marked folders from the sync and both sides of the delete gate, reporting only counts", () => {
+    const harness = createNoCloudHarness(CLASSIFICATION);
+    const { result, calls, panel, log } = harness.run();
+
+    expect(result.status, result.stderr).toBe(0);
+    const rules = [
+      "--exclude /mgc/customers/secret-client --exclude /mgc/customers/secret-client/**",
+      "--exclude /mgc/customers/ghost-client --exclude /mgc/customers/ghost-client/**",
+    ];
+    expect(syncCalls(calls)).toHaveLength(1);
+    expect(listCalls(calls)).toHaveLength(2);
+    for (const call of [...syncCalls(calls), ...listCalls(calls)]) {
+      expect(call).toContain("--exclude **/.git/**");
+      for (const rule of rules) expect(call).toContain(rule);
+    }
+    expect(log).toContain(
+      "stage=classification state=pass exit=0 no_cloud_markers=2 source=file no_cloud_unmatched=1",
+    );
+    expect(log).toMatch(/stage=complete state=pass exit=0 files=\d+ no_cloud_markers=2$/m);
+    expect(panel).toContain("no_cloud_markers=2");
+    const channels = `${result.stdout}\n${result.stderr}\n${log}\n${panel}`;
+    expect(channels).not.toMatch(/secret-client|ghost-client|customers/);
+  });
+
+  it("shows the excluded count in a dry run", () => {
+    const harness = createNoCloudHarness(CLASSIFICATION);
+    const { result, calls, log } = harness.run(["--dry-run"]);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).toContain("stage=classification state=pass exit=0 no_cloud_markers=2 source=file");
+    expect(log).toContain("stage=complete state=pass exit=0 dry_run=1 no_cloud_markers=2");
+    expect(syncCalls(calls)[0]).toContain("--dry-run");
+    expect(syncCalls(calls)[0]).toContain("--exclude /mgc/customers/secret-client/**");
+  });
+
+  it.each([
+    ["invalid", "paths:\n  mgc/customers/secret-client/: {level: client-restricted, no_cloud: true}\n", "reason=invalid line=2"],
+    ["truncated", "", "reason=invalid line=0"],
+  ])("fails closed on an %s classification file before any rclone call", (_name, content, detail) => {
+    const harness = createNoCloudHarness(content);
+    const { result, calls, panel, log } = harness.run();
+
+    expect(result.status).toBe(1);
+    expect(log).toContain(`stage=classification state=fail exit=1 ${detail}`);
+    expect(panel).toContain('"state":"fail"');
+    expect(panel).toContain(`stage=classification state=fail exit=1 ${detail}`);
+    expect(calls).toBe("");
+    expect(`${result.stderr}\n${log}\n${panel}`).not.toContain("secret-client");
+  });
+
+  it("fails closed on an unreadable classification file", () => {
+    const harness = createNoCloudHarness(null);
+    mkdirSync(join(harness.source, "classification.yaml"));
+    const { result, calls, log } = harness.run();
+
+    expect(result.status).toBe(1);
+    expect(log).toContain("stage=classification state=fail exit=1 reason=unreadable");
+    expect(calls).toBe("");
+  });
+
+  it("fails closed when a non-ASCII marker cannot be normalized", () => {
+    const harness = createNoCloudHarness("paths:\n  mgc/customers/Åkesson/: {level: client-restricted, no-cloud: true}\n");
+    const { result, calls, log } = harness.run([], { NO_CLOUD_PYTHON: join(harness.root, "no-python3") });
+
+    expect(result.status).toBe(1);
+    expect(log).toContain("stage=classification state=fail exit=1 reason=unicode");
+    expect(calls).toBe("");
+  });
+
+  it("reads an explicit classification path", () => {
+    const harness = createNoCloudHarness(null);
+    const elsewhere = join(harness.root, "elsewhere.yaml");
+    writeFileSync(elsewhere, CLASSIFICATION);
+    const { result, calls, log } = harness.run([], { MIMIR_OFFSITE_CLASSIFICATION: elsewhere });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(log).toContain("no_cloud_markers=2 source=file");
+    expect(syncCalls(calls)[0]).toContain("--exclude /mgc/customers/secret-client/**");
+  });
+
+  it("proceeds with zero exclusions when the file is absent, unless it is required", () => {
+    const harness = createNoCloudHarness(null);
+    const absent = harness.run();
+    expect(absent.result.status, absent.result.stderr).toBe(0);
+    expect(absent.log).toContain("stage=classification state=pass exit=0 no_cloud_markers=0 source=absent");
+    expect(syncCalls(absent.calls)[0]).not.toContain("secret-client");
+
+    const required = createNoCloudHarness(null).run([], { MIMIR_OFFSITE_CLASSIFICATION_REQUIRED: "1" });
+    expect(required.result.status).toBe(1);
+    expect(required.log).toContain("stage=classification state=fail exit=1 reason=absent");
+    expect(required.calls).toBe("");
+
+    const bogus = createNoCloudHarness(CLASSIFICATION).run([], { MIMIR_OFFSITE_CLASSIFICATION_REQUIRED: "yes" });
+    expect(bogus.result.status).toBe(1);
+    expect(bogus.log).toContain("stage=preflight state=fail exit=1");
+    expect(bogus.calls).toBe("");
+  });
+
+  it("still applies the delete-count gate while markers are active", () => {
+    const harness = createNoCloudHarness(CLASSIFICATION);
+    const { result, calls, log } = harness.run([], { MOCK_DEST_FILES: "40" });
+
+    expect(result.status).toBe(1);
+    expect(log).toContain("no_cloud_markers=2");
+    expect(log).toMatch(/stage=delete_gate state=fail exit=1 deletes=40 delete_pct=100/);
+    expect(syncCalls(calls)).toHaveLength(0);
+  });
+
+  const hasRclone = spawnSync("rclone", ["version"], { encoding: "utf8" }).status === 0;
+
+  it.skipIf(!hasRclone)("keeps marked folders out of a real crypt remote and leaves earlier copies for the purge", () => {
+    const root = tempDir();
+    const source = join(root, "mimir");
+    const cloud = join(root, "cloud");
+    const config = join(root, "rclone.conf");
+    const decomposed = "mgc/customers/Åkesson/";
+    mkdirSync(join(source, MARKED), { recursive: true });
+    mkdirSync(join(source, decomposed), { recursive: true });
+    mkdirSync(join(source, "mgc", "internal"), { recursive: true });
+    mkdirSync(cloud);
+    writeFileSync(join(source, MARKED, "contract.pdf"), "restricted\n");
+    writeFileSync(join(source, decomposed, "nda.pdf"), "restricted\n");
+    writeFileSync(join(source, "mgc", "internal", "notes.md"), "internal\n");
+    const obscure = (value: string) => spawnSync("rclone", ["obscure", value], { encoding: "utf8" }).stdout.trim();
+    writeFileSync(config, `[offsite-test]
+type = crypt
+remote = ${cloud}
+password = ${obscure("synthetic-password")}
+password2 = ${obscure("synthetic-salt")}
+filename_encryption = standard
+`);
+    chmodSync(config, 0o600);
+    const run = () => spawnSync("bash", [join(REPO_ROOT, "scripts/offsite-backup.sh")], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: root,
+        RCLONE_CONFIG: config,
+        MIMIR_OFFSITE_ROOT: source,
+        MIMIR_OFFSITE_REMOTE: "offsite-test",
+        MIMIR_OFFSITE_STATE_DIR: join(root, "state"),
+        HEIMDALL_HUB_URL: "",
+      },
+    });
+    const remoteFiles = () => spawnSync(
+      "rclone",
+      ["lsf", "-R", "--files-only", "offsite-test:current"],
+      { encoding: "utf8", env: { ...process.env, RCLONE_CONFIG: config } },
+    ).stdout.normalize("NFC").split("\n").filter(Boolean).sort();
+
+    // Before any marker, everything is uploaded.
+    const first = run();
+    expect(first.status, first.stderr).toBe(0);
+    expect(remoteFiles()).toEqual([
+      "mgc/customers/secret-client/contract.pdf",
+      "mgc/customers/Åkesson/nda.pdf",
+      "mgc/internal/notes.md",
+    ].sort());
+
+    // Marking (with the precomposed spelling) keeps new files out but never
+    // removes the earlier copies: that is the explicit purge's job.
+    writeFileSync(join(source, "classification.yaml"), `paths:
+  ${MARKED}: {level: client-restricted, no-cloud: true}
+  mgc/customers/Åkesson/: {level: client-restricted, no-cloud: true}
+`);
+    writeFileSync(join(source, MARKED, "new.pdf"), "restricted\n");
+    writeFileSync(join(source, decomposed, "new.pdf"), "restricted\n");
+    writeFileSync(join(source, "mgc", "internal", "more.md"), "internal\n");
+    const second = run();
+    expect(second.status, second.stderr).toBe(0);
+    expect(second.stderr).toContain("no_cloud_markers=2 source=file no_cloud_unmatched=0");
+    expect(remoteFiles()).toEqual([
+      "classification.yaml",
+      "mgc/customers/secret-client/contract.pdf",
+      "mgc/customers/Åkesson/nda.pdf",
+      "mgc/internal/more.md",
+      "mgc/internal/notes.md",
+    ].sort());
+  });
+});
+
 describe("NAS deploy script", () => {
   function mockCommands(root: string): { bin: string; calls: string } {
     const bin = join(root, "bin");

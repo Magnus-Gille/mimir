@@ -53,6 +53,8 @@ mimir/
 │   ├── freshness-surface.test.ts # Freshness publisher + installer coverage
 │   ├── relocation-verify.test.ts # Relocation hook + receipt fail-closed tests
 │   ├── scripts.test.ts    # Deploy/sync/share/offsite shell-script contracts
+│   ├── no-cloud.test.ts   # Classification parser + no-cloud purge contracts
+│   ├── offline-copy.test.ts # Offline-medium copy of no-cloud folders
 │   ├── systemd-unit-contract.test.ts # Checked-in unit rendering/paths
 │   ├── workload-contract.test.ts # Vendored schema + manifest compatibility
 │   ├── instructions-guidance.test.ts # Guidance/index clean-clone regressions
@@ -67,7 +69,10 @@ mimir/
     ├── backup-artifacts.sh # Local SD-to-NAS backup copy
     ├── publish-freshness.sh # Atomic freshness metadata publisher
     ├── install-heimdall-freshness-surface.sh # Least-authority probe setup
-    └── offsite-backup.sh  # Encrypted offsite backup runner
+    ├── offsite-backup.sh  # Encrypted offsite backup runner
+    ├── no-cloud-filter.sh # Strict classification.yaml no-cloud parser (sourced + CLI)
+    ├── offsite-purge-no-cloud.sh # Owner-approved removal of earlier no-cloud cloud copies
+    └── offline-copy-no-cloud.sh # Encrypted offline-medium copy of no-cloud folders
 ```
 
 ## Deployment and operator commands
@@ -151,6 +156,13 @@ Related checked-in unit files:
 | `MIMIR_OFFSITE_RETENTION_DAYS` | `30` | Archive prune horizon for deleted/changed files |
 | `MIMIR_OFFSITE_MAX_DELETE` | `1000` | Abort a run that would delete at least this many files |
 | `MIMIR_OFFSITE_MAX_DELETE_PCT` | `25` | Abort a run that would delete more than this percent of `current/`; the count and percentage guards are OR-ed, so whichever trips first aborts |
-| `MIMIR_OFFSITE_STATE_DIR` | `$XDG_STATE_HOME/mimir` or `~/.local/state/mimir` | Deployment-stable heartbeat and log directory |
+| `MIMIR_OFFSITE_STATE_DIR` | `$XDG_STATE_HOME/mimir` or `~/.local/state/mimir` | Deployment-stable heartbeat and log directory; purge plans and receipts live in its `offsite-private/no-cloud-purge/` |
+| `MIMIR_OFFSITE_CLASSIFICATION` | `$MIMIR_OFFSITE_ROOT/classification.yaml` | Classification file read for `no-cloud` markers (offsite backup and purge) |
+| `MIMIR_OFFSITE_CLASSIFICATION_REQUIRED` | `0` | `1` makes an absent classification file abort the offsite run |
+| `MIMIR_OFFLINE_MOUNT` | — (required) | Mount point of the offline medium for `offline-copy-no-cloud.sh` |
+| `MIMIR_OFFLINE_REMOTE` | `mimir-offline-crypt` | rclone crypt remote whose `remote =` path lies on the offline medium |
+| `MIMIR_OFFLINE_ROOT` | `$HOME/mimir` | Archive root the offline copy reads |
+| `MIMIR_OFFLINE_CLASSIFICATION` | `$MIMIR_OFFLINE_ROOT/classification.yaml` | Classification file for the offline copy |
+| `MIMIR_OFFLINE_STATE_DIR` | `$XDG_STATE_HOME/mimir` or `~/.local/state/mimir` | Offline-copy receipts (`offline-private/receipts/`) |
 | `MIMIR_QUARANTINE_DIR` | `<target-dir>-quarantine` | Where ingest secret-scan hits are moved |
 | `HEIMDALL_HUB_URL` / `HEIMDALL_FLEET_TOKEN` | — | Heimdall panel push for periodic self-report, secret-scan `fail` alerts and the search reader's `search-semantic` drift check (`~/.config/mimir-search/heimdall.env`) |
