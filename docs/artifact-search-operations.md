@@ -130,7 +130,9 @@ target, or a bounded release mandate.
   known-hit query with its expected path and original SHA-256, and a no-hit query).
 - The ancestry check fetches `origin/main` into a scratch repository outside the
   worktree, so neither a dry run nor a real run writes `FETCH_HEAD`, refs or objects
-  into the worktree's `.git`. The local deploy lock is a process-held `flock`
+  into the worktree's `.git`. The script refuses to run with an inherited `GIT_DIR`,
+  `GIT_WORK_TREE`, `GIT_OBJECT_DIRECTORY` or similar repository-location variable, and
+  resolves a relative `origin` path against the worktree root. The local deploy lock is a process-held `flock`
   (via `perl`), released by the kernel when the script exits.
 - `--dry-run` builds the package twice (byte-identical or refuse), renders the
   five reader units, prints the plan and unit diff, and mutates nothing.

@@ -805,7 +805,13 @@ trap 'on_signal HUP' HUP
 # final re-check after the switch passes fail_active so a changed tree is handled as
 # a post-mutation failure.
 check_source() {
-  local fail=${2:-fail_pre} top head status tip fetched
+  local fail=${2:-fail_pre} top head status tip fetched url var
+  # Source identity must come from the checkout in the current directory. An inherited
+  # repository-location override could redirect it, or the scratch fetch, elsewhere.
+  for var in GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+    GIT_INDEX_FILE GIT_NAMESPACE GIT_PREFIX GIT_REPLACE_REF_BASE GIT_NO_REPLACE_OBJECTS GIT_SHALLOW_FILE GIT_GRAFT_FILE; do
+    if env | grep -q "^$var="; then "$fail" "refusing to run with $var set in the environment"; fi
+  done
   top=$(git rev-parse --show-toplevel 2>/dev/null) || "$fail" "not inside a git worktree"
   head=$(git rev-parse HEAD 2>/dev/null) || "$fail" "cannot resolve HEAD"
   log "Expected source: $(pwd -P) @ $RELEASE"
@@ -815,13 +821,21 @@ check_source() {
   status=$(git status --porcelain=v1 --untracked-files=normal) || "$fail" "git status failed"
   [ -z "$status" ] || "$fail" "worktree is not clean; commit or remove every change"
   [ "$1" = 1 ] || return 0
-  tip=$(git ls-remote origin refs/heads/main 2>/dev/null | awk '{ print $1 }') || tip=""
+  # Resolve the effective origin once, from the source repository, and use the same
+  # URL for ls-remote and the scratch fetch. A relative local path is made absolute
+  # against the source root (the scratch repository lives elsewhere).
+  url=$(git remote get-url origin 2>/dev/null) || fail_pre "no origin remote is configured"
+  case "$url" in
+    /*|*://*|*:*) ;;
+    *) url=$(cd "$top" && cd "$url" 2>/dev/null && pwd -P) || fail_pre "cannot resolve the relative origin path";;
+  esac
+  tip=$(git ls-remote "$url" refs/heads/main 2>/dev/null | awk '{ print $1 }') || tip=""
   is_hex "$tip" 40 || fail_pre "origin/main is unreachable; cannot prove the release is merged"
   # Ancestry is proved in a scratch repository under $TMP so that neither a dry run
   # nor a real run writes FETCH_HEAD, refs or objects into the worktree's .git. The
   # release is present there only if it is part of origin/main's history.
   git init --quiet --bare "$TMP/ancestry.git" || fail_pre "could not create the scratch repository"
-  git -C "$TMP/ancestry.git" fetch --quiet --no-tags "$(git config --get remote.origin.url)" refs/heads/main 2>/dev/null ||
+  git -C "$TMP/ancestry.git" fetch --quiet --no-tags "$url" refs/heads/main 2>/dev/null ||
     fail_pre "could not fetch origin/main"
   fetched=$(git -C "$TMP/ancestry.git" rev-parse FETCH_HEAD)
   [ "$fetched" = "$tip" ] || fail_pre "origin/main moved while it was being checked; retry"
