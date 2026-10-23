@@ -1,5 +1,5 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import {
@@ -93,6 +93,36 @@ describe.skipIf(!hasTools)("deploy-search-reader.sh preflight", () => {
       expect(result.status).toBe(3);
       expect(result.stderr).toContain("unreachable");
     }, T);
+
+    it("accepts an origin configured with a relative path", () => {
+      const fx = fixture();
+      const absolute = must("git", ["remote", "get-url", "origin"], fx.repo);
+      must("git", ["remote", "set-url", "origin", relative(fx.repo, absolute)], fx.repo);
+      const result = fx.deploy(["--dry-run"]);
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+    }, T);
+
+    const leaks: [string, (fx: Fx) => string][] = [
+      ["GIT_DIR", (fx) => join(fx.repo, ".git")],
+      ["GIT_OBJECT_DIRECTORY", (fx) => join(fx.repo, ".git/objects")],
+      ["GIT_ALTERNATE_OBJECT_DIRECTORIES", (fx) => join(fx.repo, ".git/objects")],
+      ["GIT_WORK_TREE", (fx) => fx.repo],
+      ["GIT_INDEX_FILE", (fx) => join(fx.repo, ".git/index")],
+      ["GIT_COMMON_DIR", (fx) => join(fx.repo, ".git")],
+      ["GIT_NAMESPACE", () => "elsewhere"],
+    ];
+    for (const [variable, value] of leaks) {
+      it(`refuses an inherited ${variable} and leaves the source .git untouched`, () => {
+        const fx = fixture();
+        const before = snapshotTree(join(fx.repo, ".git"));
+        const result = fx.deploy(["--dry-run"], { [variable]: value(fx) });
+        expect(result.status, result.stdout + result.stderr).toBe(3);
+        expect(result.stderr).toContain(variable);
+        expect(existsSync(join(fx.repo, ".git/FETCH_HEAD"))).toBe(false);
+        expect(snapshotTree(join(fx.repo, ".git"))).toEqual(before);
+        expect(opsOf(fx)).toEqual([]);
+      }, T);
+    }
 
     it("prints the expected and actual source lines", () => {
       const fx = fixture();
