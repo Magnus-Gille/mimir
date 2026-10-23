@@ -135,8 +135,8 @@ DRY_OUTPUT=$(rsync -ani --delete --out-format='%i' "${MIRROR_FILTERS[@]}" "$LOCA
 DELETES=$(printf '%s\n' "$DRY_OUTPUT" | count_dry_run_deletes)
 if [ "$DELETES" -gt 0 ]; then
   REFUSAL_CLASS=delete_gate
-  REMOTE_POPULATION=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$NAS" "$(build_remote_population_command "$REMOTE_ROOT")")
-  REMOTE_TOTAL=${#REMOTE_POPULATION}
+  compute_deletable_total || exit 1
+  REMOTE_TOTAL=$DELETABLE_TOTAL
   if [ "$REMOTE_TOTAL" -gt 0 ]; then
     PCT=$(( (DELETES * 100 + REMOTE_TOTAL - 1) / REMOTE_TOTAL ))
   else

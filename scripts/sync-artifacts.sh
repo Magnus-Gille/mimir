@@ -94,11 +94,13 @@ REFUSAL_CLASS=dry_run_failed
 DRY_OUTPUT=$(rsync -ani --delete --out-format='%i' "${MIRROR_FILTERS[@]}" "$LOCAL" "$REMOTE")
 DELETES=$(printf '%s\n' "$DRY_OUTPUT" | count_dry_run_deletes)
 if [ "$DELETES" -gt 0 ]; then
-  # Count the actual remote population, not rsync's changed-line output. A
-  # delete mixed with many additions must not dilute the safety percentage.
+  # The denominator is what rsync itself could delete under these filters (an
+  # empty-source dry run), not rsync's changed-line output. A delete mixed with
+  # many additions must not dilute the safety percentage, and protected
+  # entries and retained ancestors must not inflate it.
   REFUSAL_CLASS=delete_gate
-  REMOTE_POPULATION=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$NAS" "$(build_remote_population_command "$REMOTE_ROOT")")
-  REMOTE_TOTAL=${#REMOTE_POPULATION}
+  compute_deletable_total || exit 1
+  REMOTE_TOTAL=$DELETABLE_TOTAL
   if [ "$REMOTE_TOTAL" -gt 0 ]; then
     PCT=$(( (DELETES * 100 + REMOTE_TOTAL - 1) / REMOTE_TOTAL ))
   else

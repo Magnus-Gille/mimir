@@ -87,7 +87,7 @@ Heimdall reporting helpers.
 | `MIMIR_INSTANCE_ID` | `default` | Stable instance identity reported to Heimdall |
 | `MIMIR_DEPLOY_HOST` | `localhost` | Deployment host label reported to Heimdall |
 | `MIMIR_SYNC_MAX_DELETE` | `1000` | Abort laptop→NAS sync at this many deletions |
-| `MIMIR_SYNC_MAX_DELETE_PCT` | `20` | Abort sync above this share of the actual remote population |
+| `MIMIR_SYNC_MAX_DELETE_PCT` | `20` | Abort sync above this share of what rsync could delete under the mirror filters |
 | `MIMIR_SYNC_STATE_DIR` | `$XDG_STATE_HOME/mimir` or `~/.local/state/mimir` | Durable out-of-tree staging for unverified inbox imports |
 | `MIMIR_NODE_BIN` | - | Absolute `node` path for the sync secret scan (otherwise `PATH` plus `MIMIR_NODE_SEARCH_PATH`, default `/opt/homebrew/bin:/usr/local/bin`) |
 | `MIMIR_SYNC_EXTRA_EXCLUDES` | - | Extra rsync exclude patterns added to the built-in cache excludes (cannot remove defaults) |
@@ -215,7 +215,7 @@ MIMIR_NAS=archive@files.internal ./scripts/sync-artifacts-daemon.sh
 The sync flow imports files from the NAS inbox, scans newly imported files for
 secrets, then mirrors laptop `~/mimir/` to NAS `~/mimir/` with a delete safety gate.
 Import and scanner failures stop before any mirror. The gate compares deletions with
-the actual remote population and also passes an absolute maximum to the real rsync.
+what rsync itself could delete under the same filters (an empty-source dry run) and also passes an absolute maximum to the real rsync.
 
 The sync finds `node` even under a scheduler with a minimal `PATH`; if the scanner
 cannot run it fails as `class=scanner_unavailable`, never skipping the scan. Every

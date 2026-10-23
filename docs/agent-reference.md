@@ -120,16 +120,22 @@ Sync behaviour shared by both scripts (implemented in `scripts/sync-common.sh`):
   `MIMIR_SYNC_EXTRA_EXCLUDES`; the defaults cannot be removed.
 - **Delete gate with excludes.** Excluded names are neither transferred nor deleted
   (`--delete-excluded` is not used), so cache directories already on the NAS are left
-  in place and contribute no deletions. The remote population (the percentage
-  denominator) prunes the same names, so the NAS snapshot tree and cached directories
-  do not dilute the percentage. A trailing `/***` is pruned as the directory itself plus
-  its contents (matching rsync); the count errs towards a smaller, stricter denominator.
+  in place and contribute no deletions. The percentage denominator is taken from rsync
+  itself: when the real dry run plans any deletion, a second dry run from an empty
+  temporary source (under the state directory, always removed) to the same NAS path
+  with the identical filter array lists everything rsync could delete. Its `*deleting`
+  lines, counted by the same strict parser, are the denominator. Protected entries,
+  the NAS snapshot tree and directories retained only because they hold protected
+  children are absent by construction, and every pattern (`**`, `/***`, anchors) is
+  honoured exactly as rsync honours it. `PCT = DELETES / DELETABLE_TOTAL`; an
+  empty-source dry-run failure, an unparseable line, or `DELETABLE_TOTAL == 0` with
+  `DELETES > 0` refuses the mirror (`delete_gate`). No deletions means no measurement.
   If a source directory is gone but its NAS copy holds protected children, rsync keeps
-  the directory and prints a "not empty, cannot delete" diagnostic; the gate accepts
+  the directory and prints a "not empty, cannot delete" diagnostic; the parser accepts
   exactly that diagnostic (GNU and openrsync wording), does not count it as a deletion,
   and still rejects any other unrecognised dry-run line. `MIMIR_SYNC_EXTRA_EXCLUDES` is
-  split on whitespace without glob expansion, so `*.md` reaches rsync verbatim.
-  Previously mirrored caches stay on the NAS until removed there by hand.
+  split on whitespace without glob expansion or temp files, so `*.md` reaches rsync
+  verbatim. Previously mirrored caches stay on the NAS until removed there by hand.
 
 Share-link helper:
 
@@ -173,7 +179,7 @@ Related checked-in unit files:
 | `MIMIR_INSTANCE_ID` | `default` | Stable instance identity reported to Heimdall |
 | `MIMIR_DEPLOY_HOST` | `localhost` | Deployment host label reported to Heimdall |
 | `MIMIR_SYNC_MAX_DELETE` | `1000` | Abort laptop→NAS mirror at or above this many deletions |
-| `MIMIR_SYNC_MAX_DELETE_PCT` | `20` | Abort mirror above this percentage of the actual remote population |
+| `MIMIR_SYNC_MAX_DELETE_PCT` | `20` | Abort mirror above this percentage of what rsync could delete under the mirror filters (empty-source dry run) |
 | `MIMIR_SYNC_STATE_DIR` | `$XDG_STATE_HOME/mimir` or `~/.local/state/mimir` | Durable out-of-tree staging for unverified inbox imports |
 | `MIMIR_NODE_BIN` | — | Absolute path to the `node` that runs the secret scan; if set but unusable the sync fails as `scanner_unavailable` (no PATH fallback) |
 | `MIMIR_NODE_SEARCH_PATH` | `/opt/homebrew/bin:/usr/local/bin` | Directories appended to `PATH` when looking up `node` (launchd's PATH lacks them) |

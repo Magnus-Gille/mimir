@@ -92,21 +92,26 @@ MIRROR_EXCLUDES=()
 MIRROR_FILTERS=()
 
 build_mirror_filters() {
-  local pattern extras=()
+  local pattern noglob=1 invalid=0
   MIRROR_EXCLUDES=("${SYNC_DEFAULT_EXCLUDES[@]}")
-  # Split on whitespace without pathname expansion: a pattern such as '*.md'
-  # must reach rsync verbatim, not be expanded against the working directory.
-  read -r -d '' -a extras <<< "${MIMIR_SYNC_EXTRA_EXCLUDES:-}" || true
-  # An empty array expands as unbound under `set -u` in bash 3.2.
-  for pattern in ${extras[@]+"${extras[@]}"}; do
+  # Split on whitespace with pathname expansion disabled, so a pattern such as
+  # '*.md' reaches rsync verbatim instead of being expanded against the working
+  # directory. A plain word split needs no temp file (a here-string does in
+  # bash 3.2, and a failure there could silently drop protections).
+  case $- in *f*) ;; *) noglob=0 ;; esac
+  set -f
+  # shellcheck disable=SC2086
+  for pattern in ${MIMIR_SYNC_EXTRA_EXCLUDES:-}; do
     case "$pattern" in
-      -*|+*|'!'*|*[[:cntrl:]]*)
-        echo "ERROR: MIMIR_SYNC_EXTRA_EXCLUDES entries must be plain patterns (no leading -, + or !)." >&2
-        return 1
-        ;;
+      -*|+*|'!'*|*[[:cntrl:]]*) invalid=1; break ;;
     esac
     MIRROR_EXCLUDES+=("$pattern")
   done
+  [ "$noglob" -eq 1 ] || set +f
+  if [ "$invalid" -eq 1 ]; then
+    echo "ERROR: MIMIR_SYNC_EXTRA_EXCLUDES entries must be plain patterns (no leading -, + or !)." >&2
+    return 1
+  fi
   # NAS-owned snapshot output is neither replaced nor deleted by laptop sync.
   MIRROR_FILTERS=(--filter='P /artifact-snapshots/***' --exclude='/artifact-snapshots')
   for pattern in "${MIRROR_EXCLUDES[@]}"; do
@@ -146,35 +151,36 @@ quote_remote_sh() {
   printf "'"
 }
 
-# Remote shell command that prints one byte per remote entry that the mirror
-# could delete: everything under the root except NAS-owned snapshots and the
-# excluded names. find's globbing approximates rsync's for these simple
-# patterns; a mismatch can only count extra entries (a laxer percentage).
-build_remote_population_command() {
-  local root="$1" pattern dir_only predicate quoted
-  local expr="find '$root' -mindepth 1 -path '$root/artifact-snapshots' -prune -o \\("
-  local first=1
-  for pattern in "${MIRROR_EXCLUDES[@]}"; do
-    dir_only=0
-    # rsync's trailing /*** excludes the directory itself and everything under
-    # it. find -path would match only descendants, so match the directory too:
-    # pruning it removes its contents from the count as well. This is
-    # deliberately type-agnostic, which can only shrink the denominator.
-    case "$pattern" in
-      */'***') pattern="${pattern%/\*\*\*}" ;;
-      */) dir_only=1; pattern="${pattern%/}" ;;
-    esac
-    [ -n "$pattern" ] || pattern='*'
-    case "$pattern" in
-      /*) quoted=$(quote_remote_sh "$root$pattern"); predicate="-path $quoted" ;;
-      */*) quoted=$(quote_remote_sh "*/$pattern"); predicate="-path $quoted" ;;
-      *) quoted=$(quote_remote_sh "$pattern"); predicate="-name $quoted" ;;
-    esac
-    [ "$dir_only" -eq 0 ] || predicate="\\( $predicate -type d \\)"
-    if [ "$first" -eq 1 ]; then first=0; else expr="$expr -o"; fi
-    expr="$expr $predicate"
-  done
-  printf '%s \\) -prune -o -printf .' "$expr"
+# Delete-gate denominator, taken from rsync itself rather than modelled with
+# find. A dry run from an empty source to the same destination with the
+# identical MIRROR_FILTERS lists exactly the entries rsync could delete under
+# these filters: protected entries, NAS-owned snapshots and directories retained
+# because they hold protected children are all absent by construction, and every
+# pattern is honoured as rsync honours it. Sets DELETABLE_TOTAL; fails closed on
+# any rsync or parse failure. The empty source lives under the state directory
+# (already required to be writable) and is always removed.
+EMPTY_SOURCE_DIR=""
+DELETABLE_TOTAL=0
+compute_deletable_total() {
+  local output counted
+  if ! EMPTY_SOURCE_DIR=$(mktemp -d "$STATE_DIR/mimir-sync-empty.XXXXXX"); then
+    EMPTY_SOURCE_DIR=""
+    echo "ERROR: could not create the empty comparison directory; refusing mirror." >&2
+    return 1
+  fi
+  if ! output=$(rsync -ani --delete --out-format='%i' "${MIRROR_FILTERS[@]}" "$EMPTY_SOURCE_DIR/" "$REMOTE"); then
+    echo "ERROR: empty-source dry run failed; cannot measure the deletable population; refusing mirror." >&2
+    remove_empty_source
+    return 1
+  fi
+  remove_empty_source
+  counted=$(printf '%s\n' "$output" | count_dry_run_deletes) || return 1
+  DELETABLE_TOTAL=$counted
+}
+
+remove_empty_source() {
+  [ -z "$EMPTY_SOURCE_DIR" ] || rmdir "$EMPTY_SOURCE_DIR" 2>/dev/null || true
+  EMPTY_SOURCE_DIR=""
 }
 
 # --- Stalled-sync visibility -----------------------------------------------
@@ -207,6 +213,7 @@ MIRROR_COMPLETED=0
 sync_exit_trap() {
   local rc=$?
   trap - EXIT
+  remove_empty_source
   if [ "$rc" -ne 0 ] && [ "$MIRROR_COMPLETED" -ne 1 ]; then
     echo "Sync refused to mirror: class=$REFUSAL_CLASS exit=$rc" >&2
     heimdall_sync_panel fail "class=${REFUSAL_CLASS} exit=${rc}"
