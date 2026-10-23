@@ -422,9 +422,14 @@ scripts/offsite-purge-no-cloud.sh --execute <id>   # the owner's approval of tha
   `RCLONE_ONEDRIVE_HARD_DELETE` is refused (`reason=rclone_env`), because it could
   redirect the destination or blind the object manifest. A listing that is not
   rclone's usual array, or lacks modification times, fails instead of counting as
-  empty. Run plan and execute with the same environment. The binding catches drift;
-  it does not defend against someone who can rewrite `rclone.conf` (a token swapped
-  for another account's is not detected), who could delete directly anyway. Each `rclone delete` is confined
+  empty. Run plan and execute with the same environment.
+- **Limit of the binding:** OAuth tokens are left out because they rotate. A
+  backend whose account is selected only by its token therefore does not notice a
+  reconnect to another account between plan and execute. OneDrive, the production
+  backend, binds `drive_id` and `drive_type`, which identify the drive. Even then the
+  purge can only delete objects under `no-cloud` folders, which policy forbids in
+  any third-party store. The receipt certifies the destination as configured at
+  execute time, so do not re-authorize the remote between the two steps. Each `rclone delete` is confined
   to the marked folders by filters and capped by `--max-delete` at the planned
   count, then empty marked directories are removed with `rmdirs`. It then counts
   again and writes `receipt-<id>` (mode `0600`): plan id, plan and execution times,
