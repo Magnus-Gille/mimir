@@ -417,8 +417,14 @@ scripts/offsite-purge-no-cloud.sh --execute <id>   # the owner's approval of tha
   and every `RCLONE_*` environment setting), so the same remote name pointing
   elsewhere does not match; or the planned objects (path, size and full-precision
   modification time of each). An expired, unknown or reused plan is refused too. The
-  same `rclone_env` and crypt checks as the nightly job apply. Run plan and execute
-  with the same environment. Each `rclone delete` is confined
+  crypt checks of the nightly job apply, and the environment check is stricter: any
+  `RCLONE_*` setting other than the config location, its password and
+  `RCLONE_ONEDRIVE_HARD_DELETE` is refused (`reason=rclone_env`), because it could
+  redirect the destination or blind the object manifest. A listing that is not
+  rclone's usual array, or lacks modification times, fails instead of counting as
+  empty. Run plan and execute with the same environment. The binding catches drift;
+  it does not defend against someone who can rewrite `rclone.conf` (a token swapped
+  for another account's is not detected), who could delete directly anyway. Each `rclone delete` is confined
   to the marked folders by filters and capped by `--max-delete` at the planned
   count, then empty marked directories are removed with `rmdirs`. It then counts
   again and writes `receipt-<id>` (mode `0600`): plan id, plan and execution times,

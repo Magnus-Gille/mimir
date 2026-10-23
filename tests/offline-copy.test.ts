@@ -645,7 +645,9 @@ filename_encoding = base32
     expect(raw.length).toBeGreaterThan(0);
     for (const path of raw) {
       const relative = path.slice(mount.length);
-      for (const plain of ["mgc", "customers", "secret", "contract", "nda", "kesson", "pdf", "notes", "internal", "HEAD", ".git", "classification"]) {
+      // Encrypted base32 names can contain short words by chance (for example
+      // "pdf"), so only tokens long enough, or with characters outside base32, count.
+      for (const plain of ["customers", "secret-client", "contract", "kesson", "notes.md", "internal", ".git", "classification", ".pdf"]) {
         expect(relative.toLowerCase(), relative).not.toContain(plain.toLowerCase());
       }
       if (statSync(path).isFile()) {

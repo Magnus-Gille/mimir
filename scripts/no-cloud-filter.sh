@@ -303,18 +303,24 @@ no_cloud_fingerprint() {
   fi
 }
 
-# no_cloud_rclone_env_check strict|filters: rclone also reads its options from
+# no_cloud_rclone_env_check strict|filters [ALLOWED...]: rclone also reads its options from
 # RCLONE_* environment variables, and those override the config the scripts
 # verified (RCLONE_CRYPT_REMOTE, RCLONE_CONFIG_<NAME>_*) or add filter rules
 # and link following that defeat the exclusions. `filters` rejects those
 # classes; `strict` rejects every RCLONE_* setting except the config location
-# and its password (and RCLONE_BIN, the scripts' own). Fails with NO_CLOUD_ERROR=rclone_env, naming nothing.
+# and its password (and RCLONE_BIN, the scripts' own), plus any ALLOWED names. Fails with NO_CLOUD_ERROR=rclone_env, naming nothing.
 no_cloud_rclone_env_check() {
-  local mode="$1" name
+  local mode="$1" name allowed skip
+  shift
   while IFS= read -r name; do
     case "$name" in
       ''|RCLONE_BIN|RCLONE_CONFIG|RCLONE_CONFIG_PASS|RCLONE_PASSWORD_COMMAND) continue ;;
     esac
+    skip=0
+    for allowed in "$@"; do
+      [ "$name" != "$allowed" ] || skip=1
+    done
+    [ "$skip" = 0 ] || continue
     if [ "$mode" = strict ]; then
       NO_CLOUD_ERROR=rclone_env
       return 1

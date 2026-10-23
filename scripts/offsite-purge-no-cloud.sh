@@ -121,7 +121,10 @@ plan_value() {
   awk -F= -v key="$1" '$1 == key { print substr($0, length(key) + 2); exit }' "$2" 2>/dev/null
 }
 
-no_cloud_rclone_env_check filters || fail preflight "reason=${NO_CLOUD_ERROR}"
+# Any rclone option from the environment could redirect the destination
+# (RCLONE_ALIAS_REMOTE) or blind the object manifest (RCLONE_STAT,
+# RCLONE_NO_MODTIME); only permanent deletion on OneDrive may be requested.
+no_cloud_rclone_env_check strict RCLONE_ONEDRIVE_HARD_DELETE || fail preflight "reason=${NO_CLOUD_ERROR}"
 no_cloud_load "$CLASSIFICATION" || fail classification "$(no_cloud_failure_detail)"
 [ "$NO_CLOUD_SOURCE" = file ] || fail classification "reason=absent"
 # The nightly job keeps the classification file itself off the cloud while
@@ -201,15 +204,25 @@ EOF
 # LISTING keeps one canonical JSON record per matching object (path, size and
 # full-precision modtime), so the plan approves this exact object set.
 count_target() {
-  LISTING=$("$RCLONE" lsjson -R --files-only "${REMOTE}:$1" "${FILTERS[@]}" 2>/dev/null) || return 1
-  LISTING=$(printf '%s\n' "$LISTING" | sed -n 's/^\({.*}\),\{0,1\}$/\1/p' | sort)
+  local raw
+  raw=$("$RCLONE" lsjson -R --files-only "${REMOTE}:$1" "${FILTERS[@]}" 2>/dev/null) || return 1
+  # Exactly rclone's array layout: `[`, one record per line, `]`. Anything else
+  # (`null`, a single object) is a listing failure, never an empty set; so is
+  # a record without a modification time, which the plan could not bind.
+  printf '%s\n' "$raw" | awk 'NR == 1 && $0 != "[" { bad = 1 }
+    NR > 1 && $0 != "]" && $0 !~ /^\{.*\},?$/ { bad = 1 }
+    $0 ~ /"ModTime":""/ || ($0 ~ /^\{/ && $0 !~ /"ModTime":"[^"]+"/) { bad = 1 }
+    { last = $0 } END { if (bad || NR < 2 || last != "]") exit 1 }' || return 1
+  LISTING=$(printf '%s\n' "$raw" | sed -n 's/^\({.*}\),\{0,1\}$/\1/p' | sort)
   COUNT=$(printf '%s' "$LISTING" | grep -c . || true)
 }
 
 # The destination is more than the crypt section: follow `remote = name:path`
 # through wrapping remotes (crypt, alias, ...) and bind every section on the way,
-# minus the OAuth tokens that rotate on use, plus every RCLONE_* setting (rclone
-# reads options such as RCLONE_ONEDRIVE_DRIVE_ID from the environment).
+# minus the OAuth tokens that rotate on use, plus the RCLONE_* settings that
+# the environment check lets through. A token swapped for another account's is
+# not detected: whoever can rewrite rclone.conf can delete in both accounts
+# anyway; this binding catches drift, not a config-writing adversary.
 destination_identity() {
   local name="$REMOTE" section next depth
   for depth in 1 2 3 4 5 6 7 8; do

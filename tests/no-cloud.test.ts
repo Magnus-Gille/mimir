@@ -282,8 +282,8 @@ describe("offsite no-cloud purge", () => {
     setCounts(counts);
     executable(
       join(bin, "rclone"),
-      `printf '%s\\n' "$*" >> "$RCLONE_CALLS"
-[ "\${1:-}" = lsf ] || printf '%s\\n' 'rclone-output-canary'
+      `printf '%s\\n' "$*" >> "$MOCK_RCLONE_CALLS"
+case "\${1:-}" in lsf|lsjson) ;; *) printf '%s\\n' 'rclone-output-canary' ;; esac
 printf '%s\\n' 'rclone-stderr-canary' >&2
 target_of() { local t="\${1#mimir-crypt:}"; printf '%s' "\${t//\\//__}"; }
 case "\${1:-}" in
@@ -307,6 +307,7 @@ case "\${1:-}" in
     ;;
   lsjson)
     t=$(target_of "$4"); n=$(cat "$MOCK_REMOTE/$t" 2>/dev/null || printf 0)
+    if [ -n "\${MOCK_LSJSON_RAW:-}" ]; then printf '%b' "$MOCK_LSJSON_RAW"; exit 0; fi
     printf '[\\n'
     for ((i = 0; i < n; i++)); do
       sep=,; [ "$i" -lt $((n - 1)) ] || sep=
@@ -336,7 +337,7 @@ esac
           MIMIR_OFFSITE_ROOT: source,
           MIMIR_OFFSITE_STATE_DIR: state,
           RCLONE_BIN: join(bin, "rclone"),
-          RCLONE_CALLS: calls,
+          MOCK_RCLONE_CALLS: calls,
           MOCK_REMOTE: remote,
           ...overrides,
         },
@@ -437,7 +438,7 @@ esac
     ["an object was replaced without changing the count", { MOCK_OBJECT_TAG: "-replaced" }],
     ["an object was replaced within the same second", { MOCK_MTIME_FRACTION: ".900" }],
     ["the underlying remote now points at another drive", { MOCK_DRIVE: "drive-2" }],
-    ["an environment setting redirects the backend", { RCLONE_ONEDRIVE_DRIVE_ID: "drive-2" }],
+    ["permanent deletion was requested only for the execute", { RCLONE_ONEDRIVE_HARD_DELETE: "true" }],
   ])("refuses to execute when %s", (_name, overrides) => {
     const harness = createPurgeHarness({ current: 3 });
     const id = harness.planId(harness.run().result.stderr);
@@ -446,6 +447,27 @@ esac
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("stage=execute state=fail exit=1 reason=plan_mismatch");
     expect(deletes(calls)).toEqual([]);
+  });
+
+  it("allows permanent OneDrive deletion when plan and execute both request it", () => {
+    const harness = createPurgeHarness({ current: 3 });
+    const env = { RCLONE_ONEDRIVE_HARD_DELETE: "true" };
+    const id = harness.planId(harness.run([], env).result.stderr);
+    const { result } = harness.run(["--execute", id], env);
+    expect(result.status, result.stderr).toBe(0);
+  });
+
+  it.each([
+    ["a null listing", "null\\n"],
+    ["a single object", '{"Path":"x","Size":1,"ModTime":"2026-10-20T03:30:00Z"}\\n'],
+    ["a truncated array", '[\\n{"Path":"x","Size":1,"ModTime":"2026-10-20T03:30:00Z"},\\n'],
+    ["a record without a modification time", '[\\n{"Path":"x","Size":1,"ModTime":""}\\n]\\n'],
+  ])("treats %s as a listing failure, never as nothing to purge", (_name, raw) => {
+    const harness = createPurgeHarness({ current: 3 });
+    const { result } = harness.run([], { MOCK_LSJSON_RAW: raw });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("stage=plan state=fail exit=1 reason=list");
+    expect(harness.files()).toEqual([]);
   });
 
   it("still executes after the provider token was refreshed", () => {
@@ -472,7 +494,10 @@ esac
     expect(noData.result.stderr).toContain("stage=preflight state=fail exit=1 reason=remote");
     expect(plaintext.files()).toEqual([]);
 
-    for (const name of ["RCLONE_CRYPT_REMOTE", "RCLONE_CONFIG_MIMIR_CRYPT_REMOTE", "RCLONE_FILTER_FROM", "RCLONE_IGNORE_CASE"]) {
+    for (const name of [
+      "RCLONE_CRYPT_REMOTE", "RCLONE_CONFIG_MIMIR_CRYPT_REMOTE", "RCLONE_FILTER_FROM", "RCLONE_IGNORE_CASE",
+      "RCLONE_ALIAS_REMOTE", "RCLONE_ONEDRIVE_DRIVE_ID", "RCLONE_STAT", "RCLONE_NO_MODTIME",
+    ]) {
       const harness = createPurgeHarness({ current: 3 });
       const { result, calls } = harness.run([], { [name]: "x" });
       expect(result.status, name).toBe(1);
