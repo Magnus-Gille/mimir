@@ -102,6 +102,55 @@ services remain untouched. Deletion and credential revocation require explicit
 scope. Later upgrades retain a known-good package/receipt and repeat the same
 fresh acceptance checks after rollback.
 
+## Upgrading the installed reader
+
+`scripts/deploy-search-reader.sh --release <40-hex-sha>` upgrades an already
+installed reader on the reader node (ssh alias `m5`) to one exact merged commit
+and moves the Mac client pin in the same rollout. It never performs a first
+install, and it does not touch `runtime.env`, `reader.json`, `heimdall.env`,
+`handoff.json`, the state directory, the gateway re-pin, the publisher or any
+old release directory. Grimnir registers it as `mimir-search-reader` in
+`services.json` (`owning_repo_deployments`) and runs it only through its
+`scripts/guarded-deploy.sh`:
+
+```bash
+/path/to/grimnir/scripts/guarded-deploy.sh <worktree> <sha> -- \
+  ./scripts/deploy-search-reader.sh --release <sha>
+```
+
+Keep the script path, `--release` option, release root, marker path, port and
+unit set in lockstep with that registry entry. Running it against the reader is
+a production mutation and needs just-in-time confirmation of the exact SHA and
+target, or a bounded release mandate.
+
+- Preflight refuses unless the worktree is clean, `HEAD` equals `--release`, and
+  the release is an ancestor of `origin/main`. It also needs the approved
+  acceptance pins in `~/.config/mimir-search/deploy-acceptance.json` (`0600`,
+  schema `mimir-search-deploy-acceptance-v1`: `source_id`, `snapshot_id`, a
+  known-hit query with its expected path and original SHA-256, and a no-hit query).
+- `--dry-run` builds the package twice (byte-identical or refuse), renders the
+  five reader units, prints the plan and unit diff, and mutates nothing.
+- The mutating run stages the immutable `releases/<sha>/search.pyz`, journals the
+  previous units, pin and marker under `~/.local/state/mimir-search-deploy/<sha>/`,
+  removes `.deployed-commit`, switches the units, runs the initial refresh, and
+  accepts with fresh health and retrieval receipts through the package verifier,
+  unit and package integrity, the 401 denial, the single loopback listener and
+  the semantic check. Only then does it update the client pin, run the client
+  known-hit and no-hit queries (`~/.local/bin/mimir-search --tool`), and write the
+  marker last.
+- Exit codes: `0` deployed, already deployed, or rolled back; `2` usage; `3`
+  preflight failed with the target unchanged; `10` failed and rolled back with the
+  previous state proved; `11` failed with unknown or unrestored state, marker
+  absent, journal path printed. `--no-auto-rollback` stops for diagnosis instead.
+- `--rollback --release <sha>` restores the state recorded in that deployment's
+  journal and proves it with the same acceptance checks. If the journal is lost,
+  use the manual procedure above (retain the known-good package/receipt, restore
+  the previous units and pin, restart, repeat the fresh acceptance checks).
+- Test hooks: `MIMIR_DEPLOY_SSH`, `MIMIR_DEPLOY_SCP`, `MIMIR_DEPLOY_PYTHON`,
+  `MIMIR_DEPLOY_CLIENT` and `MIMIR_DEPLOY_REMOTE_PYTHON` replace the host
+  interactions; the suites under `tests/deploy-search-reader-*.test.ts` drive the
+  whole flow with fakes.
+
 ## Gateway revision drift
 
 The reader pins `MIMIR_SEARCH_EMBEDDING_REVISION=<gateway SHA>:<model SHA-256>`

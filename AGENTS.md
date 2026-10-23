@@ -93,6 +93,16 @@ using the captured rollback target when available. The remote `.env` is enforced
 The checked-in service/unit path expectations and deployment `.env` example live
 in `docs/agent-reference.md`.
 
+### Search reader upgrade
+
+The Mímir search reader on the reader node is upgraded with
+`./scripts/deploy-search-reader.sh --release <40-hex-sha>`, which Grimnir registers
+as `mimir-search-reader` and runs only through its `guarded-deploy.sh`. It is a
+production mutation: it needs just-in-time SHA/target confirmation or a bounded
+release mandate. Details, exit codes and rollback live in
+`docs/artifact-search-operations.md`; keep the script and the registry entry in
+lockstep.
+
 ### Reverse proxy or tunnel
 
 - **Public URL:** Choose an environment-specific hostname such as `https://files.example.com`
