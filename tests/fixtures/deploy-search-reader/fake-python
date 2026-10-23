@@ -1,0 +1,21 @@
+#!/bin/bash
+# Local python wrapper: the real interpreter plus fault injection for the
+# reproducibility and renderer checks.
+real=${FAKE_REAL_PYTHON:-python3}
+"$real" "$@" || exit $?
+case " $* " in
+  *" tools.artifact_search.package_runtime build "*)
+    if [ -n "${FAKE_NONREPRO:-}" ]; then
+      for a in "$@"; do case "$a" in */build-2/search.pyz) printf x >>"$a";; esac; done
+    fi;;
+  *" tools.artifact_search.service_units "*)
+    prev=""
+    for a in "$@"; do
+      if [ "$prev" = "--output-directory" ]; then
+        [ -z "${FAKE_EXTRA_UNIT:-}" ] || : >"$a/extra.service"
+        [ -z "${FAKE_MISSING_UNIT:-}" ] || rm -f "${a:?}/mimir-search-refresh.timer"
+      fi
+      prev=$a
+    done;;
+esac
+exit 0

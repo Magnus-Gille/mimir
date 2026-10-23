@@ -1,0 +1,39 @@
+#!/bin/bash
+# Fake ssh: `fake-ssh <host> bash -s` with the script on stdin. Runs the script
+# locally as the "remote" account whose home is $FAKE_RHOME, with fake remote
+# tools first on PATH.
+. "$FAKE_FIXTURES/fake-common.sh"
+script=$(cat)
+op=$(printf '%s\n' "$script" | sed -n '1s/^# op: //p')
+printf '%s\n' "$*" >>"$FAKE_LOG/ssh-argv.log"
+printf '%s\n' "$op" >>"$FAKE_LOG/ops.log"
+printf '=== %s\n%s\n' "$op" "$script" >>"$FAKE_LOG/ssh-scripts.log"
+if [ "$op" = "${FAKE_SLEEP_OP:-}" ] && [ "$(bump sleep)" = 1 ]; then sleep "${FAKE_SLEEP_SECONDS:-3}"; fi
+if hit transport "${FAKE_TRANSPORT_FAIL_OPS:-}" "$op"; then
+  echo "ssh: connect to host failed" >&2
+  exit 255
+fi
+if hit fail "${FAKE_FAIL_OPS:-}" "$op"; then
+  echo "remote command failed" >&2
+  exit 1
+fi
+if [ "$op" = "${FAKE_EDIT_PIN_AT_OP:-}" ] && [ "$(bump editpin)" = 1 ]; then
+  python3 - "$FAKE_PIN_FILE" <<'PYEOF'
+import json, sys
+path = sys.argv[1]
+pin = json.load(open(path))
+pin['release'] = 'c' * 40
+open(path, 'w').write(json.dumps(pin))
+PYEOF
+fi
+out="$FAKE_STATE/out.$$"
+printf '%s\n' "$script" | HOME="$FAKE_RHOME" PATH="$FAKE_FIXTURES/remote-bin:$PATH" XDG_RUNTIME_DIR=/run/fake bash -s >"$out"
+rc=$?
+if hit indeterminate "${FAKE_INDETERMINATE_OPS:-}" "$op"; then
+  rm -f "$out"
+  echo "ssh: connection lost" >&2
+  exit 255
+fi
+cat "$out"
+rm -f "$out"
+exit "$rc"

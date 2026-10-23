@@ -1,0 +1,11 @@
+#!/bin/bash
+# Fake `ss -Hltnp`: another service always listens; ours follows FAKE_LISTENERS_SEQ.
+. "$FAKE_FIXTURES/fake-common.sh"
+echo 'LISTEN 0 128 0.0.0.0:3031 0.0.0.0:* users:(("node",pid=999,fd=20))'
+case "$(seq_next listeners "${FAKE_LISTENERS_SEQ:-ok}")" in
+  ok) echo 'LISTEN 0 5 127.0.0.1:8791 0.0.0.0:* users:(("python3",pid=4242,fd=3))';;
+  wildcard) echo 'LISTEN 0 5 0.0.0.0:8791 0.0.0.0:* users:(("python3",pid=4242,fd=3))';;
+  extra)
+    echo 'LISTEN 0 5 127.0.0.1:8791 0.0.0.0:* users:(("python3",pid=4242,fd=3))'
+    echo 'LISTEN 0 5 127.0.0.1:9999 0.0.0.0:* users:(("python3",pid=4242,fd=4))';;
+esac

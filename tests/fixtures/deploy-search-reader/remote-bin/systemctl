@@ -1,0 +1,43 @@
+#!/bin/bash
+# Fake `systemctl --user`. Active state lives in $FAKE_STATE/active.<unit>.
+. "$FAKE_FIXTURES/fake-common.sh"
+printf '%s\n' "$*" >>"$FAKE_LOG/systemctl.log"
+[ "${1:-}" = "--user" ] || exit 1
+shift
+cmd=${1:-}
+shift
+set_active() { for u in "$@"; do : >"$FAKE_STATE/active.$u"; done; }
+case "$cmd" in
+  stop) for u in "$@"; do rm -f "${FAKE_STATE:?}/active.$u"; done;;
+  restart|enable) set_active "$@";;
+  disable|daemon-reload) ;;
+  start)
+    for u in "$@"; do
+      case "$u" in
+        mimir-search-refresh.service)
+          if [ -n "${FAKE_REFRESH_FAIL:-}" ]; then echo failure >"$FAKE_STATE/refresh.result"; exit 1; fi
+          echo success >"$FAKE_STATE/refresh.result"
+          touch "$HOME/.config/mimir-search/handoff.json";;
+        mimir-search-semantic-check.service)
+          state=$(seq_next semantic "${FAKE_SEMANTIC_SEQ:-pass}")
+          printf '{"state": "%s", "codes": [], "pushed": null}\n' "$state" >>"$FAKE_STATE/journal.log"
+          [ "$state" != fail ] || exit 1;;
+        *) set_active "$u";;
+      esac
+    done;;
+  is-active)
+    if [ -f "$FAKE_STATE/active.$1" ]; then echo active; else echo inactive; exit 3; fi;;
+  show)
+    prop=""
+    while [ $# -gt 0 ]; do
+      case "$1" in -p) prop=$2; shift;; --property=*) prop=${1#--property=};; esac
+      shift
+    done
+    case "$prop" in
+      Result) cat "$FAKE_STATE/refresh.result" 2>/dev/null || echo success;;
+      MainPID) echo 4242;;
+      ControlGroup) echo /fake.slice/mimir-search.service;;
+      Version) echo 255;;
+    esac;;
+  *) exit 1;;
+esac
