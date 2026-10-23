@@ -64,6 +64,7 @@ mimir/
     ├── share.sh           # Sync + generate + print share URLs
     ├── sync-artifacts.sh  # Manual laptop-to-NAS sync entrypoint
     ├── sync-artifacts-daemon.sh # Scheduler-friendly auto-sync wrapper
+    ├── sync-common.sh     # Sourced by both sync scripts: node lookup, cache excludes, refusal panel
     ├── backup-artifacts.sh # Local SD-to-NAS backup copy
     ├── publish-freshness.sh # Atomic freshness metadata publisher
     ├── install-heimdall-freshness-surface.sh # Least-authority probe setup
@@ -93,6 +94,48 @@ Laptop-to-NAS sync:
 MIMIR_NAS=archive@files.internal ./scripts/sync-artifacts-daemon.sh
 ./scripts/sync-artifacts.sh [hostname-or-ip]
 ```
+
+Sync behaviour shared by both scripts (implemented in `scripts/sync-common.sh`):
+
+- **Node lookup.** `MIMIR_NODE_BIN` (absolute, executable) wins; otherwise `node` is
+  looked up on `PATH` plus `MIMIR_NODE_SEARCH_PATH`. The scan is never skipped.
+- **Refusal classes.** Every refusal to mirror logs `class=<name>` and exits nonzero:
+  `config_invalid` (bad limits, bad excludes, no NAS configured; reported before any
+  network work), `import_failed`, `scanner_unavailable` (no node or no built `dist/cli/secret-scan.js`;
+  exit 69), `scan_failed` (scanner ran and reported failure or incomplete items; exit 1),
+  `promotion_failed`, `promotion_blocked`, `dry_run_failed`, `delete_gate`, `push_failed`.
+  A secret that is found and quarantined is not a refusal: the scanner exits 0, the
+  file stays out of the mirror, and the rest syncs as before.
+- **Visibility.** On a refusal, if `HEIMDALL_HUB_URL` and `HEIMDALL_FLEET_TOKEN` are set,
+  a `fail` status panel (`mimir` / `sync`) is pushed with a message of only
+  `class=<name> exit=<n>`, never file names. The token goes to curl on stdin, not argv.
+  A successful mirror pushes a `pass` panel. The daemon also publishes `error` through
+  `MIMIR_REMOTE_FRESHNESS_PUBLISHER` when configured; without it the legacy heartbeat
+  simply stops advancing, so freshness goes stale. Under launchd, the Heimdall variables
+  must be in the job's `EnvironmentVariables`.
+- **Cache excludes.** `node_modules/`, `__pycache__/`, `.venv/`, `venv/`, `.next/`,
+  `.pytest_cache/`, `.mypy_cache/` and `.DS_Store` are excluded from the delete-gate
+  dry run, the real rsync and the remote population count, identically. `.git`,
+  worktrees, `dist/` and `build/` are mirrored. Add patterns with
+  `MIMIR_SYNC_EXTRA_EXCLUDES`; the defaults cannot be removed.
+- **Delete gate with excludes.** Excluded names are neither transferred nor deleted
+  (`--delete-excluded` is not used), so cache directories already on the NAS are left
+  in place and contribute no deletions. The percentage denominator is taken from rsync
+  itself: when the real dry run plans any deletion, a second dry run from an empty
+  temporary source (under the state directory, always removed) to the same NAS path
+  with the identical filter array lists everything rsync could delete. Its `*deleting`
+  lines, counted by the same strict parser, are the denominator. Protected entries,
+  the NAS snapshot tree and directories retained only because they hold protected
+  children are absent by construction, and every pattern (`**`, `/***`, anchors) is
+  honoured exactly as rsync honours it. `PCT = DELETES / DELETABLE_TOTAL`; an
+  empty-source dry-run failure, an unparseable line, or `DELETABLE_TOTAL == 0` with
+  `DELETES > 0` refuses the mirror (`delete_gate`). No deletions means no measurement.
+  If a source directory is gone but its NAS copy holds protected children, rsync keeps
+  the directory and prints a "not empty, cannot delete" diagnostic; the parser accepts
+  exactly that diagnostic (GNU and openrsync wording), does not count it as a deletion,
+  and still rejects any other unrecognised dry-run line. `MIMIR_SYNC_EXTRA_EXCLUDES` is
+  split on whitespace without glob expansion or temp files, so `*.md` reaches rsync
+  verbatim. Previously mirrored caches stay on the NAS until removed there by hand.
 
 Share-link helper:
 
@@ -136,8 +179,12 @@ Related checked-in unit files:
 | `MIMIR_INSTANCE_ID` | `default` | Stable instance identity reported to Heimdall |
 | `MIMIR_DEPLOY_HOST` | `localhost` | Deployment host label reported to Heimdall |
 | `MIMIR_SYNC_MAX_DELETE` | `1000` | Abort laptop→NAS mirror at or above this many deletions |
-| `MIMIR_SYNC_MAX_DELETE_PCT` | `20` | Abort mirror above this percentage of the actual remote population |
+| `MIMIR_SYNC_MAX_DELETE_PCT` | `20` | Abort mirror above this percentage of what rsync could delete under the mirror filters (empty-source dry run) |
 | `MIMIR_SYNC_STATE_DIR` | `$XDG_STATE_HOME/mimir` or `~/.local/state/mimir` | Durable out-of-tree staging for unverified inbox imports |
+| `MIMIR_NODE_BIN` | — | Absolute path to the `node` that runs the secret scan; if set but unusable the sync fails as `scanner_unavailable` (no PATH fallback) |
+| `MIMIR_NODE_SEARCH_PATH` | `/opt/homebrew/bin:/usr/local/bin` | Directories appended to `PATH` when looking up `node` (launchd's PATH lacks them) |
+| `MIMIR_SECRET_SCAN_CLI` | `<repo>/dist/cli/secret-scan.js` | Built scanner entrypoint (override mainly for tests) |
+| `MIMIR_SYNC_EXTRA_EXCLUDES` | — | Whitespace-separated rsync exclude patterns added to the built-in cache excludes; defaults cannot be removed |
 | `MIMIR_BACKUP_LOG` | `$XDG_STATE_HOME/mimir/backup.log` or `~/.local/state/mimir/backup.log` | Local backup log, kept outside the deployed code tree |
 | `MIMIR_FRESHNESS_DIR` | `/var/lib/mimir/heimdall-freshness` | Installed metadata-only backup/sync freshness surface (optional) |
 | `MIMIR_FRESHNESS_PUBLISHER_USER` | — (required by installer) | OS account that runs the backup/sync freshness publisher |

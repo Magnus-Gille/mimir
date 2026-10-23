@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, linkSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +23,8 @@ afterEach(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
+const REAL_RSYNC_PATH = spawnSync("which", ["rsync"], { encoding: "utf8" }).stdout.trim();
+
 const SYNC_SCRIPTS = ["sync-artifacts.sh", "sync-artifacts-daemon.sh"] as const;
 
 function mockSyncCommands(root: string): { bin: string; calls: string } {
@@ -33,18 +35,22 @@ function mockSyncCommands(root: string): { bin: string; calls: string } {
   executable(
     join(bin, "ssh"),
     `printf 'ssh %s\n' "$*" >> "$SYNC_CALLS"
-case "$*" in
-  *"find '/home/mimir/mimir'"*)
-    [ "\${MOCK_REMOTE_COUNT_RC:-0}" -eq 0 ] || exit "$MOCK_REMOTE_COUNT_RC"
-    i=0; while [ "$i" -lt "\${MOCK_REMOTE_TOTAL:-100}" ]; do printf .; i=$((i + 1)); done
-    ;;
-esac
 exit 0
 `,
   );
   executable(
     join(bin, "rsync"),
     `printf 'rsync %s\n' "$*" >> "$SYNC_CALLS"
+if [ "\${MOCK_REAL_RSYNC:-0}" = 1 ]; then
+  case "$*" in
+    *"--delete"*)
+      # Run the real rsync against local directories standing in for the NAS.
+      real_args=()
+      for argument in "$@"; do real_args+=("\${argument#test-nas:}"); done
+      exec "$REAL_RSYNC" "\${real_args[@]}"
+      ;;
+  esac
+fi
 case "$*" in
   *"mimir-inbox/"*)
     destination="\${!#}"
@@ -75,6 +81,14 @@ case "$*" in
       fi
     done < <(find "$source" ! -type d -print0)
     exit "\${MOCK_PROMOTE_RC:-0}"
+    ;;
+  *"-ani --delete --out-format=%i"*"mimir-sync-empty."*)
+    # Delete-gate denominator: dry run from an empty source lists every entry
+    # rsync could delete under the mirror filters.
+    if [ "\${MOCK_EMPTY_DRY_RC:-0}" -ne 0 ]; then printf 'mock empty-source failure\n' >&2; exit "$MOCK_EMPTY_DRY_RC"; fi
+    if [ -n "\${MOCK_EMPTY_EXTRA_OUTPUT:-}" ]; then printf '%s\n' "$MOCK_EMPTY_EXTRA_OUTPUT"; fi
+    i=0; while [ "$i" -lt "\${MOCK_REMOTE_TOTAL:-100}" ]; do printf '*deleting nas-%s\n' "$i"; i=$((i + 1)); done
+    exit 0
     ;;
   *"-ani --delete --out-format=%i"*)
     i=0; while [ "$i" -lt "\${MOCK_DELETES:-0}" ]; do
@@ -114,23 +128,28 @@ function createSyncHarness(script: (typeof SYNC_SCRIPTS)[number]) {
   const root = tempDir();
   const { bin, calls } = mockSyncCommands(root);
   mkdirSync(join(root, "mimir"));
+  const scanCli = join(root, "secret-scan.js");
+  writeFileSync(scanCli, "// placeholder scanner build output; the mock node never executes it\n");
   const args = script === "sync-artifacts.sh"
     ? [join(REPO_ROOT, "scripts", script), "test-nas"]
     : [join(REPO_ROOT, "scripts", script)];
 
   return {
     root,
-    run(overrides: Record<string, string> = {}) {
+    bin,
+    run(overrides: Record<string, string> = {}, options: { cwd?: string } = {}) {
       const result = spawnSync("bash", args, {
-        cwd: REPO_ROOT,
+        cwd: options.cwd ?? REPO_ROOT,
         encoding: "utf8",
         env: {
           ...process.env,
           HOME: root,
           PATH: `${bin}:${process.env.PATH ?? ""}`,
           MIMIR_NAS: "test-nas",
+          MIMIR_SECRET_SCAN_CLI: scanCli,
           SYNC_CALLS: calls,
           REAL_NODE: process.execPath,
+          REAL_RSYNC: REAL_RSYNC_PATH,
           REAL_SCAN_CLI: join(REPO_ROOT, "src", "cli", "secret-scan.ts"),
           ...overrides,
         },
@@ -148,11 +167,26 @@ function runSyncScript(
   return createSyncHarness(script).run(overrides);
 }
 
+function mirrorLines(invocations: string): string[] {
+  return invocations.split("\n").filter(line => line.startsWith("rsync ") && line.includes("--delete"));
+}
+
+/** Filters passed to the real mirror, as logged by the mock rsync. */
+function mirrorFilters(script: (typeof SYNC_SCRIPTS)[number]): string[] {
+  const { result, invocations } = runSyncScript(script);
+  expect(result.status, result.stderr).toBe(0);
+  const real = mirrorLines(invocations).find(line => line.includes("--max-delete="))!;
+  return [...real.matchAll(/--filter=P \S+|--exclude=\S+/g)].map(match => match[0]);
+}
+
+const DEFAULT_CACHE_EXCLUDES = [
+  "node_modules/", "__pycache__/", ".venv/", "venv/", ".next/",
+  ".pytest_cache/", ".mypy_cache/", ".DS_Store",
+];
+
 describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
   it.skipIf(spawnSync("rsync", ["--version"]).status !== 0)("keeps NAS snapshots when the sender collides with any filesystem type", () => {
-    const source = readFileSync(join(REPO_ROOT, "scripts", script), "utf8");
-    const mirror = source.split("\n").find(line => line.includes("--delete --max-delete="))!;
-    const filters = [...mirror.matchAll(/(--(?:filter|exclude))='([^']+)'/g)].map(match => `${match[1]}=${match[2]}`);
+    const filters = mirrorFilters(script).filter(filter => /artifact-snapshots/.test(filter));
     expect(filters).toHaveLength(2);
     for (const kind of ["file", "directory", "symlink"]) {
       const root = tempDir();
@@ -179,7 +213,7 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
   it("protects NAS-owned snapshots in both delete preview and actual mirror", () => {
     const { result, invocations } = runSyncScript(script);
     expect(result.status, result.stderr).toBe(0);
-    const mirrors = invocations.split("\n").filter(line => line.startsWith("rsync ") && line.includes("--delete"));
+    const mirrors = mirrorLines(invocations);
     expect(mirrors).toHaveLength(2);
     expect(mirrors[0]).toContain("-ani --delete --out-format=%i");
     expect(mirrors[0]).not.toContain("2>/dev/null");
@@ -405,7 +439,15 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
     });
     expect(result.status, result.stderr).toBe(0);
     expect(invocations).toContain("--delete --max-delete=50");
-    expect(invocations).toContain("-path '/home/mimir/mimir/artifact-snapshots' -prune -o -printf .");
+    // The denominator is rsync's own view: an empty-source dry run with the
+    // identical filters, and no find over ssh.
+    const lines = mirrorLines(invocations);
+    expect(lines).toHaveLength(3);
+    const empty = lines.find(line => line.includes("mimir-sync-empty."))!;
+    const filtersOf = (line: string) => [...line.matchAll(/--filter=P \S+|--exclude=\S+/g)].map(match => match[0]);
+    expect(empty).toContain("-ani --delete --out-format=%i");
+    expect(filtersOf(empty)).toEqual(filtersOf(lines[0]));
+    expect(invocations).not.toMatch(/^ssh .*find /m);
   });
 
   it("stops when the dry-run fails and leaves its diagnostic visible", () => {
@@ -422,13 +464,49 @@ describe.each(SYNC_SCRIPTS)("%s fail-closed sync", (script) => {
     expect(invocations).not.toContain("--max-delete=");
   });
 
-  it("fails closed when the remote population cannot be measured", () => {
+  it("fails closed when the deletable population cannot be measured", () => {
     const { result, invocations } = runSyncScript(script, {
       MOCK_DELETES: "1",
-      MOCK_REMOTE_COUNT_RC: "9",
+      MOCK_EMPTY_DRY_RC: "9",
     });
     expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("mock empty-source failure");
     expect(invocations).not.toContain("--max-delete=");
+  });
+
+  it("fails closed on unrecognised empty-source dry-run output", () => {
+    const { result, invocations } = runSyncScript(script, {
+      MOCK_DELETES: "1",
+      MOCK_EMPTY_EXTRA_OUTPUT: "surprise output",
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("unrecognized rsync dry-run output");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
+  it("fails closed when deletions are planned but nothing is deletable", () => {
+    const { result, invocations } = runSyncScript(script, {
+      MOCK_DELETES: "1",
+      MOCK_REMOTE_TOTAL: "0",
+    });
+    expect(result.status).toBe(1);
+    expect(`${result.stdout}\n${result.stderr}`).toContain("1/0 remote entries");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
+  it("skips the empty-source measurement entirely when no deletion is planned", () => {
+    const { result, invocations } = runSyncScript(script);
+    expect(result.status, result.stderr).toBe(0);
+    expect(invocations).not.toContain("mimir-sync-empty.");
+  });
+
+  it("removes the empty comparison directory afterwards, even when the gate aborts", () => {
+    for (const deletes of ["1", "50"]) {
+      const harness = createSyncHarness(script);
+      harness.run({ MOCK_DELETES: deletes, MOCK_REMOTE_TOTAL: "100" });
+      const state = join(harness.root, ".local", "state", "mimir");
+      expect(readdirSync(state).filter(name => name.startsWith("mimir-sync-empty."))).toEqual([]);
+    }
   });
 
   it("quotes freshness publisher configuration before handing it to the remote shell", () => {
@@ -473,6 +551,567 @@ describe("sync freshness compatibility", () => {
     expect(freshness.result.status, freshness.result.stderr).toBe(0);
     expect(freshness.invocations).toContain("'/usr/local/libexec/mimir-publish-freshness' sync 'success'");
     expect(freshness.invocations).not.toContain("date +%s >");
+  });
+});
+
+describe.each(SYNC_SCRIPTS)("%s scanner resolution", (script) => {
+  /** Move the mock node out of PATH so only an explicit location can supply it. */
+  function relocateNode(harness: ReturnType<typeof createSyncHarness>, name = "fake-homebrew-bin") {
+    const dir = join(harness.root, name);
+    mkdirSync(dir);
+    copyFileSync(join(harness.bin, "node"), join(dir, "node"));
+    chmodSync(join(dir, "node"), 0o755);
+    rmSync(join(harness.bin, "node"));
+    return dir;
+  }
+  const minimalPath = (harness: ReturnType<typeof createSyncHarness>) => `${harness.bin}:/usr/bin:/bin`;
+
+  it("finds node in the augmented search path when the scheduler PATH lacks it", () => {
+    const harness = createSyncHarness(script);
+    const fakeHomebrew = relocateNode(harness);
+    const { result, invocations } = harness.run({
+      PATH: minimalPath(harness),
+      MIMIR_NODE_SEARCH_PATH: `/nonexistent/first:${fakeHomebrew}`,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(invocations).toMatch(/^node .*secret-scan\.js /m);
+    expect(invocations).toContain("--max-delete=");
+  });
+
+  it("honours MIMIR_NODE_BIN ahead of any PATH node", () => {
+    const harness = createSyncHarness(script);
+    const custom = join(harness.root, "custom-node");
+    executable(custom, `printf 'custom-node %s\\n' "$*" >> "$SYNC_CALLS"\ncat >/dev/null\nexit 0\n`);
+    const { result, invocations } = harness.run({ MIMIR_NODE_BIN: custom });
+    expect(result.status, result.stderr).toBe(0);
+    expect(invocations).toContain("custom-node ");
+    expect(invocations).not.toMatch(/^node /m);
+  });
+
+  it.each(["relative-node", "/nonexistent/node", "DIRECTORY"])(
+    "treats an unusable MIMIR_NODE_BIN (%s) as scanner unavailable without falling back to PATH",
+    (value) => {
+      const harness = createSyncHarness(script);
+      const bin = value === "DIRECTORY" ? harness.root : value;
+      const { result, invocations } = harness.run({ MIMIR_NODE_BIN: bin });
+      expect(result.status).toBe(69);
+      expect(`${result.stdout}\n${result.stderr}`).toContain("class=scanner_unavailable");
+      expect(invocations).not.toMatch(/^node /m);
+      expect(invocations).not.toContain("-ani --delete");
+      expect(invocations).not.toContain("--max-delete=");
+    },
+  );
+
+  it("fails as scanner unavailable, never skipping the scan, when node exists nowhere", () => {
+    const harness = createSyncHarness(script);
+    relocateNode(harness);
+    const { result, invocations } = harness.run({
+      PATH: minimalPath(harness),
+      MIMIR_NODE_SEARCH_PATH: "/nonexistent/one:/nonexistent/two",
+      MOCK_IMPORTED: "kept-staged.txt",
+    });
+    const output = `${result.stdout}\n${result.stderr}`;
+    expect(result.status).toBe(69);
+    expect(output).toContain("class=scanner_unavailable");
+    expect(output).toContain("node was not found");
+    expect(output).not.toContain("class=scan_failed");
+    expect(invocations).not.toContain("-ani --delete");
+    expect(invocations).not.toContain("--max-delete=");
+    expect(existsSync(join(harness.root, ".local", "state", "mimir", "import-pending", "kept-staged.txt"))).toBe(true);
+    expect(existsSync(join(harness.root, "mimir", "kept-staged.txt"))).toBe(false);
+  });
+
+  it("fails as scanner unavailable when the scanner build output is missing", () => {
+    const { result, invocations } = runSyncScript(script, {
+      MIMIR_SECRET_SCAN_CLI: "/nonexistent/dist/cli/secret-scan.js",
+    });
+    const output = `${result.stdout}\n${result.stderr}`;
+    expect(result.status).toBe(69);
+    expect(output).toContain("class=scanner_unavailable");
+    expect(output).toContain("run npm run build");
+    expect(invocations).not.toMatch(/^node /m);
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
+  it("keeps a scanner failure a distinct class from scanner unavailable", () => {
+    const { result, invocations } = runSyncScript(script, { MOCK_SCAN_RC: "17" });
+    const output = `${result.stdout}\n${result.stderr}`;
+    expect(result.status).toBe(1);
+    expect(output).toContain("class=scan_failed");
+    expect(output).not.toContain("class=scanner_unavailable");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
+  it("still quarantines a secret and mirrors the rest (existing behaviour)", () => {
+    const harness = createSyncHarness(script);
+    const pending = join(harness.root, ".local", "state", "mimir", "import-pending");
+    mkdirSync(pending, { recursive: true });
+    writeFileSync(join(pending, "leaky.txt"), "AKIAABCDEFGHIJKLMNOP\n");
+    const { result, invocations } = harness.run({ MOCK_REAL_SCAN: "1" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(join(harness.root, "mimir-quarantine", "leaky.txt"))).toBe(true);
+    expect(existsSync(join(harness.root, "mimir", "leaky.txt"))).toBe(false);
+    expect(invocations).toContain("--max-delete=");
+  });
+});
+
+describe.each(SYNC_SCRIPTS)("%s stalled-sync visibility", (script) => {
+  const TOKEN = "fleet-token-SENTINEL-1234";
+
+  function withCurl(harness: ReturnType<typeof createSyncHarness>) {
+    const args = join(harness.root, "curl.args");
+    const stdin = join(harness.root, "curl.stdin");
+    executable(
+      join(harness.bin, "curl"),
+      `printf '%s\\n' "$*" >> "$CURL_ARGS"\ncat >> "$CURL_STDIN"\nexit 0\n`,
+    );
+    const env = {
+      HEIMDALL_HUB_URL: "http://hub.invalid/api/panels",
+      HEIMDALL_FLEET_TOKEN: TOKEN,
+      CURL_ARGS: args,
+      CURL_STDIN: stdin,
+    };
+    const read = (path: string) => (existsSync(path) ? readFileSync(path, "utf8") : "");
+    return { env, args: () => read(args), stdin: () => read(stdin) };
+  }
+
+  it("pushes a fail panel with only the class when the scanner is unavailable", () => {
+    const harness = createSyncHarness(script);
+    const curl = withCurl(harness);
+    const { result } = harness.run({
+      ...curl.env,
+      MOCK_IMPORTED: "private-client-name.txt",
+      MIMIR_SECRET_SCAN_CLI: "/nonexistent/secret-scan.js",
+    });
+    expect(result.status).toBe(69);
+    const body = curl.args();
+    expect(body).toContain("http://hub.invalid/api/panels");
+    expect(body).toContain('"panel":"sync"');
+    expect(body).toContain('"state":"fail"');
+    expect(body).toContain("class=scanner_unavailable exit=69");
+    expect(body).not.toContain("private-client-name");
+    expect(curl.stdin()).toContain(`Authorization: Bearer ${TOKEN}`);
+    expect(body).not.toContain(TOKEN);
+    expect(`${result.stdout}\n${result.stderr}`).not.toContain(TOKEN);
+  });
+
+  it.each([
+    ["import_failed", { MOCK_IMPORTED: "x.txt", MOCK_IMPORT_RC: "23" }],
+    ["scan_failed", { MOCK_SCAN_RC: "17" }],
+    ["dry_run_failed", { MOCK_DRY_RC: "23" }],
+    ["delete_gate", { MOCK_DELETES: "50", MOCK_REMOTE_TOTAL: "100" }],
+  ] as const)("pushes a fail panel for %s", (cls, overrides) => {
+    const harness = createSyncHarness(script);
+    const curl = withCurl(harness);
+    const { result } = harness.run({ ...curl.env, ...overrides });
+    expect(result.status).not.toBe(0);
+    expect(curl.args()).toContain(`class=${cls} exit=`);
+    expect(curl.args()).toContain('"state":"fail"');
+  });
+
+  it("pushes a pass panel after a successful mirror, and no fail panel", () => {
+    const harness = createSyncHarness(script);
+    const curl = withCurl(harness);
+    const { result } = harness.run(curl.env);
+    expect(result.status, result.stderr).toBe(0);
+    expect(curl.args()).toContain('"state":"pass"');
+    expect(curl.args()).not.toContain('"state":"fail"');
+  });
+
+  it("does not invoke curl without both Heimdall variables", () => {
+    for (const missing of ["HEIMDALL_HUB_URL", "HEIMDALL_FLEET_TOKEN"]) {
+      const harness = createSyncHarness(script);
+      const curl = withCurl(harness);
+      const { result } = harness.run({ ...curl.env, [missing]: "", MOCK_SCAN_RC: "17" });
+      expect(result.status).not.toBe(0);
+      expect(curl.args()).toBe("");
+    }
+  });
+
+  it("refuses a fleet token containing a line break and keeps the sync failure", () => {
+    const harness = createSyncHarness(script);
+    const curl = withCurl(harness);
+    const { result } = harness.run({ ...curl.env, HEIMDALL_FLEET_TOKEN: "bad\ntoken", MOCK_SCAN_RC: "17" });
+    expect(result.status).toBe(1);
+    expect(curl.args()).toBe("");
+  });
+
+  it("keeps the original exit status when the panel push itself fails", () => {
+    const harness = createSyncHarness(script);
+    const curl = withCurl(harness);
+    executable(join(harness.bin, "curl"), "cat >/dev/null\nexit 22\n");
+    const { result } = harness.run({ ...curl.env, MOCK_SCAN_RC: "17" });
+    expect(result.status).toBe(1);
+  });
+
+  it("moves the NAS freshness signal to error on refusal (daemon only; the manual script has no publisher)", () => {
+    const { result, invocations } = runSyncScript(script, {
+      MIMIR_REMOTE_FRESHNESS_PUBLISHER: "/usr/local/libexec/mimir-publish-freshness",
+      MOCK_SCAN_RC: "17",
+    });
+    expect(result.status).toBe(1);
+    if (script === "sync-artifacts-daemon.sh") {
+      expect(invocations).toContain("'/usr/local/libexec/mimir-publish-freshness' sync 'error'");
+      expect(invocations).not.toContain("sync 'success'");
+    } else {
+      expect(invocations).not.toContain("mimir-publish-freshness");
+    }
+  });
+});
+
+describe("daemon freshness on refusal", () => {
+  it("never writes the legacy heartbeat on a refusal, so the signal goes stale", () => {
+    const { result, invocations } = runSyncScript("sync-artifacts-daemon.sh", { MOCK_SCAN_RC: "17" });
+    expect(result.status).toBe(1);
+    expect(invocations).not.toContain("mimir-sync.stamp");
+  });
+
+  it("publishes error exactly once when the push itself fails", () => {
+    const { result, invocations } = runSyncScript("sync-artifacts-daemon.sh", {
+      MIMIR_REMOTE_FRESHNESS_PUBLISHER: "/usr/local/libexec/mimir-publish-freshness",
+      MOCK_MIRROR_RC: "12",
+    });
+    expect(result.status).toBe(12);
+    expect(invocations.split("sync 'error'").length - 1).toBe(1);
+  });
+});
+
+describe.each(SYNC_SCRIPTS)("%s cache excludes", (script) => {
+  const rsyncAvailable = spawnSync("rsync", ["--version"]).status === 0;
+  const filtersOf = (line: string) => [...line.matchAll(/--filter=P \S+|--exclude=\S+/g)].map(match => match[0]);
+
+  it("applies one identical filter list to the delete gate and the real mirror", () => {
+    const { result, invocations } = runSyncScript(script);
+    expect(result.status, result.stderr).toBe(0);
+    const [dry, real] = mirrorLines(invocations);
+    expect(filtersOf(dry)).toEqual(filtersOf(real));
+    for (const pattern of DEFAULT_CACHE_EXCLUDES) expect(filtersOf(real)).toContain(`--exclude=${pattern}`);
+    for (const forbidden of [".git", ".git/", "dist", "dist/", "build", "build/", "worktrees", "worktrees/"]) {
+      expect(filtersOf(real)).not.toContain(`--exclude=${forbidden}`);
+    }
+  });
+
+  it("only adds to the defaults through MIMIR_SYNC_EXTRA_EXCLUDES", () => {
+    const { result, invocations } = runSyncScript(script, {
+      MIMIR_SYNC_EXTRA_EXCLUDES: "scratch/ *.tmp",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const [dry, real] = mirrorLines(invocations);
+    for (const line of [dry, real]) {
+      expect(line).toContain("--exclude=scratch/");
+      expect(line).toContain("--exclude=*.tmp");
+      for (const pattern of DEFAULT_CACHE_EXCLUDES) expect(line).toContain(`--exclude=${pattern}`);
+    }
+  });
+
+  it.each(["-x", "+ keep", "!reset", "!"])("rejects the filter-rule-looking extra exclude %j before touching the network", (value) => {
+    const { result, invocations } = runSyncScript(script, { MIMIR_SYNC_EXTRA_EXCLUDES: value });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("MIMIR_SYNC_EXTRA_EXCLUDES");
+    expect(invocations).toBe("");
+  });
+
+  it.skipIf(!rsyncAvailable)("never transfers or deletes caches but still mirrors the version-control dir, dist and build", () => {
+    const harness = createSyncHarness(script);
+    const { result: probe, invocations } = harness.run();
+    expect(probe.status, probe.stderr).toBe(0);
+    const filters = filtersOf(mirrorLines(invocations).find(line => line.includes("--max-delete="))!);
+    const root = tempDir();
+    const sender = join(root, "sender");
+    const receiver = join(root, "receiver");
+    const cacheLike = /node_modules|__pycache__|\.venv|venv|\.next|_cache|\.DS_Store/;
+    const files = [
+      "doc.md",
+      "app/node_modules/pkg/index.js",
+      "app/__pycache__/m.pyc",
+      "app/.venv/bin/python",
+      "app/venv/bin/python",
+      "web/.next/build.json",
+      "t/.pytest_cache/v",
+      "t/.mypy_cache/v",
+      "notes/.DS_Store",
+      "repo/.git/HEAD",
+      "repo/dist/out.js",
+      "repo/build/out.js",
+      "repo/.claude/worktrees/w1/file",
+    ];
+    for (const relative of files) {
+      mkdirSync(dirname(join(sender, relative)), { recursive: true });
+      writeFileSync(join(sender, relative), "content");
+    }
+    // Caches already mirrored by an earlier sync, plus one stale real file.
+    for (const relative of ["old/node_modules/x.js", "old/.venv/y", "old/.DS_Store", "gone.md"]) {
+      mkdirSync(dirname(join(receiver, relative)), { recursive: true });
+      writeFileSync(join(receiver, relative), "nas");
+    }
+
+    const dry = spawnSync("rsync", ["-ani", "--delete", "--out-format=%i %n", ...filters, `${sender}/`, `${receiver}/`], { encoding: "utf8" });
+    expect(dry.status, dry.stderr).toBe(0);
+    const deletions = dry.stdout.split("\n").filter(line => line.startsWith("*deleting"));
+    // Only the stale real file counts toward the delete gate; the cache
+    // entries already on the NAS are protected, not deleted.
+    // GNU rsync pads the itemize field with spaces; openrsync does not.
+    expect(deletions.map(line => line.replace(/^\*deleting\s+/, "*deleting "))).toEqual(["*deleting gone.md"]);
+    expect(dry.stdout).not.toMatch(cacheLike);
+
+    const real = spawnSync("rsync", ["-a", "--delete", ...filters, `${sender}/`, `${receiver}/`], { encoding: "utf8" });
+    expect(real.status, real.stderr).toBe(0);
+    for (const relative of ["old/node_modules/x.js", "old/.venv/y", "old/.DS_Store"]) {
+      expect(existsSync(join(receiver, relative)), relative).toBe(true);
+    }
+    expect(existsSync(join(receiver, "gone.md"))).toBe(false);
+    for (const relative of files) {
+      expect(existsSync(join(receiver, relative)), relative).toBe(!cacheLike.test(relative));
+    }
+  }, 30_000);
+
+  it("does not expand exclude patterns against the working directory", () => {
+    const cwd = tempDir();
+    for (const name of ["alpha.md", "beta.md", "gamma.md"]) writeFileSync(join(cwd, name), "x");
+    const { result, invocations } = createSyncHarness(script).run(
+      { MIMIR_SYNC_EXTRA_EXCLUDES: "*.md", MOCK_DELETES: "1" },
+      { cwd },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    const lines = mirrorLines(invocations);
+    expect(lines).toHaveLength(3);
+    for (const line of lines) {
+      expect(line).toContain("--exclude=*.md");
+      expect(line).not.toMatch(/--exclude=(alpha|beta|gamma)\.md/);
+    }
+  });
+
+  it("keeps every extra exclude when TMPDIR is unusable, since splitting needs no temp file", () => {
+    const { result, invocations } = runSyncScript(script, {
+      TMPDIR: "/nonexistent/tmpdir",
+      MIMIR_SYNC_EXTRA_EXCLUDES: "first/ second.tmp\nthird-*",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    for (const line of mirrorLines(invocations)) {
+      for (const pattern of ["first/", "second.tmp", "third-*"]) expect(line).toContain(`--exclude=${pattern}`);
+    }
+  });
+
+  it("adds the extras after all defaults and in order", () => {
+    const { invocations } = runSyncScript(script, { MIMIR_SYNC_EXTRA_EXCLUDES: "  one   two  " });
+    const real = mirrorLines(invocations).find(line => line.includes("--max-delete="))!;
+    const excludes = [...real.matchAll(/--exclude=(\S+)/g)].map(match => match[1]);
+    expect(excludes).toEqual(["/artifact-snapshots", ...DEFAULT_CACHE_EXCLUDES, "one", "two"]);
+  });
+
+  describe.skipIf(!rsyncAvailable)("real rsync output through the production parser", () => {
+    function realMirror(extra: Record<string, string> = {}, populate?: (sender: string, receiver: string) => void) {
+      const harness = createSyncHarness(script);
+      const sender = join(harness.root, "sender");
+      const receiver = join(harness.root, "receiver");
+      mkdirSync(sender);
+      mkdirSync(receiver);
+      writeFileSync(join(sender, "doc.md"), "doc");
+      populate?.(sender, receiver);
+      const run = harness.run({
+        MIMIR_LOCAL_ROOT: sender,
+        MIMIR_REMOTE_ROOT: receiver,
+        MOCK_REAL_RSYNC: "1",
+        MIMIR_SYNC_MAX_DELETE_PCT: "100",
+        ...extra,
+      });
+      return { ...run, root: harness.root, sender, receiver };
+    }
+
+    it("does not stall when a removed source directory still holds protected caches on the NAS", () => {
+      const { result, receiver } = realMirror({}, (_sender, rx) => {
+        mkdirSync(join(rx, "gone", "node_modules"), { recursive: true });
+        writeFileSync(join(rx, "gone", "node_modules", "f"), "cache");
+        writeFileSync(join(rx, "gone", "stale.txt"), "stale");
+        mkdirSync(join(rx, "only-cache", ".venv"), { recursive: true });
+        writeFileSync(join(rx, "only-cache", ".venv", "y"), "cache");
+      });
+      const output = `${result.stdout}\n${result.stderr}`;
+      expect(output).not.toContain("unrecognized rsync dry-run output");
+      expect(result.status, output).toBe(0);
+      expect(existsSync(join(receiver, "gone", "node_modules", "f"))).toBe(true);
+      expect(existsSync(join(receiver, "only-cache", ".venv", "y"))).toBe(true);
+      expect(existsSync(join(receiver, "gone", "stale.txt"))).toBe(false);
+      expect(existsSync(join(receiver, "doc.md"))).toBe(true);
+    });
+
+    it("still counts real deletions alongside the skipped non-empty directories", () => {
+      const { result, invocations } = realMirror({ MIMIR_SYNC_MAX_DELETE: "1" }, (_sender, rx) => {
+        mkdirSync(join(rx, "gone", "node_modules"), { recursive: true });
+        writeFileSync(join(rx, "gone", "node_modules", "f"), "cache");
+        writeFileSync(join(rx, "gone", "stale.txt"), "stale");
+      });
+      // stale.txt is the one counted deletion; MAX_DELETE=1 trips the backstop.
+      expect(result.status).toBe(1);
+      expect(`${result.stdout}\n${result.stderr}`).toContain("1/");
+      expect(invocations).not.toContain("--max-delete=");
+    });
+
+    const output = (run: { result: { stdout: string | null; stderr: string | null } }) => `${run.result.stdout}\n${run.result.stderr}`;
+
+    it("derives the denominator from an empty-source rsync dry run, ignoring retained ancestors", () => {
+      // Four directories survive only because they hold protected node_modules.
+      // The single deletable file is 100% of what rsync could delete.
+      const run = realMirror({ MIMIR_SYNC_MAX_DELETE_PCT: "20" }, (_sender, rx) => {
+        for (const name of ["p1", "p2", "p3", "p4"]) {
+          mkdirSync(join(rx, name, "node_modules"), { recursive: true });
+          writeFileSync(join(rx, name, "node_modules", "f"), "cache");
+        }
+        writeFileSync(join(rx, "stale.md"), "stale");
+      });
+      expect(run.result.status).toBe(1);
+      expect(output(run)).toContain("1/1 remote entries (100%");
+      expect(existsSync(join(run.receiver, "stale.md"))).toBe(true);
+      expect(existsSync(join(run.receiver, "p1", "node_modules", "f"))).toBe(true);
+    });
+
+    it("derives numerator and denominator from the same rsync for a cross-directory ** pattern", () => {
+      // a**b/*** is meant to protect a/x/b and everything below it. GNU rsync
+      // and openrsync differ in the details, so assert the invariant that holds
+      // for either: the gate's counts equal what that binary itself reports.
+      const run = realMirror({ MIMIR_SYNC_EXTRA_EXCLUDES: "a**b/***", MIMIR_SYNC_MAX_DELETE_PCT: "20" }, (sender, rx) => {
+        writeFileSync(join(sender, "plain.md"), "p");
+        writeFileSync(join(rx, "plain.md"), "p");
+        writeFileSync(join(rx, "stale.md"), "stale");
+        mkdirSync(join(rx, "a", "x", "b", "deep"), { recursive: true });
+        writeFileSync(join(rx, "a", "x", "b", "f"), "protected");
+        writeFileSync(join(rx, "a", "x", "b", "deep", "g"), "protected");
+      });
+      const dry = mirrorLines(run.invocations).find(line => line.includes("-ani --delete"))!;
+      const filters = [...dry.matchAll(/--filter=P \S+|--exclude=\S+/g)].map(match => match[0]);
+      expect(filters).toContain("--exclude=a**b/***");
+      const deletions = (source: string) => {
+        const oracle = spawnSync(REAL_RSYNC_PATH, ["-ani", "--delete", "--out-format=%i", ...filters, `${source}/`, `${run.receiver}/`], { encoding: "utf8" });
+        expect(oracle.status, oracle.stderr).toBe(0);
+        return oracle.stdout.split("\n").filter(line => /^\*deleting(\s|$)/.test(line));
+      };
+      const emptySource = join(run.root, "oracle-empty");
+      mkdirSync(emptySource);
+      const total = deletions(emptySource);
+      const numerator = deletions(run.sender);
+      const detail = `empty-source: ${JSON.stringify(total)} real: ${JSON.stringify(numerator)}`;
+      expect(numerator.length, detail).toBeLessThanOrEqual(total.length);
+      expect(numerator.length, detail).toBeGreaterThan(0);
+      const shouldAbort = numerator.length * 100 > 20 * total.length;
+      expect(run.result.status, `${detail}\n${output(run)}`).toBe(shouldAbort ? 1 : 0);
+      if (shouldAbort) {
+        expect(output(run), detail).toContain(`${numerator.length}/${total.length} remote entries`);
+      }
+      expect(existsSync(join(run.receiver, "a", "x", "b", "deep", "g"))).toBe(true);
+      expect(existsSync(join(run.receiver, "a", "x", "b", "f"))).toBe(true);
+      if (spawnSync(REAL_RSYNC_PATH, ["--version"], { encoding: "utf8" }).stdout.includes("openrsync")) {
+        // Pinned openrsync semantics: a and a/x are retained, a/x/b is protected.
+        expect(total, detail).toHaveLength(2);
+        expect(numerator, detail).toHaveLength(1);
+        expect(output(run)).toContain("1/2 remote entries (50%");
+      }
+    });
+
+    it("counts protected /keep*/*** directories out of the denominator", () => {
+      const run = realMirror({ MIMIR_SYNC_EXTRA_EXCLUDES: "/keep*/***", MIMIR_SYNC_MAX_DELETE_PCT: "20" }, (_sender, rx) => {
+        for (let i = 0; i < 99; i++) mkdirSync(join(rx, `keep-${i}`));
+        writeFileSync(join(rx, "eligible.md"), "x");
+      });
+      expect(run.result.status).toBe(1);
+      expect(output(run)).toContain("1/1 remote entries (100%");
+      expect(existsSync(join(run.receiver, "eligible.md"))).toBe(true);
+    });
+
+    // 65 files are in both trees; n stale files are NAS-only. Retained
+    // ancestors, a 119-file node_modules, __pycache__ and .DS_Store never count.
+    const arithmetic = (stale: number) =>
+      realMirror({ MIMIR_SYNC_MAX_DELETE_PCT: "20" }, (sender, rx) => {
+        for (let i = 0; i < 65; i++) {
+          writeFileSync(join(sender, `keep-${i}.md`), "x");
+          writeFileSync(join(rx, `keep-${i}.md`), "x");
+        }
+        for (let i = 0; i < stale; i++) writeFileSync(join(rx, `stale-${i}.md`), "x");
+        mkdirSync(join(rx, "proj", "node_modules"), { recursive: true });
+        for (let i = 0; i < 119; i++) writeFileSync(join(rx, "proj", "node_modules", `f-${i}`), "x");
+        mkdirSync(join(rx, "proj", "__pycache__"));
+        writeFileSync(join(rx, ".DS_Store"), "x");
+        mkdirSync(join(rx, "artifact-snapshots", "pilot"), { recursive: true });
+        writeFileSync(join(rx, "artifact-snapshots", "pilot", "m.json"), "x");
+      });
+
+    it("aborts just above the percentage threshold of the rsync-derived total (17/82)", () => {
+      const run = arithmetic(17);
+      expect(run.result.status).toBe(1);
+      expect(output(run)).toContain("17/82 remote entries (21%; max 1000 entries or 20%)");
+    });
+
+    it("passes just below the percentage threshold of the rsync-derived total (16/81)", () => {
+      const run = arithmetic(16);
+      expect(run.result.status, output(run)).toBe(0);
+      expect(run.invocations).toContain("--max-delete=");
+      expect(existsSync(join(run.receiver, "proj", "node_modules", "f-0"))).toBe(true);
+      expect(existsSync(join(run.receiver, "artifact-snapshots", "pilot", "m.json"))).toBe(true);
+      expect(existsSync(join(run.receiver, "stale-0.md"))).toBe(false);
+    });
+
+    it("leaves no empty comparison directory behind after a real run", () => {
+      const run = arithmetic(16);
+      const state = join(run.root, ".local", "state", "mimir");
+      expect(readdirSync(state).filter(name => name.startsWith("mimir-sync-empty."))).toEqual([]);
+    });
+  });
+
+  it.each([
+    "cannot delete non-empty directory: some/dir",
+    "rsync(12345): warning: some/dir: not empty, cannot delete",
+  ])("accepts the protected-directory diagnostic %j without counting it as a deletion", (line) => {
+    const { result, invocations } = runSyncScript(script, { MOCK_EXTRA_OUTPUT: line });
+    expect(result.status, result.stderr).toBe(0);
+    expect(invocations).toContain("--max-delete=");
+  });
+
+  it.each([
+    "cannot delete: some/dir",
+    "rsync: error: not empty, cannot delete",
+    "warning: not empty, cannot delete extra",
+  ])("still rejects the lookalike dry-run line %j", (line) => {
+    const { result, invocations } = runSyncScript(script, { MOCK_EXTRA_OUTPUT: line });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("unrecognized rsync dry-run output");
+    expect(invocations).not.toContain("--max-delete=");
+  });
+
+  describe("configuration refusals are reported", () => {
+    const withCurl = (harness: ReturnType<typeof createSyncHarness>) => {
+      const args = join(harness.root, "curl.args");
+      executable(join(harness.bin, "curl"), `printf '%s\\n' "$*" >> "$CURL_ARGS"\ncat >/dev/null\nexit 0\n`);
+      return {
+        env: { HEIMDALL_HUB_URL: "http://hub.invalid/api/panels", HEIMDALL_FLEET_TOKEN: "tok-SENTINEL", CURL_ARGS: args },
+        args: () => (existsSync(args) ? readFileSync(args, "utf8") : ""),
+      };
+    };
+
+    it.each([
+      ["invalid extra exclude", { MIMIR_SYNC_EXTRA_EXCLUDES: "-x" }],
+      ["invalid delete limit", { MIMIR_SYNC_MAX_DELETE: "abc" }],
+      ["invalid delete percentage", { MIMIR_SYNC_MAX_DELETE_PCT: "101" }],
+    ] as const)("pushes class=config_invalid for an %s", (_label, overrides) => {
+      const harness = createSyncHarness(script);
+      const curl = withCurl(harness);
+      const { result } = harness.run({ ...curl.env, ...overrides });
+      expect(result.status).toBe(1);
+      expect(curl.args()).toContain('"state":"fail"');
+      expect(curl.args()).toContain("class=config_invalid exit=1");
+      expect(curl.args()).not.toContain("tok-SENTINEL");
+    });
+
+    it("moves daemon freshness to error on a configuration refusal", () => {
+      const { result, invocations } = runSyncScript(script, {
+        MIMIR_REMOTE_FRESHNESS_PUBLISHER: "/usr/local/libexec/mimir-publish-freshness",
+        MIMIR_SYNC_EXTRA_EXCLUDES: "-x",
+      });
+      expect(result.status).toBe(1);
+      if (script === "sync-artifacts-daemon.sh") {
+        expect(invocations).toContain("'/usr/local/libexec/mimir-publish-freshness' sync 'error'");
+      } else {
+        expect(invocations).not.toContain("mimir-publish-freshness");
+      }
+    });
   });
 });
 
