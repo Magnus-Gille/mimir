@@ -127,7 +127,10 @@ if ! no_cloud_load "$CLASSIFICATION"; then
   fail_event classification 1 "$(no_cloud_failure_detail)"
 fi
 [ "$NO_CLOUD_SOURCE" = file ] || fail_event classification 1 reason=absent
-if ! no_cloud_patterns; then
+# The classification file names the marked folders; it travels with them.
+NO_CLOUD_MANIFEST=""
+case "$CLASSIFICATION" in "$ROOT"/*) NO_CLOUD_MANIFEST="${CLASSIFICATION#"$ROOT"/}" ;; esac
+if ! no_cloud_patterns "$NO_CLOUD_MANIFEST"; then
   fail_event classification 1 "reason=${NO_CLOUD_ERROR:-unicode}"
 fi
 MARKERS=${#NO_CLOUD_PATHS[@]}
@@ -139,6 +142,9 @@ fi
 
 # ---- Preflight (read-only until the copy starts) ----
 command -v "$RCLONE" >/dev/null 2>&1 || fail_event preflight 1 reason=rclone
+# rclone reads options from RCLONE_* variables, and RCLONE_CRYPT_REMOTE or
+# RCLONE_CONFIG_<NAME>_REMOTE would override the backing path verified below.
+no_cloud_rclone_env_check strict || fail_event preflight 1 reason=rclone_env
 
 MOUNT_NORM=$(normalize_absolute "$MOUNT") || fail_event medium 1 reason=mount_invalid
 [ -d "$MOUNT_NORM" ] || fail_event medium 1 reason=mount_invalid
@@ -153,11 +159,9 @@ else
 fi
 
 CONF_SHOW=$("$RCLONE" config show "$REMOTE" 2>/dev/null) || CONF_SHOW=""
-RTYPE=$(printf '%s\n' "$CONF_SHOW" | awk -F' = ' '/^type =/{print $2; exit}')
-FENC=$(printf '%s\n' "$CONF_SHOW" | awk -F' = ' '/^filename_encryption =/{print $2; exit}')
 RPATH=$(printf '%s\n' "$CONF_SHOW" | awk 'index($0, "remote = ") == 1 {print substr($0, 10); exit}')
-[ "$RTYPE" = crypt ] || fail_event preflight 1 reason=not_crypt
-[ "$FENC" != off ] || fail_event preflight 1 reason=filename_encryption_off
+# Contents, file names and directory names must all be encrypted at rest.
+no_cloud_crypt_check "$CONF_SHOW" strict || fail_event preflight 1 "reason=${NO_CLOUD_ERROR}"
 [ -n "$RPATH" ] || fail_event preflight 1 reason=remote_path
 
 # The crypt remote must wrap a directory on the medium. A `name:` remote, a
@@ -176,6 +180,12 @@ done
 probe_real=$(cd -- "$probe" 2>/dev/null && pwd -P) || fail_event medium 1 reason=remote_outside_medium
 if [ "$probe_real" != "$MOUNT_REAL" ] && [[ "$probe_real" != "$MOUNT_REAL"/* ]]; then
   fail_event medium 1 reason=remote_outside_medium
+fi
+# rclone opens <vault>/<encrypted current> and friends as its roots, so a link
+# anywhere inside the vault could lead off the medium.
+if [ -d "$RPATH_NORM" ]; then
+  vault_link=$(find "$RPATH_NORM" -type l -print -quit 2>/dev/null) || fail_event medium 1 reason=vault_unreadable
+  [ -z "$vault_link" ] || fail_event medium 1 reason=symlink_in_vault
 fi
 
 # Private receipt directories, created before copying so a state problem cannot
@@ -216,7 +226,8 @@ count_files() {
 # macOS matches names case and normalization insensitively; rclone filters do
 # not, so a marker with no files is most likely a spelling mismatch.
 UNMATCHED=0
-for ((i = 0; i < ${#NO_CLOUD_PATTERNS[@]}; i += 2)); do
+# The classification file, when present, is the pair after the markers.
+for ((i = 0; i < MARKERS * 2; i += 2)); do
   marker_count=$(count_files \
     --filter '- **/.git/**' \
     --filter "+ ${NO_CLOUD_PATTERNS[i]}" \

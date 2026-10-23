@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// Each case spawns the scripts (and real rclone) several times; a loaded host
+// can take longer than the default 5 s.
+vi.setConfig({ testTimeout: 30_000 });
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const FILTER_SCRIPT = join(REPO_ROOT, "scripts/no-cloud-filter.sh");
@@ -47,6 +51,10 @@ paths:
   artifact-snapshots/:     inherit               # derived
 `;
 
+// While any folder is marked, the classification file names it, so the rules
+// cover the file too (the CLI takes it to sit at the archive root).
+const MANIFEST_RULES = "- /classification.yaml\n- /classification.yaml/**\n";
+
 function filterRules(content: string | null, mode = "--exclude") {
   const root = tempDir();
   const file = join(root, "classification.yaml");
@@ -83,7 +91,7 @@ describe("no-cloud classification parser", () => {
       "- /mgc/customers/gamma ab",
       "- /mgc/customers/gamma ab/**",
       "",
-    ].join("\n"));
+    ].join("\n") + MANIFEST_RULES);
     expect(ok.stderr).toContain("no_cloud_markers=2 source=file");
     expect(ok.stderr).not.toContain("acme");
   });
@@ -92,18 +100,37 @@ describe("no-cloud classification parser", () => {
     const result = filterRules(`${OWNER_SHAPE}  mgc/bokföring/kund/: {level: client-restricted, no-cloud: true}
 `, "--include");
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toBe("+ /mgc/kund\n+ /mgc/kund/**\n- **\n".replace(/kund/g, "bokf{ö,ö}ring/kund"));
+    expect(result.stdout).toBe(
+      "+ /mgc/kund\n+ /mgc/kund/**\n+ /classification.yaml\n+ /classification.yaml/**\n- **\n"
+        .replace(/kund/g, "bokf{ö,ö}ring/kund"),
+    );
   });
 
   it("matches precomposed and decomposed spellings of a non-ASCII marker", () => {
     // The owner's archive stores some folders decomposed (NFD) while the YAML
     // is typically precomposed (NFC); a byte-exact rule would miss them.
-    for (const spelling of ["Åkesson AB", "Åkesson AB"]) {
+    for (const [spelling, forms] of [
+      ["Åkesson AB", "{Å,Å}"],
+      // The literal spelling always stays first and is always matched.
+      ["Åkesson AB", "{Å,Å}"],
+    ]) {
       const result = filterRules(`paths:\n  mgc/customers/${spelling}/: {level: client-restricted, no-cloud: true}\n`);
       expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toBe(
-        "- /mgc/customers/{Å,Å}kesson AB\n- /mgc/customers/{Å,Å}kesson AB/**\n",
-      );
+      expect(result.stdout).toBe(`- /mgc/customers/${forms}kesson AB\n- /mgc/customers/${forms}kesson AB/**\n${MANIFEST_RULES}`);
+    }
+  });
+
+  it("keeps the literal spelling of canonical singletons and composing jamo", () => {
+    // NFC maps the Kelvin sign to K and the Angstrom sign to Å, so a rule built
+    // only from normal forms would miss a folder that uses the literal sign.
+    for (const [name, forms] of [
+      ["\u212a", "{\u212a,K}"],
+      ["\u212b", "{\u212b,\u00c5,A\u030a}"],
+      ["\u1100\u1161", "{\u1100\u1161,\uac00}"],
+    ]) {
+      const result = filterRules(`paths:\n  clients/${name}/: {level: client-restricted, no-cloud: true}\n`);
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toBe(`- /clients/${forms}\n- /clients/${forms}/**\n${MANIFEST_RULES}`);
     }
   });
 
@@ -135,7 +162,7 @@ describe("no-cloud classification parser", () => {
       env: { ...process.env, NO_CLOUD_PYTHON: join(root, "no-python3") },
     });
     expect(ascii.status, ascii.stderr).toBe(0);
-    expect(ascii.stdout).toBe("- /mgc/customers/acme\n- /mgc/customers/acme/**\n");
+    expect(ascii.stdout).toBe(`- /mgc/customers/acme\n- /mgc/customers/acme/**\n${MANIFEST_RULES}`);
   });
 
   it("escapes rclone glob metacharacters in marked paths", () => {
@@ -143,7 +170,7 @@ describe("no-cloud classification parser", () => {
   odd/a*b?[c]{d}\\e/: {level: client-restricted, no-cloud: true}
 `);
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toBe("- /odd/a\\*b\\?\\[c\\]\\{d\\}\\\\e\n- /odd/a\\*b\\?\\[c\\]\\{d\\}\\\\e/**\n");
+    expect(result.stdout).toBe(`- /odd/a\\*b\\?\\[c\\]\\{d\\}\\\\e\n- /odd/a\\*b\\?\\[c\\]\\{d\\}\\\\e/**\n${MANIFEST_RULES}`);
   });
 
   it("treats an absent file as zero markers", () => {
@@ -260,7 +287,7 @@ describe("offsite no-cloud purge", () => {
 printf '%s\\n' 'rclone-stderr-canary' >&2
 target_of() { local t="\${1#mimir-crypt:}"; printf '%s' "\${t//\\//__}"; }
 case "\${1:-}" in
-  config) printf 'type = crypt\\nfilename_encryption = standard\\n' ;;
+  config) printf 'type = crypt\\nfilename_encryption = standard\\n%b' "\${MOCK_CONF_EXTRA:-}" ;;
   lsf)
     if [ "$2" = --dirs-only ]; then
       case "$3" in
@@ -271,7 +298,7 @@ case "\${1:-}" in
       exit "\${MOCK_LSF_RC:-0}"
     fi
     t=$(target_of "$4"); n=$(cat "$MOCK_REMOTE/$t" 2>/dev/null || printf 0)
-    for ((i = 0; i < n; i++)); do printf 'mgc/customers/secret-client/file-%s\\n' "$i"; done
+    for ((i = 0; i < n; i++)); do printf 'mgc/customers/secret-client/file-%s%s\\n' "$i" "\${MOCK_OBJECT_TAG:-}"; done
     exit "\${MOCK_LSF_RC:-0}"
     ;;
   delete)
@@ -324,7 +351,7 @@ esac
       "mimir-crypt:a0000AA", "mimir-crypt:a0000AB", "mimir-crypt:archive/2026-01-01T000000Z", "mimir-crypt:current",
     ]);
     for (const line of lists) {
-      expect(line).toContain("--filter + /mgc/customers/secret-client --filter + /mgc/customers/secret-client/** --filter - **");
+      expect(line).toContain("--filter + /mgc/customers/secret-client --filter + /mgc/customers/secret-client/** --filter + /classification.yaml --filter + /classification.yaml/** --filter - **");
     }
     const output = `${result.stdout}\n${result.stderr}`;
     expect(output).not.toMatch(/secret-client|canary|a0000AA|archive\//);
@@ -346,10 +373,10 @@ esac
     const executed = deletes(calls);
     expect(executed).toHaveLength(2);
     expect(executed).toContain(
-      "delete mimir-crypt:current --filter + /mgc/customers/secret-client --filter + /mgc/customers/secret-client/** --filter - ** --max-delete 3",
+      "delete mimir-crypt:current --filter + /mgc/customers/secret-client --filter + /mgc/customers/secret-client/** --filter + /classification.yaml --filter + /classification.yaml/** --filter - ** --max-delete 3",
     );
     expect(executed).toContain(
-      "delete mimir-crypt:a0000AA --filter + /mgc/customers/secret-client --filter + /mgc/customers/secret-client/** --filter - ** --max-delete 2",
+      "delete mimir-crypt:a0000AA --filter + /mgc/customers/secret-client --filter + /mgc/customers/secret-client/** --filter + /classification.yaml --filter + /classification.yaml/** --filter - ** --max-delete 2",
     );
     expect(calls).toMatch(/^rmdirs mimir-crypt:current --leave-root --filter \+ /m);
     expect(result.stderr).toMatch(/stage=execute state=pass exit=0 planned_objects=5 remaining_objects=0 receipt=[0-9a-f]{32}/);
@@ -388,6 +415,43 @@ esac
     expect(result.stderr).toContain("stage=execute state=fail exit=1 reason=plan_mismatch");
     expect(deletes(calls)).toEqual([]);
     expect(harness.files()).toEqual([]);
+  });
+
+  it.each([
+    ["the remote now points elsewhere under the same name", { MOCK_CONF_EXTRA: "remote = other:place\\n" }],
+    ["an object was replaced without changing the count", { MOCK_OBJECT_TAG: ";replaced" }],
+  ])("refuses to execute when %s", (_name, overrides) => {
+    const harness = createPurgeHarness({ current: 3 });
+    const id = harness.planId(harness.run().result.stderr);
+    const { result, calls } = harness.run(["--execute", id], overrides);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("stage=execute state=fail exit=1 reason=plan_mismatch");
+    expect(deletes(calls)).toEqual([]);
+  });
+
+  it("refuses a remote that does not encrypt contents or that the environment overrides", () => {
+    const plaintext = createPurgeHarness({ current: 3 });
+    const noData = plaintext.run([], { MOCK_CONF_EXTRA: "no_data_encryption = true\\n" });
+    expect(noData.result.status).toBe(1);
+    expect(noData.result.stderr).toContain("stage=preflight state=fail exit=1 reason=remote");
+    expect(plaintext.files()).toEqual([]);
+
+    for (const name of ["RCLONE_CRYPT_REMOTE", "RCLONE_CONFIG_MIMIR_CRYPT_REMOTE", "RCLONE_FILTER_FROM", "RCLONE_IGNORE_CASE"]) {
+      const harness = createPurgeHarness({ current: 3 });
+      const { result, calls } = harness.run([], { [name]: "x" });
+      expect(result.status, name).toBe(1);
+      expect(result.stderr, name).toContain("stage=preflight state=fail exit=1 reason=rclone_env");
+      expect(calls, name).toBe("");
+    }
+  });
+
+  it("never prints the invoked script path", () => {
+    const harness = createPurgeHarness({ current: 3 });
+    const { result } = harness.run();
+    expect(result.status, result.stderr).toBe(0);
+    expect(`${result.stdout}\n${result.stderr}`).not.toContain(REPO_ROOT);
+    expect(result.stdout).toMatch(/^ {2}offsite-purge-no-cloud\.sh --execute [0-9a-f]{32}$/m);
   });
 
   it("refuses an expired, malformed or unknown plan", () => {
@@ -519,13 +583,13 @@ esac
     const id = /plan=([0-9a-f]{32})/.exec(plan.stderr)?.[1] ?? "";
     const executed = purge(["--execute", id]);
     expect(executed.status, executed.stderr).toBe(0);
-    expect(remote("current")).toEqual(["classification.yaml", "mgc/internal/notes.md"]);
+    expect(remote("current")).toEqual(["mgc/internal/notes.md"]);
     expect(remote(archive)).toEqual([]);
     const dirs = spawnSync("rclone", ["lsf", "-R", "--dirs-only", "offsite-test:current"], { encoding: "utf8", env }).stdout;
     expect(dirs).not.toContain("secret-client");
 
     // The nightly run afterwards neither re-uploads nor trips the delete gate.
     expect(backup().status).toBe(0);
-    expect(remote("current")).toEqual(["classification.yaml", "mgc/internal/notes.md"]);
-  });
+    expect(remote("current")).toEqual(["mgc/internal/notes.md"]);
+  }, 30_000);
 });

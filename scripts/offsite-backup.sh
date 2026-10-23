@@ -273,13 +273,20 @@ case "$CLASSIFICATION_REQUIRED" in 0|1) ;; *) fail_event preflight 1;; esac
 # copies stay in current/ and the archive until the explicit, owner-approved
 # offsite-purge-no-cloud.sh removes them. Only counts are reported: marked
 # paths name clients. An unreadable or invalid file aborts the run.
+# rclone options from the environment could re-include or follow into them.
+no_cloud_rclone_env_check filters || fail_event preflight 1 "reason=${NO_CLOUD_ERROR}"
+NO_CLOUD_FINGERPRINT=$(no_cloud_fingerprint "$CLASSIFICATION")
 if ! no_cloud_load "$CLASSIFICATION"; then
   fail_event classification 1 "$(no_cloud_failure_detail)"
 fi
 if [ "$NO_CLOUD_SOURCE" = absent ] && [ "$CLASSIFICATION_REQUIRED" = 1 ]; then
   fail_event classification 1 "reason=absent"
 fi
-no_cloud_patterns || fail_event classification 1 "$(no_cloud_failure_detail)"
+# While folders are marked, the classification file names them: keep it off
+# the cloud too when it lives in the archive.
+NO_CLOUD_MANIFEST=""
+case "$CLASSIFICATION" in "$SOURCE"/*) NO_CLOUD_MANIFEST="${CLASSIFICATION#"$SOURCE"/}" ;; esac
+no_cloud_patterns "$NO_CLOUD_MANIFEST" || fail_event classification 1 "$(no_cloud_failure_detail)"
 NO_CLOUD_UNMATCHED=0
 for no_cloud_path in ${NO_CLOUD_PATHS[@]+"${NO_CLOUD_PATHS[@]}"}; do
   path_is_present "$SOURCE/${no_cloud_path%/}" || NO_CLOUD_UNMATCHED=$((NO_CLOUD_UNMATCHED + 1))
@@ -300,13 +307,9 @@ fi
 # Fail CLOSED unless the remote is provably a crypt remote with filename encryption.
 # Prevents a misconfigured MIMIR_OFFSITE_REMOTE from uploading plaintext client data.
 # Read only the type/encryption fields; never log the config (it contains the key).
+# Contents must be encrypted too (no_data_encryption would upload them in clear).
 CONF_SHOW=$("$RCLONE" config show "$REMOTE" 2>/dev/null || true)
-RTYPE=$(printf '%s\n' "$CONF_SHOW" | awk -F' = ' '/^type =/{print $2; exit}')
-FENC=$(printf '%s\n' "$CONF_SHOW" | awk -F' = ' '/^filename_encryption =/{print $2; exit}')
-[ "$RTYPE" = "crypt" ] || fail_event preflight 1
-case "$FENC" in
-  off) fail_event preflight 1;;
-esac
+no_cloud_crypt_check "$CONF_SHOW" basic || fail_event preflight 1
 
 archive_id() {
   local n="$1" alphabet="0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" out="" remainder
@@ -437,6 +440,16 @@ case "$sync_rc" in ''|*[!0-9]*) fail_event sync 1;; esac
 # A failed counter reports nothing rather than a guess.
 [ "$counter_rc" = 0 ] || pathlen_rejections=""
 case "$pathlen_rejections" in ''|*[!0-9]*) pathlen_rejections=0;; esac
+# A marker that arrived with a concurrent archive sync was not applied to this
+# traversal, so its folder may have been uploaded: fail loudly (purge if needed).
+# Other edits to the file during the run are harmless.
+if [ "$(no_cloud_fingerprint "$CLASSIFICATION")" != "$NO_CLOUD_FINGERPRINT" ]; then
+  NO_CLOUD_LOADED=$(printf '%s\n' ${NO_CLOUD_PATHS[@]+"${NO_CLOUD_PATHS[@]}"})
+  if ! no_cloud_load "$CLASSIFICATION" ||
+    [ "$(printf '%s\n' ${NO_CLOUD_PATHS[@]+"${NO_CLOUD_PATHS[@]}"})" != "$NO_CLOUD_LOADED" ]; then
+    fail_event classification 1 "reason=changed_during_run"
+  fi
+fi
 if [ "$sync_rc" -ne 0 ]; then
   if [ "$pathlen_rejections" -gt 0 ]; then
     fail_event sync "$sync_rc" "pathlen_rejections=${pathlen_rejections} doc=offsite-backup.md#path-length-budget"

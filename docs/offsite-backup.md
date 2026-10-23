@@ -21,8 +21,11 @@ Assume an archive may contain sensitive data. The cloud copy is therefore
 `scripts/offsite-backup.sh`, run on the NAS Pi by `mimir-offsite.timer` (daily 03:30):
 
 1. Preflight: rclone present, source exists, and the remote is a **verified crypt
-   remote** with filename encryption on — fails *closed* otherwise, so a misconfig
-   can never upload plaintext.
+   remote** with filename encryption on and content encryption not disabled
+   (`no_data_encryption`) — fails *closed* otherwise, so a misconfig can never
+   upload plaintext. `RCLONE_*` environment variables that override the crypt or
+   per-remote config, add filter rules, follow links or ignore case also abort the
+   run (`reason=rclone_env`); ordinary tuning such as `RCLONE_TRANSFERS` is allowed.
 2. No-cloud exclusions: folders marked `no-cloud` in the archive's
    `classification.yaml` are excluded from every following step, before any remote
    call. An unreadable or invalid classification file aborts the run (see
@@ -247,8 +250,9 @@ Dry-run any time without touching the remote: `./scripts/offsite-backup.sh --dry
    (step 4). The remote path and `filename_encoding` must match what the entry records
    (for example `storage:encrypted/mimir` and `base32768`, set under advanced config).
 3. `rclone copy mimir-crypt:current ~/mimir-restored` → plaintext archive back.
-4. Folders marked `no-cloud` are not in the cloud by design. Restore them from the
-   newest offline medium (see [Offline copy](#offline-copy-of-no-cloud-folders)).
+4. Folders marked `no-cloud`, and `classification.yaml` while any marker exists, are
+   not in the cloud by design. Restore them from the newest offline medium (see
+   [Offline copy](#offline-copy-of-no-cloud-folders)).
 
 ## Path-length budget
 
@@ -334,10 +338,16 @@ parser (awk), so a typo fails closed instead of uploading the folder:
   mark, quotes, block mappings, lists, and a file without `paths:` (an empty or
   truncated file is invalid).
 - Marked paths are matched exactly and case-sensitively. Glob characters in folder
-  names are escaped. Non-ASCII letters match both their precomposed (NFC) and
-  decomposed (NFD, as macOS Finder often stores them) spellings. This needs the
-  standard-library `unicodedata` of `python3`, used only when a marked path is
-  non-ASCII; without it, the run fails closed with `reason=unicode`.
+  names are escaped. Non-ASCII letters match their literal spelling and both their
+  precomposed (NFC) and decomposed (NFD, as macOS Finder often stores them) forms;
+  the archive already holds NFD folder names while the YAML is usually NFC, so a
+  byte-exact rule would miss them. This needs the standard-library `unicodedata`
+  of `python3`, used only when a marked path is non-ASCII; without it, the run
+  fails closed with `reason=unicode`.
+- While at least one folder is marked, `classification.yaml` itself is treated as
+  no-cloud too, because it names those folders. Copies uploaded before the first
+  marker stay in the cloud until the purge, which removes them along with the
+  folders. The offline copy includes the file.
 
 ### What the nightly job does with it
 
@@ -349,7 +359,14 @@ parser (awk), so a typo fails closed instead of uploading the folder:
 | Invalid | Aborts the same way with `reason=invalid line=N` (`line=0`: the whole file, for example no `paths:` section). |
 
 `no_cloud_unmatched` counts markers whose folder does not exist in the archive (a
-typo, or a folder not synced yet); only the count is reported. The dry run
+typo, or a folder not synced yet); only the count is reported.
+
+The exclusions are read once, before the sync. If the classification file's
+marker set is different after the sync (an archive sync delivered a new marker
+mid-run), the run fails with `stage=classification state=fail exit=1
+reason=changed_during_run`: that marker was not applied, so its folder may have
+been uploaded. Check with a dry run and purge if needed. Edits that leave the
+marker set unchanged do not fail the run. The dry run
 (`offsite-backup.sh --dry-run`) prints the same counts without touching the remote.
 `files=` on the complete event still counts the whole source tree, marked folders
 included.
@@ -395,8 +412,11 @@ scripts/offsite-purge-no-cloud.sh --execute <id>   # the owner's approval of tha
   `$MIMIR_OFFSITE_STATE_DIR/offsite-private/no-cloud-purge/plan-<id>` (mode `0600`).
   The plan stores counts and a digest salted with a random nonce, never paths.
 - **Execute** claims the plan, recounts, and refuses (`reason=plan_mismatch`) when
-  the markers, the remote or any per-directory count changed since the plan; an
-  expired, unknown or reused plan is refused too. Each `rclone delete` is confined
+  the markers, the remote's crypt section (its backing path and keys, so the same
+  remote name pointing elsewhere does not match) or the planned objects (path, size
+  and modification time of each) changed since the plan; an expired, unknown or
+  reused plan is refused too. The same `rclone_env` and crypt checks as the nightly
+  job apply. Each `rclone delete` is confined
   to the marked folders by filters and capped by `--max-delete` at the planned
   count, then empty marked directories are removed with `rmdirs`. It then counts
   again and writes `receipt-<id>` (mode `0600`): plan id, plan and execution times,
@@ -443,9 +463,12 @@ MIMIR_OFFLINE_MOUNT=/Volumes/MimirOffline scripts/offline-copy-no-cloud.sh
 ```
 
 The script fails closed and writes nothing until every preflight passes: the
-classification is valid, the medium is a mount point, and the remote is a crypt
-remote with filename encryption whose `remote =` path, after resolving symlinks, lies
-on the medium (it can never send data to the cloud). A marker that matches no file
+classification is valid; the medium is a mount point; no `RCLONE_*` setting other
+than the config location and password is in the environment (such settings could
+redirect the backing path); and the remote is a crypt remote with content,
+standard filename and directory-name encryption whose `remote =` path, after
+resolving symlinks, lies on the medium and contains no symlinks (it can never send
+data to the cloud). A marker that matches no file
 fails the run, because macOS matches names case- and normalization-insensitively
 while rclone filters do not; `--allow-unmatched` overrides this. Then it:
 

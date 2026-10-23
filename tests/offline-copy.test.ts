@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// Each case spawns the scripts (and real rclone) several times; a loaded host
+// can take longer than the default 5 s.
+vi.setConfig({ testTimeout: 30_000 });
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "scripts/offline-copy-no-cloud.sh");
@@ -73,7 +77,7 @@ function createHarness(classification: string | null = CLASSIFICATION) {
 
   executable(
     join(bin, "rclone"),
-    `printf '%s\\n' "$*" >> "$RCLONE_CALLS"
+    `printf '%s\\n' "$*" >> "$MOCK_RCLONE_CALLS"
 case "\${1:-}" in
   config)
     if [ -n "\${MOCK_CONFIG:-}" ]; then
@@ -100,14 +104,14 @@ case "\${1:-}" in
     ;;
   copyto)
     printf 'CANARY_RCLONE_OUT\\n'; printf 'CANARY_RCLONE_ERR\\n' >&2
-    cp "$2" "$RCLONE_CALLS.receipt-copy"
+    cp "$2" "$MOCK_RCLONE_CALLS.receipt-copy"
     exit "\${MOCK_COPYTO_RC:-0}"
     ;;
   *) exit 0 ;;
 esac
 `,
   );
-  executable(join(bin, "mountpoint"), `printf 'mountpoint %s\\n' "$*" >> "$RCLONE_CALLS"\nexit "\${MOCK_MOUNTPOINT_RC:-0}"\n`);
+  executable(join(bin, "mountpoint"), `printf 'mountpoint %s\\n' "$*" >> "$MOCK_RCLONE_CALLS"\nexit "\${MOCK_MOUNTPOINT_RC:-0}"\n`);
   executable(join(bin, "umount"), `printf 'umount %s\\n' "$*" >> "$UNMOUNT_CALLS"\nprintf 'CANARY_UNMOUNT\\n'\nexit "\${MOCK_UNMOUNT_RC:-0}"\n`);
   executable(join(bin, "diskutil"), `printf 'diskutil %s\\n' "$*" >> "$UNMOUNT_CALLS"\nprintf 'CANARY_UNMOUNT\\n'\nexit "\${MOCK_UNMOUNT_RC:-0}"\n`);
 
@@ -141,7 +145,7 @@ esac
           MIMIR_OFFLINE_ROOT: source,
           MIMIR_OFFLINE_STATE_DIR: state,
           RCLONE_BIN: join(bin, "rclone"),
-          RCLONE_CALLS: calls,
+          MOCK_RCLONE_CALLS: calls,
           UNMOUNT_CALLS: unmountCalls,
           ...overrides,
         },
@@ -257,7 +261,7 @@ describe("offline copy of no-cloud folders: preflight", () => {
         MIMIR_OFFLINE_ROOT: h.source,
         MIMIR_OFFLINE_STATE_DIR: h.state,
         RCLONE_BIN: join(h.bin, "rclone"),
-        RCLONE_CALLS: join(h.root, "rclone.calls"),
+        MOCK_RCLONE_CALLS: join(h.root, "rclone.calls"),
       },
     });
     // The mount directory shares its parent's device: not a mount point.
@@ -277,7 +281,7 @@ describe("offline copy of no-cloud folders: preflight", () => {
         MIMIR_OFFLINE_ROOT: h.source,
         MIMIR_OFFLINE_STATE_DIR: h.state,
         RCLONE_BIN: join(h.bin, "rclone"),
-        RCLONE_CALLS: join(h.root, "rclone.calls"),
+        MOCK_RCLONE_CALLS: join(h.root, "rclone.calls"),
         MOCK_CONFIG: "type = crypt\nfilename_encryption = standard\nremote = /dev/vault\n",
       },
     });
@@ -347,6 +351,44 @@ describe("offline copy of no-cloud folders: preflight", () => {
     }
   });
 
+  it("requires encrypted contents, standard file names and encrypted directory names", () => {
+    for (const [setting, reason] of [
+      ["no_data_encryption = true", "no_data_encryption"],
+      ["directory_name_encryption = false", "directory_name_encryption_off"],
+      ["filename_encryption = obfuscate", "filename_encryption_not_standard"],
+    ]) {
+      const h = createHarness();
+      const base = setting.startsWith("filename_encryption") ? "" : "filename_encryption = standard\n";
+      const result = h.run([], { MOCK_CONFIG: `type = crypt\n${base}${setting}\nremote = ${h.mount}/vault\n` });
+      expect(result.status, setting).toBe(1);
+      expect(result.stderr, setting).toContain(`stage=preflight state=fail exit=1 reason=${reason}`);
+      expect(h.rcloneCalls("sync"), setting).toHaveLength(0);
+    }
+  });
+
+  it("refuses rclone environment overrides that could redirect the copy", () => {
+    for (const name of ["RCLONE_CRYPT_REMOTE", "RCLONE_CONFIG_OFFLINE_TEST_REMOTE", "RCLONE_TRANSFERS"]) {
+      const h = createHarness();
+      const result = h.run([], { [name]: "elsewhere:backup" });
+      expect(result.status, name).toBe(1);
+      expect(result.stderr, name).toContain("stage=preflight state=fail exit=1 reason=rclone_env");
+      expect(result.stderr, name).not.toContain("elsewhere");
+      expect(h.calls().filter((c) => !c.startsWith("lsf ")), name).toEqual([]);
+    }
+  });
+
+  it("refuses a vault that contains a symlink", () => {
+    const h = createHarness();
+    const elsewhere = join(h.root, "elsewhere");
+    mkdirSync(elsewhere);
+    mkdirSync(join(h.mount, "vault"));
+    symlinkSync(elsewhere, join(h.mount, "vault", "encrypted-current"));
+    const result = h.run();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("stage=medium state=fail exit=1 reason=symlink_in_vault");
+    expect(h.rcloneCalls("sync")).toHaveLength(0);
+  });
+
   it("fails when rclone or the archive root is missing", () => {
     const h = createHarness();
     const noRclone = h.run([], { RCLONE_BIN: join(h.root, "no-such-rclone") });
@@ -405,7 +447,8 @@ describe("offline copy of no-cloud folders: markers and filters", () => {
     const h = createHarness(TWO_MARKERS);
     const result = h.run(["--allow-unmatched", "--keep-mounted"]);
     expect(result.status, result.stderr).toBe(0);
-    const filters = markerFilters(MARKED, GHOST);
+    // The classification file names the marked folders, so it travels with them.
+    const filters = markerFilters(MARKED, GHOST, "classification.yaml");
     const [sync] = h.rcloneCalls("sync");
     expect(sync).toMatch(new RegExp(
       `^sync ${h.source}/ ${REMOTE}:current --backup-dir ${REMOTE}:history/\\d{8}T\\d{6}Z ${filters.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
@@ -588,10 +631,11 @@ filename_encoding = base32
 
     const first = run();
     expect(first.status, first.stderr).toBe(0);
-    expect(first.stderr).toContain("no_cloud_markers=2 no_cloud_unmatched=0 files=2");
+    expect(first.stderr).toContain("no_cloud_markers=2 no_cloud_unmatched=0 files=3");
     expectBlind(first.stderr, { root, mount, source });
 
     expect(remoteFiles("current")).toEqual([
+      "classification.yaml",
       "mgc/customers/secret-client/contract.pdf",
       "mgc/customers/Åkesson/nda.pdf",
     ].sort());

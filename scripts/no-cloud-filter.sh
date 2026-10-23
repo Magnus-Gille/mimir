@@ -15,6 +15,9 @@
 #   no-cloud-filter.sh --exclude FILE   "- " rules: everything except no-cloud
 #   no-cloud-filter.sh --include FILE   "+ " rules then "- **": only no-cloud
 #
+# FILE is taken to sit at the archive root: while any folder is marked, the
+# rules also cover FILE itself, because it names the marked folders.
+#
 # Exit status: 0 parsed or absent, 2 invalid, 3 unreadable, 4 a non-ASCII
 # marker that cannot be normalized (python3 missing, or not UTF-8), 64 usage.
 # Diagnostics are content-blind: counts, a reason and a line number, never a path.
@@ -173,45 +176,76 @@ EOF
 
 # rclone filters compare names byte for byte, but the same folder name can be
 # stored precomposed (NFC, Linux/Windows) or decomposed (NFD, macOS Finder), and
-# the archive mixes both. Every non-ASCII character whose forms differ becomes an
-# rclone alternation `{nfc,nfd}`, so a marker matches either spelling. Only the
-# standard library is used, and only when a marked path is non-ASCII.
+# the archive mixes both. Each character cluster (a base character with the marks
+# and jamo that compose with it) whose literal, NFC and NFD forms differ becomes
+# an rclone alternation such as `{ö,ö}`, keeping the literal spelling, so a
+# marker matches every spelling. Only the standard library is used, and only
+# when a marked path is non-ASCII.
 # shellcheck disable=SC2016
 NO_CLOUD_UNICODE_PY='
 import sys, unicodedata
+NFC = lambda s: unicodedata.normalize("NFC", s)
+NFD = lambda s: unicodedata.normalize("NFD", s)
+META = set(",{}[]*?\\")
 for raw in sys.stdin.buffer.read().split(b"\n"):
     if not raw:
         continue
-    text = unicodedata.normalize("NFC", raw.decode("utf-8", "strict"))
+    clusters = []
+    for ch in raw.decode("utf-8", "strict"):
+        if clusters and (unicodedata.combining(ch) or NFC(clusters[-1] + ch) != NFC(clusters[-1]) + NFC(ch)):
+            clusters[-1] += ch
+        else:
+            clusters.append(ch)
     out = []
-    for ch in text:
-        decomposed = unicodedata.normalize("NFD", ch)
-        out.append(ch if decomposed == ch else "{" + ch + "," + decomposed + "}")
+    for cluster in clusters:
+        forms = []
+        for form in (cluster, NFC(cluster), NFD(cluster)):
+            if form not in forms:
+                forms.append(form)
+        if len(forms) == 1:
+            out.append(cluster)
+            continue
+        if any(c in META for form in forms for c in form):
+            sys.exit(3)
+        out.append("{" + ",".join(forms) + "}")
     sys.stdout.buffer.write("".join(out).encode("utf-8") + b"\n")
 '
 
-# no_cloud_patterns: fill NO_CLOUD_PATTERNS with two rooted rclone globs per
-# marked folder, the folder's contents and a same-named file, with glob
-# metacharacters escaped so a folder name cannot widen or narrow the match.
+# no_cloud_escape STRING: NO_CLOUD_ESCAPED is STRING with rclone glob
+# metacharacters escaped, so a name cannot widen or narrow a match.
+no_cloud_escape() {
+  local value="$1" char i
+  NO_CLOUD_ESCAPED=""
+  for ((i = 0; i < ${#value}; i++)); do
+    char="${value:i:1}"
+    # shellcheck disable=SC1003
+    case "$char" in
+      '\'|'*'|'?'|'['|']'|'{'|'}') NO_CLOUD_ESCAPED+="\\${char}" ;;
+      *) NO_CLOUD_ESCAPED+="$char" ;;
+    esac
+  done
+}
+
+# no_cloud_patterns [MANIFEST]: fill NO_CLOUD_PATTERNS with pairs of rooted
+# rclone globs, a marked folder's contents and a same-named file. MANIFEST is
+# the classification file's path relative to the archive root, when it lies
+# inside it: while any folder is marked, the manifest names those folders, so
+# it is kept off the cloud as one more pair.
 # Returns 1 (NO_CLOUD_ERROR=unicode) when a non-ASCII marker cannot be made
 # normalization-insensitive: python3 is missing or the path is not UTF-8.
 no_cloud_patterns() {
-  local path escaped char i joined converted count=0
+  local manifest="${1:-}" path joined converted count=0 pairs
   NO_CLOUD_PATTERNS=()
   for path in ${NO_CLOUD_PATHS[@]+"${NO_CLOUD_PATHS[@]}"}; do
-    escaped=""
-    for ((i = 0; i < ${#path}; i++)); do
-      char="${path:i:1}"
-      # shellcheck disable=SC1003
-      case "$char" in
-        '\'|'*'|'?'|'['|']'|'{'|'}') escaped+="\\${char}" ;;
-        *) escaped+="$char" ;;
-      esac
-    done
-    escaped="/${escaped%/}"
-    NO_CLOUD_PATTERNS+=("$escaped" "${escaped}/**")
+    no_cloud_escape "${path%/}"
+    NO_CLOUD_PATTERNS+=("/${NO_CLOUD_ESCAPED}" "/${NO_CLOUD_ESCAPED}/**")
   done
   [ "${#NO_CLOUD_PATTERNS[@]}" -gt 0 ] || return 0
+  if [ -n "$manifest" ]; then
+    no_cloud_escape "$manifest"
+    NO_CLOUD_PATTERNS+=("/${NO_CLOUD_ESCAPED}" "/${NO_CLOUD_ESCAPED}/**")
+  fi
+  pairs=$(( ${#NO_CLOUD_PATTERNS[@]} ))
   joined=$(printf '%s\n' "${NO_CLOUD_PATTERNS[@]}")
   LC_ALL=C grep -q '[^ -~]' <<< "$joined" || return 0
   if ! converted=$(printf '%s\n' "$joined" | "${NO_CLOUD_PYTHON:-python3}" -I -c "$NO_CLOUD_UNICODE_PY" 2>/dev/null); then
@@ -227,11 +261,77 @@ no_cloud_patterns() {
   done <<EOF
 $converted
 EOF
-  if [ "$count" -ne $(( ${#NO_CLOUD_PATHS[@]} * 2 )) ]; then
+  if [ "$count" -ne "$pairs" ]; then
     NO_CLOUD_PATTERNS=()
     NO_CLOUD_ERROR=unicode
     return 1
   fi
+}
+
+# no_cloud_fingerprint FILE: a checksum of the classification file (or
+# "absent"/"unreadable"), so a run can tell whether it changed under it.
+no_cloud_fingerprint() {
+  local file="$1"
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    printf absent
+  elif [ -L "$file" ] || [ ! -f "$file" ]; then
+    printf unreadable
+  else
+    cksum < "$file" 2>/dev/null || printf unreadable
+  fi
+}
+
+# no_cloud_rclone_env_check strict|filters: rclone also reads its options from
+# RCLONE_* environment variables, and those override the config the scripts
+# verified (RCLONE_CRYPT_REMOTE, RCLONE_CONFIG_<NAME>_*) or add filter rules
+# and link following that defeat the exclusions. `filters` rejects those
+# classes; `strict` rejects every RCLONE_* setting except the config location
+# and its password (and RCLONE_BIN, the scripts' own). Fails with NO_CLOUD_ERROR=rclone_env, naming nothing.
+no_cloud_rclone_env_check() {
+  local mode="$1" name
+  while IFS= read -r name; do
+    case "$name" in
+      ''|RCLONE_BIN|RCLONE_CONFIG|RCLONE_CONFIG_PASS|RCLONE_PASSWORD_COMMAND) continue ;;
+    esac
+    if [ "$mode" = strict ]; then
+      NO_CLOUD_ERROR=rclone_env
+      return 1
+    fi
+    case "$name" in
+      RCLONE_CONFIG_*|RCLONE_CRYPT_*|RCLONE_LOCAL_*|RCLONE_FILTER*|RCLONE_INCLUDE*|RCLONE_EXCLUDE*|\
+      RCLONE_FILES_FROM*|RCLONE_DELETE_EXCLUDED|RCLONE_COPY_LINKS|RCLONE_LINKS|RCLONE_IGNORE_CASE)
+        NO_CLOUD_ERROR=rclone_env
+        return 1
+        ;;
+    esac
+  done <<EOF
+$(env | sed -n 's/^\(RCLONE_[A-Za-z0-9_]*\)=.*/\1/p')
+EOF
+}
+
+# no_cloud_crypt_check "$(rclone config show NAME)" basic|strict: the remote is a
+# crypt remote that encrypts file contents and names. `strict` also requires
+# standard filename encryption and directory-name encryption. Unset options take
+# rclone's defaults (standard, true, false). NO_CLOUD_ERROR names the reason.
+no_cloud_crypt_check() {
+  local conf="$1" mode="$2" type fenc denc nodata
+  type=$(printf '%s\n' "$conf" | awk -F' = ' '/^type =/{print $2; exit}')
+  fenc=$(printf '%s\n' "$conf" | awk -F' = ' '/^filename_encryption =/{print $2; exit}')
+  denc=$(printf '%s\n' "$conf" | awk -F' = ' '/^directory_name_encryption =/{print $2; exit}')
+  nodata=$(printf '%s\n' "$conf" | awk -F' = ' '/^no_data_encryption =/{print $2; exit}')
+  NO_CLOUD_ERROR=""
+  if [ "$type" != crypt ]; then
+    NO_CLOUD_ERROR=not_crypt
+  elif [ "$fenc" = off ]; then
+    NO_CLOUD_ERROR=filename_encryption_off
+  else
+    case "$nodata" in ''|false|False|FALSE|0) ;; *) NO_CLOUD_ERROR=no_data_encryption ;; esac
+  fi
+  if [ -z "$NO_CLOUD_ERROR" ] && [ "$mode" = strict ]; then
+    case "$fenc" in ''|standard) ;; *) NO_CLOUD_ERROR=filename_encryption_not_standard ;; esac
+    case "$denc" in ''|true|True|TRUE|1) ;; *) NO_CLOUD_ERROR=directory_name_encryption_off ;; esac
+  fi
+  [ -z "$NO_CLOUD_ERROR" ]
 }
 
 # no_cloud_failure_detail: the content-blind diagnostic for a failed load.
@@ -252,7 +352,7 @@ no_cloud_main() {
     [ "$NO_CLOUD_ERROR" = invalid ] && return 2
     return 3
   fi
-  if ! no_cloud_patterns; then
+  if ! no_cloud_patterns "$(basename -- "$file")"; then
     printf 'classification=%s\n' "$NO_CLOUD_ERROR" >&2
     return 4
   fi

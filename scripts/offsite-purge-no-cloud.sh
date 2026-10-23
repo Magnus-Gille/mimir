@@ -121,9 +121,14 @@ plan_value() {
   awk -F= -v key="$1" '$1 == key { print substr($0, length(key) + 2); exit }' "$2" 2>/dev/null
 }
 
+no_cloud_rclone_env_check filters || fail preflight "reason=${NO_CLOUD_ERROR}"
 no_cloud_load "$CLASSIFICATION" || fail classification "$(no_cloud_failure_detail)"
 [ "$NO_CLOUD_SOURCE" = file ] || fail classification "reason=absent"
-no_cloud_patterns || fail classification "$(no_cloud_failure_detail)"
+# The nightly job keeps the classification file itself off the cloud while
+# folders are marked; earlier copies of it go with the purge.
+NO_CLOUD_MANIFEST=""
+case "$CLASSIFICATION" in "$SOURCE"/*) NO_CLOUD_MANIFEST="${CLASSIFICATION#"$SOURCE"/}" ;; esac
+no_cloud_patterns "$NO_CLOUD_MANIFEST" || fail classification "$(no_cloud_failure_detail)"
 MARKERS=${#NO_CLOUD_PATHS[@]}
 
 if [ "$MODE" = plan ] && [ "$MARKERS" -eq 0 ]; then
@@ -157,9 +162,7 @@ fi
 
 # ---- The remote must be the verified crypt remote ----
 CONF_SHOW=$("$RCLONE" config show "$REMOTE" 2>/dev/null || true)
-RTYPE=$(printf '%s\n' "$CONF_SHOW" | awk -F' = ' '/^type =/{print $2; exit}')
-FENC=$(printf '%s\n' "$CONF_SHOW" | awk -F' = ' '/^filename_encryption =/{print $2; exit}')
-if [ "$RTYPE" != crypt ] || [ "$FENC" = off ]; then
+if ! no_cloud_crypt_check "$CONF_SHOW" basic; then
   [ "$MODE" = plan ] || abandon "reason=remote"
   fail preflight "reason=remote"
 fi
@@ -196,10 +199,12 @@ $(printf '%s\n' "$legacy_dirs" | sort)
 EOF
 }
 
+# LISTING keeps path;size;modtime of every matching object, so the plan
+# approves this exact object set, not just its size.
 count_target() {
-  local listing
-  listing=$("$RCLONE" lsf -R --files-only "${REMOTE}:$1" "${FILTERS[@]}" 2>/dev/null) || return 1
-  COUNT=$(printf '%s' "$listing" | grep -c . || true)
+  LISTING=$("$RCLONE" lsf -R --files-only "${REMOTE}:$1" --format pst "${FILTERS[@]}" 2>/dev/null) || return 1
+  LISTING=$(printf '%s\n' "$LISTING" | sort)
+  COUNT=$(printf '%s' "$LISTING" | grep -c . || true)
 }
 
 # Count matching objects per target; ENTRIES holds "target<TAB>count" for the
@@ -207,6 +212,7 @@ count_target() {
 measure() {
   local target
   ENTRIES=()
+  MANIFESTS=()
   CURRENT_OBJECTS=0
   ARCHIVE_OBJECTS=0
   ARCHIVE_DIRS=0
@@ -215,6 +221,7 @@ measure() {
     count_target "$target" || return 1
     [ "$COUNT" -gt 0 ] || continue
     ENTRIES+=("${target}"$'\t'"${COUNT}")
+    MANIFESTS+=("$(printf '%s\n%s' "$target" "$LISTING" | sha256)") || return 1
     if [ "$target" = current ]; then
       CURRENT_OBJECTS=$COUNT
     else
@@ -225,12 +232,17 @@ measure() {
   TOTAL=$((CURRENT_OBJECTS + ARCHIVE_OBJECTS))
 }
 
-# The random nonce keeps the stored digest from confirming guessed client names.
+# The digest binds the approval to the markers, the remote's verified crypt
+# section (its backing path and keys, so a different destination with the same
+# name does not match) and every planned object's path, size and modtime. The
+# random nonce keeps the stored digest from confirming guessed client names.
 plan_digest() {
   {
-    printf 'mimir-no-cloud-purge v1\n%s\n%s\n' "$1" "$REMOTE"
+    printf 'mimir-no-cloud-purge v2\n%s\n%s\n' "$1" "$REMOTE"
+    printf 'config %s\n' "$(printf '%s' "$CONF_SHOW" | sha256)"
     printf 'pattern %s\n' "${NO_CLOUD_PATTERNS[@]}"
     printf 'target %s\n' ${ENTRIES[@]+"${ENTRIES[@]}"}
+    printf 'objects %s\n' ${MANIFESTS[@]+"${MANIFESTS[@]}"}
   } | sha256
 }
 
@@ -258,7 +270,7 @@ planned_targets=${#ENTRIES[@]}
 EOF
   event plan pass 0 "no_cloud_markers=${MARKERS} current_objects=${CURRENT_OBJECTS} archive_objects=${ARCHIVE_OBJECTS} archive_dirs=${ARCHIVE_DIRS} plan=${PLAN_ID} expires=$(utc_of $((CREATED + PLAN_TTL)))"
   printf '%s\n' "Nothing was deleted. To delete these ${TOTAL} objects from the cloud permanently, the owner runs:"
-  printf '  %s --execute %s\n' "$0" "$PLAN_ID"
+  printf '  offsite-purge-no-cloud.sh --execute %s\n' "$PLAN_ID"
   exit 0
 fi
 

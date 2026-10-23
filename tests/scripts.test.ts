@@ -1165,7 +1165,8 @@ paths:
       join(bin, "rclone"),
       `printf '%s\\n' "$*" >> "$RCLONE_CALLS"
 case "\${1:-}" in
-  config) printf 'type = crypt\\nfilename_encryption = standard\\n' ;;
+  config) printf 'type = crypt\\nfilename_encryption = standard\\n%b' "\${MOCK_CONF_EXTRA:-}" ;;
+  sync) [ -z "\${MOCK_ON_SYNC:-}" ] || printf '%b' "$MOCK_ON_SYNC" >> "$MOCK_CLASSIFICATION" ;;
   lsf)
     if [[ "$*" == *"--dirs-only"* ]]; then printf 'current/\\n'
     elif [ -n "\${MOCK_DEST_FILES:-}" ] && [[ "$*" == *"mimir-crypt:current"* ]]; then
@@ -1193,6 +1194,7 @@ esac
             RCLONE_BIN: join(bin, "rclone"),
             RCLONE_CALLS: calls,
             PANEL_CALLS: panel,
+            MOCK_CLASSIFICATION: join(source, "classification.yaml"),
             HEIMDALL_HUB_URL: "http://hub.invalid/panels",
             HEIMDALL_FLEET_TOKEN: "token",
             ...overrides,
@@ -1310,6 +1312,52 @@ esac
     expect(bogus.calls).toBe("");
   });
 
+  it("keeps the classification file off the cloud only while folders are marked", () => {
+    const marked = createNoCloudHarness(CLASSIFICATION).run();
+    expect(marked.result.status, marked.result.stderr).toBe(0);
+    for (const call of [...syncCalls(marked.calls), ...listCalls(marked.calls)]) {
+      expect(call).toContain("--exclude /classification.yaml --exclude /classification.yaml/**");
+    }
+
+    // The owner's current file has no markers: nothing about the run changes.
+    const unmarked = createNoCloudHarness("default: client-confidential\npaths:\n  mgc/internal/: internal\n").run();
+    expect(unmarked.result.status, unmarked.result.stderr).toBe(0);
+    expect(unmarked.log).toContain("no_cloud_markers=0 source=file no_cloud_unmatched=0");
+    expect(syncCalls(unmarked.calls)[0]).not.toContain("classification.yaml");
+    expect(syncCalls(unmarked.calls)[0]).toMatch(/--exclude \*\*\/\.git\/\*\* --use-json-log/);
+  });
+
+  it("fails loudly when a marker arrives while the sync runs, but not for other edits", () => {
+    const raced = createNoCloudHarness(CLASSIFICATION).run([], {
+      MOCK_ON_SYNC: "  mgc/customers/late-client/: {level: client-restricted, no-cloud: true}\\n",
+    });
+    expect(raced.result.status).toBe(1);
+    expect(raced.log).toContain("stage=classification state=fail exit=1 reason=changed_during_run");
+    expect(raced.log).not.toMatch(/stage=complete|late-client/);
+
+    const edited = createNoCloudHarness(CLASSIFICATION).run([], { MOCK_ON_SYNC: "  # reviewed\\n" });
+    expect(edited.result.status, edited.result.stderr).toBe(0);
+    expect(edited.log).toContain("stage=complete state=pass");
+  });
+
+  it("refuses rclone settings that would upload contents in clear or bypass the exclusions", () => {
+    const plaintext = createNoCloudHarness(CLASSIFICATION).run([], { MOCK_CONF_EXTRA: "no_data_encryption = true\\n" });
+    expect(plaintext.result.status).toBe(1);
+    expect(plaintext.log).toContain("stage=preflight state=fail exit=1");
+    expect(syncCalls(plaintext.calls)).toHaveLength(0);
+
+    for (const name of ["RCLONE_FILTER_FROM", "RCLONE_INCLUDE", "RCLONE_COPY_LINKS", "RCLONE_CRYPT_REMOTE", "RCLONE_CONFIG_MIMIR_CRYPT_REMOTE"]) {
+      const { result, calls, log } = createNoCloudHarness(CLASSIFICATION).run([], { [name]: "x" });
+      expect(result.status, name).toBe(1);
+      expect(log, name).toContain("stage=preflight state=fail exit=1 reason=rclone_env");
+      expect(calls, name).toBe("");
+    }
+
+    // Unrelated tuning stays allowed.
+    const tuned = createNoCloudHarness(CLASSIFICATION).run([], { RCLONE_TRANSFERS: "2" });
+    expect(tuned.result.status, tuned.result.stderr).toBe(0);
+  });
+
   it("still applies the delete-count gate while markers are active", () => {
     const harness = createNoCloudHarness(CLASSIFICATION);
     const { result, calls, log } = harness.run([], { MOCK_DEST_FILES: "40" });
@@ -1384,14 +1432,14 @@ filename_encryption = standard
     const second = run();
     expect(second.status, second.stderr).toBe(0);
     expect(second.stderr).toContain("no_cloud_markers=2 source=file no_cloud_unmatched=0");
+    // The classification file names the marked folders, so it stays local too.
     expect(remoteFiles()).toEqual([
-      "classification.yaml",
       "mgc/customers/secret-client/contract.pdf",
       "mgc/customers/Åkesson/nda.pdf",
       "mgc/internal/more.md",
       "mgc/internal/notes.md",
     ].sort());
-  });
+  }, 30_000);
 });
 
 describe("NAS deploy script", () => {
