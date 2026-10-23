@@ -128,6 +128,10 @@ target, or a bounded release mandate.
   acceptance pins in `~/.config/mimir-search/deploy-acceptance.json` (`0600`,
   schema `mimir-search-deploy-acceptance-v1`: `source_id`, `snapshot_id`, a
   known-hit query with its expected path and original SHA-256, and a no-hit query).
+- The ancestry check fetches `origin/main` into a scratch repository outside the
+  worktree, so neither a dry run nor a real run writes `FETCH_HEAD`, refs or objects
+  into the worktree's `.git`. The local deploy lock is a process-held `flock`
+  (via `perl`), released by the kernel when the script exits.
 - `--dry-run` builds the package twice (byte-identical or refuse), renders the
   five reader units, prints the plan and unit diff, and mutates nothing.
 - The mutating run stages the immutable `releases/<sha>/search.pyz`, journals the
@@ -137,9 +141,13 @@ target, or a bounded release mandate.
   unit and package integrity, the 401 denial, the single loopback listener and
   the semantic check. Only then does it update the client pin, run the client
   known-hit and no-hit queries (`~/.local/bin/mimir-search --tool`), and write the
-  marker last.
+  marker last. A lost reply to the marker write is reconciled by reading the marker
+  back; an unreadable state is reported as `unknown`, never `absent`. Re-running an
+  already-deployed release re-checks the server and both client queries before it
+  reports "already deployed and verified".
 - Exit codes: `0` deployed, already deployed, or rolled back; `2` usage; `3`
-  preflight failed with the target unchanged; `10` failed and rolled back with the
+  preflight failed with the target unchanged (a source change after the switch is a
+  post-mutation failure, handled by the rollback path); `10` failed and rolled back with the
   previous state proved; `11` failed with unknown or unrestored state, marker
   absent, journal path printed. `--no-auto-rollback` stops for diagnosis instead.
 - `--rollback --release <sha>` restores the state recorded in that deployment's

@@ -35,6 +35,7 @@ set -euo pipefail
 # xtrace must stay off so no expansion can echo a value.
 
 export PYTHONDONTWRITEBYTECODE=1
+export GIT_OPTIONAL_LOCKS=0
 umask 077
 
 UNIT_NAMES=(
@@ -738,8 +739,8 @@ release_locks() {
       printf 'WARNING: could not release the remote deploy lock on %s; it is a file under the reader state directory and may need manual removal.\n' "$HOST" >&2
     fi
   fi
-  if [ -n "$LOCAL_LOCK" ] && [ -f "$LOCAL_LOCK" ]; then
-    rm -f "${LOCAL_LOCK:?}"
+  if [ -n "$LOCAL_LOCK" ]; then
+    exec 9>&-
     LOCAL_LOCK=""
   fi
 }
@@ -800,23 +801,32 @@ trap 'on_signal HUP' HUP
 
 # ------------------------------------------------------ A1 source identity ----
 
-check_source() { # check_source <network:1|0>
-  local top head status tip fetched
-  top=$(git rev-parse --show-toplevel 2>/dev/null) || fail_pre "not inside a git worktree"
-  head=$(git rev-parse HEAD 2>/dev/null) || fail_pre "cannot resolve HEAD"
+# check_source <network:1|0> [failure-handler]. The handler defaults to fail_pre; the
+# final re-check after the switch passes fail_active so a changed tree is handled as
+# a post-mutation failure.
+check_source() {
+  local fail=${2:-fail_pre} top head status tip fetched
+  top=$(git rev-parse --show-toplevel 2>/dev/null) || "$fail" "not inside a git worktree"
+  head=$(git rev-parse HEAD 2>/dev/null) || "$fail" "cannot resolve HEAD"
   log "Expected source: $(pwd -P) @ $RELEASE"
   log "Actual source: $top @ $head"
-  [ "$(pwd -P)" = "$top" ] || fail_pre "run from the worktree root"
-  [ "$head" = "$RELEASE" ] || fail_pre "HEAD does not equal --release"
-  status=$(git status --porcelain=v1 --untracked-files=normal) || fail_pre "git status failed"
-  [ -z "$status" ] || fail_pre "worktree is not clean; commit or remove every change"
+  [ "$(pwd -P)" = "$top" ] || "$fail" "run from the worktree root"
+  [ "$head" = "$RELEASE" ] || "$fail" "HEAD does not equal --release"
+  status=$(git status --porcelain=v1 --untracked-files=normal) || "$fail" "git status failed"
+  [ -z "$status" ] || "$fail" "worktree is not clean; commit or remove every change"
   [ "$1" = 1 ] || return 0
   tip=$(git ls-remote origin refs/heads/main 2>/dev/null | awk '{ print $1 }') || tip=""
   is_hex "$tip" 40 || fail_pre "origin/main is unreachable; cannot prove the release is merged"
-  git fetch --quiet origin refs/heads/main 2>/dev/null || fail_pre "could not fetch origin/main"
-  fetched=$(git rev-parse FETCH_HEAD)
+  # Ancestry is proved in a scratch repository under $TMP so that neither a dry run
+  # nor a real run writes FETCH_HEAD, refs or objects into the worktree's .git. The
+  # release is present there only if it is part of origin/main's history.
+  git init --quiet --bare "$TMP/ancestry.git" || fail_pre "could not create the scratch repository"
+  git -C "$TMP/ancestry.git" fetch --quiet --no-tags "$(git config --get remote.origin.url)" refs/heads/main 2>/dev/null ||
+    fail_pre "could not fetch origin/main"
+  fetched=$(git -C "$TMP/ancestry.git" rev-parse FETCH_HEAD)
   [ "$fetched" = "$tip" ] || fail_pre "origin/main moved while it was being checked; retry"
-  git merge-base --is-ancestor "$RELEASE" "$tip" || fail_pre "--release is not reachable from origin/main"
+  git -C "$TMP/ancestry.git" merge-base --is-ancestor "$RELEASE" "$tip" 2>/dev/null ||
+    fail_pre "--release is not reachable from origin/main"
 }
 
 # ------------------------------------------------------------- acceptance ----
@@ -908,17 +918,21 @@ accept_client() { # accept_client <release> <package-sha>
 
 JOURNAL=$STATE_DIR/$RELEASE
 
+# The local lock is a process-held advisory lock (flock on an inherited descriptor).
+# The kernel drops it when this process exits, so there is no stale-lock recovery,
+# no pid file race and nothing to remove. perl ships with macOS and Linux and only
+# applies flock to descriptor 9; the lock lives on in the open file description.
 acquire_local_lock() {
-  local lock=$STATE_DIR/deploy.lock pid
+  local lock=$STATE_DIR/deploy.lock rc=0
+  command -v perl >/dev/null 2>&1 || fail_pre "perl is required for the local deploy lock"
   mkdir -p "$STATE_DIR"
   chmod 0700 "$STATE_DIR"
-  if ! ( set -C; printf '%s\n' "$$" >"$lock" ) 2>/dev/null; then
-    pid=$(cat "$lock" 2>/dev/null || true)
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-      fail_pre "another deploy holds $lock (pid $pid)"
-    fi
-    rm -f "${lock:?}"
-    ( set -C; printf '%s\n' "$$" >"$lock" ) 2>/dev/null || fail_pre "could not take the local deploy lock"
+  exec 9>>"$lock"
+  perl -e 'use Fcntl qw(:flock); open(my $fh, "<&=", 9) or exit 2; flock($fh, LOCK_EX | LOCK_NB) or exit 1;' || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    exec 9>&-
+    if [ "$rc" -eq 1 ]; then fail_pre "another deploy holds $lock"; fi
+    fail_pre "could not take the local deploy lock ($lock)"
   fi
   LOCAL_LOCK=$lock
 }
@@ -1119,12 +1133,18 @@ decide_previous() {
     jprev=""
     jstatus=""
   fi
-  if [ "$LIVE_RELEASE" = "$RELEASE" ]; then
+  if [ -n "$jprev" ] && [ "$terminal" = 0 ]; then
+    # An unfinished deployment's journal is authoritative: its snapshot of the
+    # original units, pin and marker is never replaced, even when a partial
+    # rollback left a mix of old and new units that already reference jprev.
+    [ "$LIVE_RELEASE" = "$RELEASE" ] || [ "$LIVE_RELEASE" = "$jprev" ] ||
+      fail_pre "live release $LIVE_RELEASE matches neither $RELEASE nor the journal's previous release; reconcile by hand"
+    load_journal_previous || fail_pre "the journal for $RELEASE is incomplete; reconcile by hand"
+    RESUME=1
+  elif [ "$LIVE_RELEASE" = "$RELEASE" ]; then
     [ -n "$jprev" ] || fail_pre "the reader already runs $RELEASE but no journal records its previous state; reconcile by hand"
     load_journal_previous || fail_pre "the journal for $RELEASE is incomplete; reconcile by hand"
     RESUME=1
-  elif [ -n "$jprev" ] && [ "$terminal" = 0 ] && [ "$LIVE_RELEASE" != "$jprev" ]; then
-    fail_pre "live release $LIVE_RELEASE matches neither $RELEASE nor the journal's previous release; reconcile by hand"
   else
     PREV_RELEASE=$LIVE_RELEASE
     PREV_PKG_SHA=$LIVE_PKG_SHA
@@ -1207,9 +1227,23 @@ remove_marker() { # 0 when the marker is confirmed absent
   return 1
 }
 
-write_marker() { # write_marker <40-hex>
-  rsh marker-write "$OP_MARKER_WRITE" "VALUE=$1" || return 1
-  [ "$(kv marker)" = "$1" ] && [ "$(kv bytes)" = 41 ]
+# write_marker <40-hex>: 0 only when the exact marker is confirmed on the target.
+# A lost ssh reply is reconciled by reading the marker back, never assumed.
+write_marker() {
+  if rsh marker-write "$OP_MARKER_WRITE" "VALUE=$1" && [ "$(kv marker)" = "$1" ] && [ "$(kv bytes)" = 41 ]; then
+    return 0
+  fi
+  rsh_ro marker-state "$OP_MARKER_STATE" && [ "$(kv marker)" = "$1" ]
+}
+
+# marker_report: describe the marker for the failure footer after write_marker failed.
+# A stray value is invalidated where possible; an unreadable state is "unknown".
+marker_report() {
+  if ! rsh_ro marker-state "$OP_MARKER_STATE"; then printf 'unknown'; return 0; fi
+  case "$(kv marker)" in
+    absent) printf 'absent';;
+    *) if remove_marker; then printf 'absent'; else printf 'unknown'; fi;;
+  esac
 }
 
 # ---------------------------------------------------------------- rollback ----
@@ -1342,7 +1376,10 @@ if [ "$LIVE_MARKER" = "$RELEASE" ]; then
   noop_ok=0
   if [ "$LIVE_RELEASE" = "$RELEASE" ] && [ "$PIN_REL" = "$RELEASE" ] && [ "$PIN_PKG" = "$PKG_SHA" ]; then
     if [ "$DRY_RUN" = 1 ]; then probe_mode='readonly'; else probe_mode=full; fi
-    if accept_server noop "$RELEASE" "$PKG_SHA" "$TMP/build-1/search.pyz" "$TMP/units-new.sha256" "$probe_mode"; then noop_ok=1; fi
+    if accept_server noop "$RELEASE" "$PKG_SHA" "$TMP/build-1/search.pyz" "$TMP/units-new.sha256" "$probe_mode" &&
+      accept_client "$RELEASE" "$PKG_SHA"; then
+      noop_ok=1
+    fi
   else
     err "drift: live release, pin or package differs from --release"
   fi
@@ -1455,11 +1492,12 @@ accept_client "$RELEASE" "$PKG_SHA" || fail_active "client acceptance failed"
 # ---- phase G ----------------------------------------------------------------
 PHASE=G
 log "==> G commit the marker"
-check_source 0
+check_source 0 fail_active
 write_marker "$RELEASE" || { sleep 1; write_marker "$RELEASE"; } || {
-  err "accepted but unmarked: $RELEASE passed every check but the marker could not be written; re-run the same command to finish (no rollback was performed)"
+  marker_state_text=$(marker_report)
+  err "accepted but unmarked: $RELEASE passed every check but the marker could not be confirmed (marker: $marker_state_text); re-run the same command to finish (no rollback was performed)"
   jset status accepted-unmarked
-  footer_failure "absent (accepted but unmarked)"
+  footer_failure "$marker_state_text (accepted but unmarked)"
   exit 11
 }
 COMMITTED=1
