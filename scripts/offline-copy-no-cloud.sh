@@ -128,8 +128,7 @@ if ! no_cloud_load "$CLASSIFICATION"; then
 fi
 [ "$NO_CLOUD_SOURCE" = file ] || fail_event classification 1 reason=absent
 # The classification file names the marked folders; it travels with them.
-NO_CLOUD_MANIFEST=""
-case "$CLASSIFICATION" in "$ROOT"/*) NO_CLOUD_MANIFEST="${CLASSIFICATION#"$ROOT"/}" ;; esac
+NO_CLOUD_MANIFEST=$(no_cloud_manifest_path "$ROOT" "$CLASSIFICATION")
 if ! no_cloud_patterns "$NO_CLOUD_MANIFEST"; then
   fail_event classification 1 "reason=${NO_CLOUD_ERROR:-unicode}"
 fi

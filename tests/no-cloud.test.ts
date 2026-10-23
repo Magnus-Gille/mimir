@@ -287,7 +287,13 @@ describe("offsite no-cloud purge", () => {
 printf '%s\\n' 'rclone-stderr-canary' >&2
 target_of() { local t="\${1#mimir-crypt:}"; printf '%s' "\${t//\\//__}"; }
 case "\${1:-}" in
-  config) printf 'type = crypt\\nfilename_encryption = standard\\n%b' "\${MOCK_CONF_EXTRA:-}" ;;
+  config)
+    if [ "$3" = storage ]; then
+      printf 'type = onedrive\\ndrive_id = %s\\ntoken = %s\\n' "\${MOCK_DRIVE:-drive-1}" "\${MOCK_TOKEN:-token-1}"
+    else
+      printf 'type = crypt\\nremote = storage:encrypted/mimir\\nfilename_encryption = standard\\n%b' "\${MOCK_CONF_EXTRA:-}"
+    fi
+    ;;
   lsf)
     if [ "$2" = --dirs-only ]; then
       case "$3" in
@@ -297,8 +303,17 @@ case "\${1:-}" in
       esac
       exit "\${MOCK_LSF_RC:-0}"
     fi
+    exit "\${MOCK_LSF_RC:-0}"
+    ;;
+  lsjson)
     t=$(target_of "$4"); n=$(cat "$MOCK_REMOTE/$t" 2>/dev/null || printf 0)
-    for ((i = 0; i < n; i++)); do printf 'mgc/customers/secret-client/file-%s%s\\n' "$i" "\${MOCK_OBJECT_TAG:-}"; done
+    printf '[\\n'
+    for ((i = 0; i < n; i++)); do
+      sep=,; [ "$i" -lt $((n - 1)) ] || sep=
+      printf '{"Path":"mgc/customers/secret-client/file-%s%s","Size":1,"ModTime":"2026-10-20T03:30:00%s+00:00","IsDir":false}%s\\n' \\
+        "$i" "\${MOCK_OBJECT_TAG:-}" "\${MOCK_MTIME_FRACTION:-.100}" "$sep"
+    done
+    printf ']\\n'
     exit "\${MOCK_LSF_RC:-0}"
     ;;
   delete)
@@ -346,7 +361,7 @@ esac
     );
     expect(deletes(calls)).toEqual([]);
     expect(calls).not.toMatch(/^rmdirs /m);
-    const lists = calls.split("\n").filter((line) => line.startsWith("lsf -R"));
+    const lists = calls.split("\n").filter((line) => line.startsWith("lsjson -R"));
     expect(lists.map((line) => line.split(" ")[3]).sort()).toEqual([
       "mimir-crypt:a0000AA", "mimir-crypt:a0000AB", "mimir-crypt:archive/2026-01-01T000000Z", "mimir-crypt:current",
     ]);
@@ -419,7 +434,10 @@ esac
 
   it.each([
     ["the remote now points elsewhere under the same name", { MOCK_CONF_EXTRA: "remote = other:place\\n" }],
-    ["an object was replaced without changing the count", { MOCK_OBJECT_TAG: ";replaced" }],
+    ["an object was replaced without changing the count", { MOCK_OBJECT_TAG: "-replaced" }],
+    ["an object was replaced within the same second", { MOCK_MTIME_FRACTION: ".900" }],
+    ["the underlying remote now points at another drive", { MOCK_DRIVE: "drive-2" }],
+    ["an environment setting redirects the backend", { RCLONE_ONEDRIVE_DRIVE_ID: "drive-2" }],
   ])("refuses to execute when %s", (_name, overrides) => {
     const harness = createPurgeHarness({ current: 3 });
     const id = harness.planId(harness.run().result.stderr);
@@ -428,6 +446,23 @@ esac
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("stage=execute state=fail exit=1 reason=plan_mismatch");
     expect(deletes(calls)).toEqual([]);
+  });
+
+  it("still executes after the provider token was refreshed", () => {
+    const harness = createPurgeHarness({ current: 3 });
+    const id = harness.planId(harness.run().result.stderr);
+    const { result } = harness.run(["--execute", id], { MOCK_TOKEN: "token-2" });
+    expect(result.status, result.stderr).toBe(0);
+  });
+
+  it("purges an equivalent spelling of the in-archive classification path", () => {
+    const harness = createPurgeHarness({ current: 3 });
+    mkdirSync(join(harness.source, "sub"));
+    const { result, calls } = harness.run([], {
+      MIMIR_OFFSITE_CLASSIFICATION: `${harness.source}/./sub/../classification.yaml`,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(calls).toContain("--filter + /classification.yaml --filter + /classification.yaml/** --filter - **");
   });
 
   it("refuses a remote that does not encrypt contents or that the environment overrides", () => {
@@ -503,7 +538,7 @@ esac
     const zero = unmarked.run();
     expect(zero.result.status).toBe(0);
     expect(zero.result.stderr).toContain("no_cloud_markers=0");
-    expect(zero.calls).not.toMatch(/^lsf -R/m);
+    expect(zero.calls).not.toMatch(/^lsjson -R/m);
   });
 
   it.each([

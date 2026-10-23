@@ -1327,6 +1327,26 @@ esac
     expect(syncCalls(unmarked.calls)[0]).toMatch(/--exclude \*\*\/\.git\/\*\* --use-json-log/);
   });
 
+  it("keeps an equivalent spelling of the in-archive classification path off the cloud", () => {
+    const harness = createNoCloudHarness(CLASSIFICATION);
+    mkdirSync(join(harness.source, "sub"));
+    const { result, calls } = harness.run([], {
+      MIMIR_OFFSITE_CLASSIFICATION: `${harness.source}/./sub/../classification.yaml`,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(syncCalls(calls)[0]).toContain("--exclude /classification.yaml --exclude /classification.yaml/**");
+  });
+
+  it.skipIf(process.getuid?.() === 0)("never prints the classification path when it cannot be read", () => {
+    const harness = createNoCloudHarness(CLASSIFICATION);
+    chmodSync(join(harness.source, "classification.yaml"), 0o000);
+    const { result, log } = harness.run();
+    expect(result.status).toBe(1);
+    expect(log).toContain("stage=classification state=fail exit=1 reason=unreadable");
+    expect(`${result.stdout}\n${result.stderr}`).not.toContain(harness.source);
+    expect(`${result.stdout}\n${result.stderr}`).not.toContain("classification.yaml");
+  });
+
   it("fails loudly when a marker arrives while the sync runs, but not for other edits", () => {
     const raced = createNoCloudHarness(CLASSIFICATION).run([], {
       MOCK_ON_SYNC: "  mgc/customers/late-client/: {level: client-restricted, no-cloud: true}\\n",

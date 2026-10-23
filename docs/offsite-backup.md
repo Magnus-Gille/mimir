@@ -412,11 +412,13 @@ scripts/offsite-purge-no-cloud.sh --execute <id>   # the owner's approval of tha
   `$MIMIR_OFFSITE_STATE_DIR/offsite-private/no-cloud-purge/plan-<id>` (mode `0600`).
   The plan stores counts and a digest salted with a random nonce, never paths.
 - **Execute** claims the plan, recounts, and refuses (`reason=plan_mismatch`) when
-  the markers, the remote's crypt section (its backing path and keys, so the same
-  remote name pointing elsewhere does not match) or the planned objects (path, size
-  and modification time of each) changed since the plan; an expired, unknown or
-  reused plan is refused too. The same `rclone_env` and crypt checks as the nightly
-  job apply. Each `rclone delete` is confined
+  anything it approved changed since the plan: the markers; the destination (every
+  config section down the `remote = name:path` chain, minus rotating OAuth tokens,
+  and every `RCLONE_*` environment setting), so the same remote name pointing
+  elsewhere does not match; or the planned objects (path, size and full-precision
+  modification time of each). An expired, unknown or reused plan is refused too. The
+  same `rclone_env` and crypt checks as the nightly job apply. Run plan and execute
+  with the same environment. Each `rclone delete` is confined
   to the marked folders by filters and capped by `--max-delete` at the planned
   count, then empty marked directories are removed with `rmdirs`. It then counts
   again and writes `receipt-<id>` (mode `0600`): plan id, plan and execution times,
@@ -426,7 +428,8 @@ scripts/offsite-purge-no-cloud.sh --execute <id>   # the owner's approval of tha
 - **Provider recycle bin**: most providers keep deleted files for a while (OneDrive:
   the recycle bin, plus the second-stage bin on business accounts). Empty it in the
   provider's UI to finish. On OneDrive for Business/SharePoint,
-  `RCLONE_ONEDRIVE_HARD_DELETE=true` before `--execute` deletes permanently instead.
+  `RCLONE_ONEDRIVE_HARD_DELETE=true` for both the plan and `--execute` deletes
+  permanently instead (the environment is part of the approval).
   Record the step next to the receipt.
 
 Agents never run `--execute`; it permanently deletes cloud data and needs the

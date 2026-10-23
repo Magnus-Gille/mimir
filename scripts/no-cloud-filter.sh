@@ -149,7 +149,8 @@ no_cloud_load() {
     NO_CLOUD_ERROR=unreadable
     return 1
   fi
-  output=$(LC_ALL=C awk "$NO_CLOUD_AWK" < "$file" 2>/dev/null) || status=$?
+  # stderr goes first so a failed open of the file cannot print its path.
+  output=$(LC_ALL=C awk "$NO_CLOUD_AWK" 2>/dev/null < "$file") || status=$?
   while IFS= read -r record; do
     case "$record" in
       OK) complete=1 ;;
@@ -268,6 +269,27 @@ EOF
   fi
 }
 
+# no_cloud_manifest_path ROOT FILE: FILE's path relative to the archive ROOT
+# when it lies inside it, after resolving symlinks and `.`/`..` on both sides
+# (a lexical prefix would let `ROOT/./classification.yaml` escape the rule).
+# Prints nothing when FILE is outside ROOT or either cannot be resolved.
+no_cloud_manifest_path() {
+  local root="$1" file="$2" root_real dir_real base
+  base="${file##*/}"
+  case "$base" in ''|.|..) return 0 ;; esac
+  root_real=$(cd -- "$root" 2>/dev/null && pwd -P) || return 0
+  dir_real=$(cd -- "$(dirname -- "$file")" 2>/dev/null && pwd -P) || return 0
+  case "$dir_real/" in
+    "$root_real"/*) ;;
+    *) return 0 ;;
+  esac
+  if [ "$dir_real" = "$root_real" ]; then
+    printf '%s' "$base"
+  else
+    printf '%s/%s' "${dir_real#"$root_real"/}" "$base"
+  fi
+}
+
 # no_cloud_fingerprint FILE: a checksum of the classification file (or
 # "absent"/"unreadable"), so a run can tell whether it changed under it.
 no_cloud_fingerprint() {
@@ -277,7 +299,7 @@ no_cloud_fingerprint() {
   elif [ -L "$file" ] || [ ! -f "$file" ]; then
     printf unreadable
   else
-    cksum < "$file" 2>/dev/null || printf unreadable
+    cksum 2>/dev/null < "$file" || printf unreadable
   fi
 }
 

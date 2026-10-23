@@ -284,8 +284,7 @@ if [ "$NO_CLOUD_SOURCE" = absent ] && [ "$CLASSIFICATION_REQUIRED" = 1 ]; then
 fi
 # While folders are marked, the classification file names them: keep it off
 # the cloud too when it lives in the archive.
-NO_CLOUD_MANIFEST=""
-case "$CLASSIFICATION" in "$SOURCE"/*) NO_CLOUD_MANIFEST="${CLASSIFICATION#"$SOURCE"/}" ;; esac
+NO_CLOUD_MANIFEST=$(no_cloud_manifest_path "$SOURCE" "$CLASSIFICATION")
 no_cloud_patterns "$NO_CLOUD_MANIFEST" || fail_event classification 1 "$(no_cloud_failure_detail)"
 NO_CLOUD_UNMATCHED=0
 for no_cloud_path in ${NO_CLOUD_PATHS[@]+"${NO_CLOUD_PATHS[@]}"}; do

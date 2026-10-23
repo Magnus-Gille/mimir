@@ -126,8 +126,7 @@ no_cloud_load "$CLASSIFICATION" || fail classification "$(no_cloud_failure_detai
 [ "$NO_CLOUD_SOURCE" = file ] || fail classification "reason=absent"
 # The nightly job keeps the classification file itself off the cloud while
 # folders are marked; earlier copies of it go with the purge.
-NO_CLOUD_MANIFEST=""
-case "$CLASSIFICATION" in "$SOURCE"/*) NO_CLOUD_MANIFEST="${CLASSIFICATION#"$SOURCE"/}" ;; esac
+NO_CLOUD_MANIFEST=$(no_cloud_manifest_path "$SOURCE" "$CLASSIFICATION")
 no_cloud_patterns "$NO_CLOUD_MANIFEST" || fail classification "$(no_cloud_failure_detail)"
 MARKERS=${#NO_CLOUD_PATHS[@]}
 
@@ -199,12 +198,33 @@ $(printf '%s\n' "$legacy_dirs" | sort)
 EOF
 }
 
-# LISTING keeps path;size;modtime of every matching object, so the plan
-# approves this exact object set, not just its size.
+# LISTING keeps one canonical JSON record per matching object (path, size and
+# full-precision modtime), so the plan approves this exact object set.
 count_target() {
-  LISTING=$("$RCLONE" lsf -R --files-only "${REMOTE}:$1" --format pst "${FILTERS[@]}" 2>/dev/null) || return 1
-  LISTING=$(printf '%s\n' "$LISTING" | sort)
+  LISTING=$("$RCLONE" lsjson -R --files-only "${REMOTE}:$1" "${FILTERS[@]}" 2>/dev/null) || return 1
+  LISTING=$(printf '%s\n' "$LISTING" | sed -n 's/^\({.*}\),\{0,1\}$/\1/p' | sort)
   COUNT=$(printf '%s' "$LISTING" | grep -c . || true)
+}
+
+# The destination is more than the crypt section: follow `remote = name:path`
+# through wrapping remotes (crypt, alias, ...) and bind every section on the way,
+# minus the OAuth tokens that rotate on use, plus every RCLONE_* setting (rclone
+# reads options such as RCLONE_ONEDRIVE_DRIVE_ID from the environment).
+destination_identity() {
+  local name="$REMOTE" section next depth
+  for depth in 1 2 3 4 5 6 7 8; do
+    section=$("$RCLONE" config show "$name" 2>/dev/null) || return 1
+    [ -n "$section" ] || return 1
+    printf 'section %s %s\n' "$depth" "$name"
+    printf '%s\n' "$section" | grep -v -E '^[a-z_]*token = ' || true
+    next=$(printf '%s\n' "$section" | awk -F' = ' '/^remote = /{print substr($0, 10); exit}')
+    case "$next" in
+      [A-Za-z0-9_]*:*) name="${next%%:*}" ;;
+      *) break ;;
+    esac
+  done
+  printf 'environment\n'
+  env | grep -E '^RCLONE_' | grep -v -E '^RCLONE_(CONFIG_PASS|PASSWORD_COMMAND)=' | sort || true
 }
 
 # Count matching objects per target; ENTRIES holds "target<TAB>count" for the
@@ -232,19 +252,26 @@ measure() {
   TOTAL=$((CURRENT_OBJECTS + ARCHIVE_OBJECTS))
 }
 
-# The digest binds the approval to the markers, the remote's verified crypt
-# section (its backing path and keys, so a different destination with the same
-# name does not match) and every planned object's path, size and modtime. The
+# The digest binds the approval to the markers, the destination identity (every
+# config section down the remote chain and the RCLONE_* environment, so the
+# same remote name pointing elsewhere does not match) and every planned
+# object's path, size and full-precision modtime. The
 # random nonce keeps the stored digest from confirming guessed client names.
 plan_digest() {
   {
     printf 'mimir-no-cloud-purge v2\n%s\n%s\n' "$1" "$REMOTE"
-    printf 'config %s\n' "$(printf '%s' "$CONF_SHOW" | sha256)"
+    printf 'destination %s\n' "$DESTINATION"
     printf 'pattern %s\n' "${NO_CLOUD_PATTERNS[@]}"
     printf 'target %s\n' ${ENTRIES[@]+"${ENTRIES[@]}"}
     printf 'objects %s\n' ${MANIFESTS[@]+"${MANIFESTS[@]}"}
   } | sha256
 }
+
+DESTINATION=$(destination_identity | sha256) || {
+  [ "$MODE" = plan ] || abandon "reason=remote"
+  fail preflight "reason=remote"
+}
+[ "${#DESTINATION}" -eq 64 ] || { [ "$MODE" = plan ] || abandon "reason=remote"; fail preflight "reason=remote"; }
 
 if [ "$MODE" = plan ]; then
   measure || fail plan "reason=list"
