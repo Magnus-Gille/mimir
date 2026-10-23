@@ -9,6 +9,9 @@ printf '%s\n' "$*" >>"$FAKE_LOG/ssh-argv.log"
 printf '%s\n' "$op" >>"$FAKE_LOG/ops.log"
 printf '=== %s\n%s\n' "$op" "$script" >>"$FAKE_LOG/ssh-scripts.log"
 if [ "$op" = "${FAKE_SLEEP_OP:-}" ] && [ "$(bump sleep)" = 1 ]; then sleep "${FAKE_SLEEP_SECONDS:-3}"; fi
+if [ "$op" = "${FAKE_DIRTY_AT_OP:-}" ] && [ "$(bump dirty)" = 1 ]; then
+  echo stray >"$FAKE_REPO/stray.txt"
+fi
 if hit transport "${FAKE_TRANSPORT_FAIL_OPS:-}" "$op"; then
   echo "ssh: connect to host failed" >&2
   exit 255

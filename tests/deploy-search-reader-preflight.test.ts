@@ -1,5 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { spawn, spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import {
   MUTATING_OPS,
@@ -113,14 +114,50 @@ describe.skipIf(!hasTools)("deploy-search-reader.sh preflight", () => {
       expectNoMutation(fx, opsOf(fx).filter((op) => op !== "lock-acquire"));
     }, T);
 
-    it("refuses when the local deploy lock is held by a live process", () => {
+    const hasPerl = spawnSync("perl", ["-e", "1"]).status === 0;
+    const HOLDER = 'use Fcntl ":flock"; open(F, ">>", $ARGV[0]) or exit 2; flock(F, LOCK_EX|LOCK_NB) or exit 1; $| = 1; print "held\\n"; sleep 120;';
+
+    it.skipIf(!hasPerl)("refuses while another process holds the local deploy lock, even with an empty lock file", async () => {
       const fx = fixture();
       mkdirSync(fx.state, { mode: 0o700 });
-      writeFileSync(join(fx.state, "deploy.lock"), `${process.pid}\n`);
-      const result = fx.deploy();
-      expect(result.status).toBe(3);
-      expect(result.stderr).toContain("another deploy holds");
-      expect(opsOf(fx)).toEqual([]);
+      const lock = join(fx.state, "deploy.lock");
+      writeFileSync(lock, "");
+      const holder = spawn("perl", ["-e", HOLDER, lock], { stdio: ["ignore", "pipe", "ignore"] });
+      try {
+        await new Promise<void>((done) => holder.stdout.once("data", () => done()));
+        const result = fx.deploy();
+        expect(result.status, result.stdout + result.stderr).toBe(3);
+        expect(result.stderr).toContain("another deploy holds");
+        expect(opsOf(fx)).toEqual([]);
+        expect(existsSync(lock)).toBe(true);
+      } finally {
+        holder.kill("SIGKILL");
+      }
+    }, T);
+
+    it.skipIf(!hasPerl)("takes over a lock file left behind by a process that is gone", () => {
+      const fx = fixture();
+      mkdirSync(fx.state, { mode: 0o700 });
+      writeFileSync(join(fx.state, "deploy.lock"), "999999\n");
+      expect(fx.deploy(["--no-auto-rollback"]).status).toBe(0);
+    }, T);
+
+    it.skipIf(!hasPerl)("lets exactly one of several concurrent deploys proceed", async () => {
+      const fixtures = [fixture(), fixture(), fixture(), fixture()];
+      const shared = fixtures[0].state;
+      const runs = fixtures.map((fx) => {
+        const args = fx.args();
+        args[args.indexOf("--state-dir") + 1] = shared;
+        const child = spawn("bash", [SCRIPT, ...args], {
+          cwd: fx.repo, env: { PATH: process.env.PATH ?? "", ...fx.env, FAKE_SLEEP_OP: "identity", FAKE_SLEEP_SECONDS: "4" }, stdio: ["ignore", "ignore", "pipe"],
+        });
+        let stderr = "";
+        child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+        return new Promise<{ code: number | null; stderr: string }>((done) => child.on("exit", (code) => done({ code, stderr })));
+      });
+      const results = await Promise.all(runs);
+      expect(results.map((r) => r.code).sort()).toEqual([0, 3, 3, 3]);
+      for (const r of results.filter((x) => x.code === 3)) expect(r.stderr).toContain("another deploy holds");
     }, T);
 
     it("refuses when a unit is not installed (first install is out of scope)", () => {
@@ -258,6 +295,15 @@ describe.skipIf(!hasTools)("deploy-search-reader.sh preflight", () => {
       expect(existsSync(fx.state)).toBe(false);
       expect(readdirSync(join(fx.root, "tmp"))).toEqual([]);
       expect(markerOf(fx)).toBe(fx.prev);
+    }, T);
+
+    it("leaves the local .git untouched: no FETCH_HEAD, refs or objects are written", () => {
+      const fx = fixture();
+      const before = snapshotTree(join(fx.repo, ".git"));
+      const result = fx.deploy(["--dry-run"]);
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      expect(existsSync(join(fx.repo, ".git/FETCH_HEAD"))).toBe(false);
+      expect(snapshotTree(join(fx.repo, ".git"))).toEqual(before);
     }, T);
 
     it("also refuses a dirty tree", () => {

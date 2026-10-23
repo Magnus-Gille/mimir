@@ -84,7 +84,6 @@ describe.skipIf(!hasTools)("deploy-search-reader.sh deploy", () => {
       expect(journalStatus(fx)).toBe("deployed");
       for (const file of walkFiles(journal)) expect(mode(file)).toBe(0o600);
       expect(existsSync(join(fx.rhome, ".local/state/mimir-search-deploy.lock"))).toBe(false);
-      expect(existsSync(join(fx.state, "deploy.lock"))).toBe(false);
       const receipt = JSON.parse(readFileSync(join(fx.rhome, ".local/share/mimir-search/.deployed-receipt.json"), "utf8"));
       expect(receipt.release).toBe(fx.release);
       expect(receipt.previous_release).toBe(fx.prev);
@@ -115,12 +114,22 @@ describe.skipIf(!hasTools)("deploy-search-reader.sh deploy", () => {
       const second = fx.deploy();
       expect(second.status, second.stderr).toBe(0);
       expect(second.stdout).toContain("already deployed and verified");
+      // Deploy ran the client twice; the no-op verification runs known-hit and no-hit again.
+      expect((readIf(join(fx.log, "client.log")) ?? "").trim().split("\n")).toHaveLength(4);
       const ops = opsOf(fx);
       for (const forbidden of ["marker-remove", "stop-units", "install-units", "stage-commit", "marker-write", "activate"]) {
         expect(ops).not.toContain(forbidden);
       }
       expect(snapshotTree(fx.rhome)).toEqual(before);
       expect(readFileSync(fx.pin, "utf8")).toBe(pinBefore);
+    }, T);
+
+    it("does not report already-deployed when the client queries fail", () => {
+      const fx = fixture();
+      expect(fx.deploy().status).toBe(0);
+      const second = fx.deploy([], { FAKE_CLIENT_FAIL_FIRST: "100" });
+      expect(second.status).not.toBe(0);
+      expect(second.stdout).not.toContain("already deployed and verified");
     }, T);
 
     it("redeploys when the marker is current but live state drifted", () => {

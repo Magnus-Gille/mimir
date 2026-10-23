@@ -212,6 +212,55 @@ describe.skipIf(!hasTools)("deploy-search-reader.sh failure handling", () => {
       expect(existsSync(join(fx.rhome, ".local/state/mimir-search-deploy.lock"))).toBe(false);
     }, T);
 
+    it("a rollback that stopped mid-restore never replaces the original snapshot on retry", () => {
+      const fx = fixture();
+      const originalUnits = unitsOf(fx);
+      const originalPin = readFileSync(fx.pin, "utf8");
+      // The deploy installs five units (cp 1-5), then the rollback restores the main
+      // service (cp 6) and dies before the helper units (cp 7).
+      const first = fx.deploy([], { FAKE_FAIL_OPS: "refresh-start:1", FAKE_CP_FAIL_FROM: "7", FAKE_CP_FAIL_COUNT: "1" });
+      expect(first.status, first.stdout + first.stderr).toBe(11);
+      const mixed = unitsOf(fx);
+      expect(mixed["mimir-search.service"]).toBe(originalUnits["mimir-search.service"]);
+      expect(mixed["mimir-search-refresh.service"]).not.toBe(originalUnits["mimir-search-refresh.service"]);
+      // The retry fails after switching again; its rollback must reach the original units.
+      const second = fx.deploy([], { FAKE_FAIL_OPS: "activate:1" });
+      expect(second.status, second.stdout + second.stderr).toBe(10);
+      expectOriginalState(fx, originalUnits, originalPin);
+      expect(readFileSync(join(journalDir(fx), "previous.env"), "utf8")).toContain(`prev_release=${fx.prev}`);
+    }, T);
+
+    it("a source change after acceptance is a post-mutation failure: rolled back with exit 10", () => {
+      const fx = fixture();
+      const originalUnits = unitsOf(fx);
+      const originalPin = readFileSync(fx.pin, "utf8");
+      const result = fx.deploy([], { FAKE_DIRTY_AT_OP: "semantic-run" });
+      expect(result.status, result.stdout + result.stderr).toBe(10);
+      expect(result.stderr).toContain("not clean");
+      expectOriginalState(fx, originalUnits, originalPin);
+      expect(journalStatus(fx)).toBe("rolled-back");
+    }, T);
+
+    it("a marker write whose reply is lost is reconciled by read-back, not reported as absent", () => {
+      const fx = fixture();
+      const result = fx.deploy([], { FAKE_INDETERMINATE_OPS: "marker-write" });
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      expect(markerOf(fx)).toBe(fx.release);
+      expect(opsOf(fx).filter((op) => op === "marker-write")).toHaveLength(1);
+      expect(journalStatus(fx)).toBe("deployed");
+    }, T);
+
+    it("an unresolved marker state after a lost write reply is reported as unknown, never absent", () => {
+      const fx = fixture();
+      // marker-state answers during preflight (two reads) and then never again.
+      const result = fx.deploy([], { FAKE_INDETERMINATE_OPS: "marker-write", FAKE_FAIL_OPS: "marker-state@2" });
+      expect(result.status, result.stdout + result.stderr).toBe(11);
+      expect(result.stderr).toContain("Marker: unknown");
+      expect(result.stderr).not.toContain("Marker: absent");
+      expect(journalStatus(fx)).toBe("accepted-unmarked");
+      expect(releaseOfUnits(fx)).toBe(fx.release);
+    }, T);
+
     it("retries the marker write once", () => {
       const fx = fixture();
       const result = fx.deploy([], { FAKE_FAIL_OPS: "marker-write:1" });
