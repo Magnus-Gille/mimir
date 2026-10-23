@@ -1,0 +1,43 @@
+#!/bin/bash
+# Fake Mimir search client launcher: `fake-client --tool --config <pin>` with the
+# request JSON on stdin. Like the real client it refuses a pin that does not match
+# the serving release.
+. "$FAKE_FIXTURES/fake-common.sh"
+printf '%s\n' "$*" >>"$FAKE_LOG/client.log"
+config=""
+while [ $# -gt 0 ]; do
+  case "$1" in --config) config=$2; shift;; esac
+  shift
+done
+request=$(cat)
+n=$(bump client)
+if [ "$n" -le "${FAKE_CLIENT_WRONG_PATH_FIRST:-0}" ]; then export FAKE_CLIENT_WRONG_PATH=1; fi
+if [ "$n" -le "${FAKE_CLIENT_RESULTS_ON_NOHIT_FIRST:-0}" ]; then export FAKE_CLIENT_RESULTS_ON_NOHIT=1; fi
+if [ -n "${FAKE_CLIENT_FAIL_FIRST:-}" ] && [ "$n" -le "$FAKE_CLIENT_FAIL_FIRST" ]; then
+  echo '{"schema":"mimir-artifact-search-v1","status":"unavailable","error":{"code":"transport_failed"}}'
+  exit 1
+fi
+REQ="$request" python3 -I - "$config" <<'PYEOF'
+import hashlib, json, os, re, sys
+pin = json.load(open(sys.argv[1]))
+request = json.loads(os.environ['REQ'])
+home = os.environ['FAKE_RHOME']
+unit = open(home + '/.config/systemd/user/mimir-search.service').read()
+release = re.search(r'^Environment=MIMIR_SEARCH_RELEASE=(.*)$', unit, re.M).group(1)
+package = hashlib.sha256(open(home + '/.local/share/mimir-search/releases/%s/search.pyz' % release, 'rb').read()).hexdigest()
+if pin['release'] != release or pin['package_sha256'] != package:
+    print(json.dumps({'schema': 'mimir-artifact-search-v1', 'status': 'unavailable', 'error': {'code': 'provenance_mismatch'}}))
+    sys.exit(1)
+hit = request['query'] == os.environ['FAKE_HIT_QUERY']
+results = []
+if hit:
+    sha = os.environ['FAKE_EXPECTED_SHA']
+    path = os.environ['FAKE_EXPECTED_PATH']
+    if os.environ.get('FAKE_CLIENT_WRONG_PATH'):
+        path = 'other/' + path
+    results = [{'path': path, 'sha256': sha, 'verification': 'original_sha256_matched'}]
+if not hit and os.environ.get('FAKE_CLIENT_RESULTS_ON_NOHIT'):
+    results = [{'path': 'x.pdf', 'sha256': '1' * 64, 'verification': 'original_sha256_matched'}]
+evidence = {'release': release, 'package_sha256': package, 'results': results, 'abstained': not results}
+print(json.dumps({'schema': 'mimir-artifact-search-v1', 'status': 'ok' if results else 'no_results', 'evidence': evidence}))
+PYEOF

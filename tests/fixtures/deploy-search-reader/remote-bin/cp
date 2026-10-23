@@ -1,0 +1,17 @@
+#!/bin/bash
+# Fake remote cp: fails selected copies into "*.new.*" temp names (the unit
+# installer) so a test can stop an installation after the first unit.
+# FAKE_CP_FAIL_FROM=N FAKE_CP_FAIL_COUNT=K fails the K calls numbered N and after.
+. "$FAKE_FIXTURES/fake-common.sh"
+dest=${!#}
+case "$dest" in
+  *.new.*)
+    if [ -n "${FAKE_CP_FAIL_FROM:-}" ]; then
+      n=$(bump cpnew)
+      if [ "$n" -ge "$FAKE_CP_FAIL_FROM" ] && [ "$n" -lt $((FAKE_CP_FAIL_FROM + ${FAKE_CP_FAIL_COUNT:-1})) ]; then
+        echo "cp: failure injected" >&2
+        exit 1
+      fi
+    fi;;
+esac
+exec /bin/cp "$@"

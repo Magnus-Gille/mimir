@@ -1,0 +1,33 @@
+#!/bin/bash
+# Remote probe interpreter: invoked as `fake-rpython -c <code> <mode> [args]`.
+. "$FAKE_FIXTURES/fake-common.sh"
+mode=$3
+case "$mode" in
+  port) echo open;;
+  unauth) seq_next unauth "${FAKE_UNAUTH_SEQ:-401}";;
+  receipts)
+    variant=$(seq_next receipts "${FAKE_RECEIPT_SEQ:-ok}")
+    python3 -I - "$variant" <<'PYEOF'
+import hashlib, json, os, re, sys, time
+variant = sys.argv[1]
+home = os.environ['HOME']
+# Mimic the real probe: it must be able to read the credential, never to print it.
+if 'MIMIR_SEARCH_API_KEY=' not in open(home + '/.config/mimir-search/runtime.env').read():
+    sys.exit('credential unavailable')
+unit = open(home + '/.config/systemd/user/mimir-search.service').read()
+release = re.search(r'^Environment=MIMIR_SEARCH_RELEASE=(.*)$', unit, re.M).group(1)
+package = hashlib.sha256(open(home + '/.local/share/mimir-search/releases/%s/search.pyz' % release, 'rb').read()).hexdigest()
+now = int(time.time())
+observed, expires = now - 10, now + 600
+common = {'release': release, 'package_sha256': package, 'snapshot_id': os.environ['FAKE_SNAPSHOT_ID'],
+          'source_id': os.environ['FAKE_SOURCE_ID'], 'observed_at': observed, 'expires_at': expires}
+if variant == 'wrongpkg':
+    common['package_sha256'] = '0' * 64
+health = dict(common, ready=True, status='ready', fresh=True)
+verified = now - 120 if variant == 'stale' else now
+retrieval = dict(common, verified_at=verified, results=[{'verification': 'original_sha256_matched', 'sha256': os.environ['FAKE_EXPECTED_SHA']}])
+print(json.dumps({'health_status': 200, 'health': health, 'retrieval_status': 200, 'retrieval': retrieval}))
+PYEOF
+    ;;
+  *) echo "unknown mode" >&2; exit 1;;
+esac
