@@ -850,7 +850,8 @@ describe.each(SYNC_SCRIPTS)("%s cache excludes", (script) => {
     const deletions = dry.stdout.split("\n").filter(line => line.startsWith("*deleting"));
     // Only the stale real file counts toward the delete gate; the cache
     // entries already on the NAS are protected, not deleted.
-    expect(deletions).toEqual(["*deleting gone.md"]);
+    // GNU rsync pads the itemize field with spaces; openrsync does not.
+    expect(deletions.map(line => line.replace(/^\*deleting\s+/, "*deleting "))).toEqual(["*deleting gone.md"]);
     expect(dry.stdout).not.toMatch(cacheLike);
 
     const real = spawnSync("rsync", ["-a", "--delete", ...filters, `${sender}/`, `${receiver}/`], { encoding: "utf8" });
@@ -964,8 +965,10 @@ describe.each(SYNC_SCRIPTS)("%s cache excludes", (script) => {
       expect(existsSync(join(run.receiver, "p1", "node_modules", "f"))).toBe(true);
     });
 
-    it("honours a cross-directory ** pattern exactly as rsync does", () => {
-      // a**b/*** protects a/x/b and everything below it; a and a/x are retained.
+    it("derives numerator and denominator from the same rsync for a cross-directory ** pattern", () => {
+      // a**b/*** is meant to protect a/x/b and everything below it. GNU rsync
+      // and openrsync differ in the details, so assert the invariant that holds
+      // for either: the gate's counts equal what that binary itself reports.
       const run = realMirror({ MIMIR_SYNC_EXTRA_EXCLUDES: "a**b/***", MIMIR_SYNC_MAX_DELETE_PCT: "20" }, (sender, rx) => {
         writeFileSync(join(sender, "plain.md"), "p");
         writeFileSync(join(rx, "plain.md"), "p");
@@ -974,11 +977,34 @@ describe.each(SYNC_SCRIPTS)("%s cache excludes", (script) => {
         writeFileSync(join(rx, "a", "x", "b", "f"), "protected");
         writeFileSync(join(rx, "a", "x", "b", "deep", "g"), "protected");
       });
-      // From an empty source rsync could delete plain.md and stale.md (a and a/x
-      // are retained ancestors); the real dry run deletes only stale.md.
-      expect(run.result.status).toBe(1);
-      expect(output(run)).toContain("1/2 remote entries (50%");
+      const dry = mirrorLines(run.invocations).find(line => line.includes("-ani --delete"))!;
+      const filters = [...dry.matchAll(/--filter=P \S+|--exclude=\S+/g)].map(match => match[0]);
+      expect(filters).toContain("--exclude=a**b/***");
+      const deletions = (source: string) => {
+        const oracle = spawnSync(REAL_RSYNC_PATH, ["-ani", "--delete", "--out-format=%i", ...filters, `${source}/`, `${run.receiver}/`], { encoding: "utf8" });
+        expect(oracle.status, oracle.stderr).toBe(0);
+        return oracle.stdout.split("\n").filter(line => /^\*deleting(\s|$)/.test(line));
+      };
+      const emptySource = join(run.root, "oracle-empty");
+      mkdirSync(emptySource);
+      const total = deletions(emptySource);
+      const numerator = deletions(run.sender);
+      const detail = `empty-source: ${JSON.stringify(total)} real: ${JSON.stringify(numerator)}`;
+      expect(numerator.length, detail).toBeLessThanOrEqual(total.length);
+      expect(numerator.length, detail).toBeGreaterThan(0);
+      const shouldAbort = numerator.length * 100 > 20 * total.length;
+      expect(run.result.status, `${detail}\n${output(run)}`).toBe(shouldAbort ? 1 : 0);
+      if (shouldAbort) {
+        expect(output(run), detail).toContain(`${numerator.length}/${total.length} remote entries`);
+      }
       expect(existsSync(join(run.receiver, "a", "x", "b", "deep", "g"))).toBe(true);
+      expect(existsSync(join(run.receiver, "a", "x", "b", "f"))).toBe(true);
+      if (spawnSync(REAL_RSYNC_PATH, ["--version"], { encoding: "utf8" }).stdout.includes("openrsync")) {
+        // Pinned openrsync semantics: a and a/x are retained, a/x/b is protected.
+        expect(total, detail).toHaveLength(2);
+        expect(numerator, detail).toHaveLength(1);
+        expect(output(run)).toContain("1/2 remote entries (50%");
+      }
     });
 
     it("counts protected /keep*/*** directories out of the denominator", () => {
