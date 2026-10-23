@@ -107,6 +107,8 @@ Heimdall reporting helpers.
 | `MIMIR_OFFSITE_RETENTION_DAYS` | `30` | Offsite archive retention |
 | `MIMIR_OFFSITE_MAX_DELETE` | `1000` | Abort offsite run above this delete count |
 | `MIMIR_OFFSITE_MAX_DELETE_PCT` | `25` | Abort offsite run above this delete percentage |
+| `MIMIR_OFFSITE_CLASSIFICATION` | `$MIMIR_OFFSITE_ROOT/classification.yaml` | Classification file whose `no-cloud` markers are excluded from the offsite copy |
+| `MIMIR_OFFSITE_CLASSIFICATION_REQUIRED` | `0` | `1` makes an absent classification file abort the offsite run |
 
 ## Security Model
 
@@ -300,6 +302,10 @@ The job:
 - Moves overwritten or deleted files to tagged seven-character run directories beside `current/`.
 - Prunes only tagged archive run directories older than the retention horizon by encoded timestamp.
 - Aborts implausible deletes with count and percentage gates.
+- Excludes folders marked `no-cloud` in `classification.yaml` (classification policy
+  decision D) and fails closed on an unreadable or invalid classification file. Earlier
+  cloud copies are removed only by the owner-approved `offsite-purge-no-cloud.sh`;
+  `offline-copy-no-cloud.sh` keeps those folders on an encrypted offline medium instead.
 - Writes a heartbeat stamp and pushes a Heimdall pass/fail panel.
 
 Setup, key custody, restore testing, and disaster recovery are documented in
