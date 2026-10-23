@@ -89,6 +89,8 @@ Heimdall reporting helpers.
 | `MIMIR_SYNC_MAX_DELETE` | `1000` | Abort laptop→NAS sync at this many deletions |
 | `MIMIR_SYNC_MAX_DELETE_PCT` | `20` | Abort sync above this share of the actual remote population |
 | `MIMIR_SYNC_STATE_DIR` | `$XDG_STATE_HOME/mimir` or `~/.local/state/mimir` | Durable out-of-tree staging for unverified inbox imports |
+| `MIMIR_NODE_BIN` | - | Absolute `node` path for the sync secret scan (otherwise `PATH` plus `MIMIR_NODE_SEARCH_PATH`, default `/opt/homebrew/bin:/usr/local/bin`) |
+| `MIMIR_SYNC_EXTRA_EXCLUDES` | - | Extra rsync exclude patterns added to the built-in cache excludes (cannot remove defaults) |
 | `MIMIR_BACKUP_LOG` | `$XDG_STATE_HOME/mimir/backup.log` or `~/.local/state/mimir/backup.log` | Local backup log, kept outside the deployed code tree |
 | `MIMIR_FRESHNESS_DIR` | `/var/lib/mimir/heimdall-freshness` | Installed metadata-only backup/sync freshness surface (optional) |
 | `MIMIR_FRESHNESS_PUBLISHER_USER` | — (required by installer) | Actual OS account that runs the backup/sync freshness publisher |
@@ -214,6 +216,14 @@ The sync flow imports files from the NAS inbox, scans newly imported files for
 secrets, then mirrors laptop `~/mimir/` to NAS `~/mimir/` with a delete safety gate.
 Import and scanner failures stop before any mirror. The gate compares deletions with
 the actual remote population and also passes an absolute maximum to the real rsync.
+
+The sync finds `node` even under a scheduler with a minimal `PATH`; if the scanner
+cannot run it fails as `class=scanner_unavailable`, never skipping the scan. Every
+refusal to mirror exits nonzero and pushes a content-blind Heimdall `fail` panel when
+`HEIMDALL_HUB_URL`/`HEIMDALL_FLEET_TOKEN` are set. Pure caches (`node_modules/`,
+`__pycache__/`, `.venv/`, `venv/`, `.next/`, `.pytest_cache/`, `.mypy_cache/`,
+`.DS_Store`) are neither mirrored nor deleted on the NAS and are ignored by the delete
+gate. See `docs/agent-reference.md` for the details.
 
 Local helper scripts require either `MIMIR_NAS_HOST=<host>` or
 `MIMIR_NAS=<user@host>`. Paths can be overridden with `MIMIR_LOCAL_ROOT`,

@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2034  # state shared with the sourced sync-common.sh
 set -euo pipefail
 
 # Sync ~/mimir/ between laptop and NAS — called by launchd every 30 min
@@ -27,14 +28,9 @@ PENDING="$STATE_DIR/import-pending"
 QUARANTINE="${MIMIR_QUARANTINE_DIR:-${LOCAL%/}-quarantine}"
 MAX_DELETE="${MIMIR_SYNC_MAX_DELETE:-1000}"
 MAX_DELETE_PCT="${MIMIR_SYNC_MAX_DELETE_PCT:-20}"
-
-quote_remote_sh() {
-  # SSH hands this string to a remote shell. Quote configuration values so an
-  # owner-overlay value cannot change the command structure.
-  printf "'"
-  printf '%s' "$1" | sed "s/'/'\\\\''/g"
-  printf "'"
-}
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=sync-common.sh
+. "$SCRIPT_DIR/sync-common.sh"
 
 publish_sync_freshness() {
   # A deployment-specific publisher path is intentionally required once this
@@ -58,6 +54,16 @@ case "$MAX_DELETE" in ''|*[!0-9]*) echo "ERROR: MIMIR_SYNC_MAX_DELETE must be a 
 case "$MAX_DELETE_PCT" in ''|*[!0-9]*) echo "ERROR: MIMIR_SYNC_MAX_DELETE_PCT must be an integer from 0 to 100." >&2; exit 1;; esac
 [ "$MAX_DELETE_PCT" -le 100 ] || { echo "ERROR: MIMIR_SYNC_MAX_DELETE_PCT must be at most 100." >&2; exit 1; }
 MAX_DELETE_PCT=$((10#$MAX_DELETE_PCT))
+build_mirror_filters || exit 1
+
+# A stalled sync must not be silent. Every refusal to mirror (anything that
+# exits nonzero before the push completes) pushes a fail-state Heimdall panel
+# and moves the NAS freshness record to error; both carry only the class name.
+on_sync_refusal() {
+  # The push-failure branch below already published error for this class.
+  [ "$1" = push_failed ] || publish_sync_freshness error 2>/dev/null || true
+}
+trap sync_exit_trap EXIT
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Sync triggered"
 
@@ -76,6 +82,7 @@ chmod 700 "$STATE_DIR" "$PENDING"
 
 # Step 1: Import new files from inbox into durable staging
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Importing from inbox..."
+REFUSAL_CLASS=import_failed
 if ! rsync -a --ignore-existing --remove-source-files "$INBOX" "$PENDING/"; then
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] Import FAILED; pending files remain staged at $PENDING; refusing to scan or mirror."
   exit 1
@@ -84,8 +91,14 @@ fi
 # Step 1.5: Secret-scan every pending file, including files left by an older
 # failed invocation. Hits are quarantined outside both staging and $LOCAL.
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Scanning pending imports for secrets..."
-if ! node "$(dirname "$0")/../dist/cli/secret-scan.js" "$PENDING" "$QUARANTINE"; then
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Secret scan FAILED; pending files remain staged at $PENDING; refusing to mirror."
+if ! resolve_scanner "$SCRIPT_DIR"; then
+  REFUSAL_CLASS=scanner_unavailable
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Secret scanner UNAVAILABLE (class=scanner_unavailable): $SCANNER_DIAGNOSTIC; pending files remain staged at $PENDING; refusing to mirror."
+  exit "$SCANNER_UNAVAILABLE_RC"
+fi
+REFUSAL_CLASS=scan_failed
+if ! "$SCAN_NODE" "$SCAN_CLI" "$PENDING" "$QUARANTINE"; then
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Secret scan FAILED (class=scan_failed); pending files remain staged at $PENDING; refusing to mirror."
   exit 1
 fi
 
@@ -95,12 +108,14 @@ fi
 # staging and blocks the mirror until an operator resolves it without data loss.
 if [ -n "$(find "$PENDING" -mindepth 1 -print -quit)" ]; then
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] Promoting verified imports..."
+  REFUSAL_CLASS=promotion_failed
   if ! rsync -a --ignore-existing --remove-source-files "$PENDING/" "$LOCAL"; then
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Promotion FAILED; pending files remain staged at $PENDING; refusing to mirror."
     exit 1
   fi
   find "$PENDING" -mindepth 1 -depth -type d -empty -delete
   if [ -n "$(find "$PENDING" -mindepth 1 -print -quit)" ]; then
+    REFUSAL_CLASS=promotion_blocked
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Promotion BLOCKED by local path collisions; resolve $PENDING before syncing."
     exit 1
   fi
@@ -110,7 +125,8 @@ rmdir "$PENDING"
 # Step 2: Mirror laptop → NAS (laptop is source of truth)
 # Safety: abort if --delete would remove >20% of remote files
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Pushing laptop → NAS..."
-DRY_OUTPUT=$(rsync -ani --delete --out-format='%i' --filter='P /artifact-snapshots/***' --exclude='/artifact-snapshots' "$LOCAL" "$REMOTE")
+REFUSAL_CLASS=dry_run_failed
+DRY_OUTPUT=$(rsync -ani --delete --out-format='%i' "${MIRROR_FILTERS[@]}" "$LOCAL" "$REMOTE")
 DELETES=$(printf '%s\n' "$DRY_OUTPUT" | awk '
   /^\*deleting([[:space:]]|$)/ { n++; next }
   /^$/ { next }
@@ -120,7 +136,8 @@ DELETES=$(printf '%s\n' "$DRY_OUTPUT" | awk '
   END { if (invalid) exit 2; print n + 0 }
 ')
 if [ "$DELETES" -gt 0 ]; then
-  REMOTE_POPULATION=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$NAS" "find '$REMOTE_ROOT' -mindepth 1 -path '$REMOTE_ROOT/artifact-snapshots' -prune -o -printf .")
+  REFUSAL_CLASS=delete_gate
+  REMOTE_POPULATION=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$NAS" "$(build_remote_population_command "$REMOTE_ROOT")")
   REMOTE_TOTAL=${#REMOTE_POPULATION}
   if [ "$REMOTE_TOTAL" -gt 0 ]; then
     PCT=$(( (DELETES * 100 + REMOTE_TOTAL - 1) / REMOTE_TOTAL ))
@@ -132,13 +149,17 @@ if [ "$DELETES" -gt 0 ]; then
     exit 1
   fi
 fi
-if rsync -a --delete --max-delete="$MAX_DELETE" --filter='P /artifact-snapshots/***' --exclude='/artifact-snapshots' "$LOCAL" "$REMOTE"; then
+REFUSAL_CLASS=push_failed
+if rsync -a --delete --max-delete="$MAX_DELETE" "${MIRROR_FILTERS[@]}" "$LOCAL" "$REMOTE"; then
   # Publishes only a normalized UTC timestamp and state, outside the mirrored
   # tree. A restricted probe cannot traverse the archive or read artifacts.
   if ! publish_sync_freshness success; then
+    REFUSAL_CLASS=freshness_publish_failed
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Sync completed but freshness publication FAILED"
     exit 1
   fi
+  MIRROR_COMPLETED=1
+  heimdall_sync_panel pass "class=ok"
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] Sync complete"
 else
   RC=$?
