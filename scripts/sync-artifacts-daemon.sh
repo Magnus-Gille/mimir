@@ -13,7 +13,6 @@ set -euo pipefail
 
 NAS_HOST="${MIMIR_NAS_HOST:-}"
 NAS="${MIMIR_NAS:-${NAS_HOST:+mimir@$NAS_HOST}}"
-[ -n "$NAS" ] || { echo "ERROR: set MIMIR_NAS_HOST or MIMIR_NAS=user@host." >&2; exit 1; }
 LOCAL_ROOT="${MIMIR_LOCAL_ROOT:-$HOME/mimir}"
 REMOTE_ROOT="${MIMIR_REMOTE_ROOT:-/home/mimir/mimir}"
 REMOTE_INBOX="${MIMIR_REMOTE_INBOX:-/home/mimir/mimir-inbox}"
@@ -49,21 +48,27 @@ publish_sync_freshness() {
     "if [ -d $remote_dir ]; then $remote_publisher sync $state; fi"
 }
 
+# A stalled sync must not be silent. Every refusal to mirror (anything that
+# exits nonzero before the push completes, configuration errors included) pushes
+# a fail-state Heimdall panel and moves the NAS freshness record to error; both
+# carry only the class name.
+on_sync_refusal() {
+  # The push-failure branch below already published error for this class.
+  [ "$1" != push_failed ] || return 0
+  [ -n "$NAS" ] || return 0
+  publish_sync_freshness error 2>/dev/null || true
+}
+REFUSAL_CLASS=config_invalid
+trap sync_exit_trap EXIT
+
+[ -n "$NAS" ] || { echo "ERROR: set MIMIR_NAS_HOST or MIMIR_NAS=user@host." >&2; exit 1; }
 case "$MAX_DELETE" in ''|*[!0-9]*) echo "ERROR: MIMIR_SYNC_MAX_DELETE must be a positive integer." >&2; exit 1;; esac
 [ "$MAX_DELETE" -ge 1 ] || { echo "ERROR: MIMIR_SYNC_MAX_DELETE must be at least 1." >&2; exit 1; }
 case "$MAX_DELETE_PCT" in ''|*[!0-9]*) echo "ERROR: MIMIR_SYNC_MAX_DELETE_PCT must be an integer from 0 to 100." >&2; exit 1;; esac
 [ "$MAX_DELETE_PCT" -le 100 ] || { echo "ERROR: MIMIR_SYNC_MAX_DELETE_PCT must be at most 100." >&2; exit 1; }
 MAX_DELETE_PCT=$((10#$MAX_DELETE_PCT))
 build_mirror_filters || exit 1
-
-# A stalled sync must not be silent. Every refusal to mirror (anything that
-# exits nonzero before the push completes) pushes a fail-state Heimdall panel
-# and moves the NAS freshness record to error; both carry only the class name.
-on_sync_refusal() {
-  # The push-failure branch below already published error for this class.
-  [ "$1" = push_failed ] || publish_sync_freshness error 2>/dev/null || true
-}
-trap sync_exit_trap EXIT
+REFUSAL_CLASS=unexpected
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Sync triggered"
 
@@ -127,14 +132,7 @@ rmdir "$PENDING"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Pushing laptop → NAS..."
 REFUSAL_CLASS=dry_run_failed
 DRY_OUTPUT=$(rsync -ani --delete --out-format='%i' "${MIRROR_FILTERS[@]}" "$LOCAL" "$REMOTE")
-DELETES=$(printf '%s\n' "$DRY_OUTPUT" | awk '
-  /^\*deleting([[:space:]]|$)/ { n++; next }
-  /^$/ { next }
-  /^[<>ch.][fdLDS][cstTpoguaxnb.+? ]{7}([[:space:]]|$)/ { next }
-  /^[<>ch.][fdLDS][cstTpoguaxnb.+? ]{9}([[:space:]]|$)/ { next }
-  { print "ERROR: unrecognized rsync dry-run output; refusing mirror." > "/dev/stderr"; invalid = 1; exit 2 }
-  END { if (invalid) exit 2; print n + 0 }
-')
+DELETES=$(printf '%s\n' "$DRY_OUTPUT" | count_dry_run_deletes)
 if [ "$DELETES" -gt 0 ]; then
   REFUSAL_CLASS=delete_gate
   REMOTE_POPULATION=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$NAS" "$(build_remote_population_command "$REMOTE_ROOT")")

@@ -8,7 +8,6 @@ set -euo pipefail
 
 NAS_HOST="${1:-${MIMIR_NAS_HOST:-}}"
 NAS="${MIMIR_NAS:-${NAS_HOST:+mimir@$NAS_HOST}}"
-[ -n "$NAS" ] || { echo "ERROR: pass a sync host, set MIMIR_NAS_HOST, or set MIMIR_NAS=user@host." >&2; exit 1; }
 LOCAL_ROOT="${MIMIR_LOCAL_ROOT:-$HOME/mimir}"
 REMOTE_ROOT="${MIMIR_REMOTE_ROOT:-/home/mimir/mimir}"
 REMOTE_INBOX="${MIMIR_REMOTE_INBOX:-/home/mimir/mimir-inbox}"
@@ -24,16 +23,20 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=sync-common.sh
 . "$SCRIPT_DIR/sync-common.sh"
 
+# A refusal to mirror, configuration errors included, pushes a fail-state
+# Heimdall panel (class name only) when HEIMDALL_HUB_URL/HEIMDALL_FLEET_TOKEN
+# are set.
+REFUSAL_CLASS=config_invalid
+trap sync_exit_trap EXIT
+
+[ -n "$NAS" ] || { echo "ERROR: pass a sync host, set MIMIR_NAS_HOST, or set MIMIR_NAS=user@host." >&2; exit 1; }
 case "$MAX_DELETE" in ''|*[!0-9]*) echo "ERROR: MIMIR_SYNC_MAX_DELETE must be a positive integer." >&2; exit 1;; esac
 [ "$MAX_DELETE" -ge 1 ] || { echo "ERROR: MIMIR_SYNC_MAX_DELETE must be at least 1." >&2; exit 1; }
 case "$MAX_DELETE_PCT" in ''|*[!0-9]*) echo "ERROR: MIMIR_SYNC_MAX_DELETE_PCT must be an integer from 0 to 100." >&2; exit 1;; esac
 [ "$MAX_DELETE_PCT" -le 100 ] || { echo "ERROR: MIMIR_SYNC_MAX_DELETE_PCT must be at most 100." >&2; exit 1; }
 MAX_DELETE_PCT=$((10#$MAX_DELETE_PCT))
 build_mirror_filters || exit 1
-
-# A refusal to mirror pushes a fail-state Heimdall panel (class name only) when
-# HEIMDALL_HUB_URL/HEIMDALL_FLEET_TOKEN are set.
-trap sync_exit_trap EXIT
+REFUSAL_CLASS=unexpected
 
 # Keep imports outside the mirrored/servable tree until the scanner has
 # accepted them. The pending tree itself is the durable recovery record: if
@@ -89,14 +92,7 @@ rmdir "$PENDING"
 echo "==> Pushing laptop → NAS (with --delete)..."
 REFUSAL_CLASS=dry_run_failed
 DRY_OUTPUT=$(rsync -ani --delete --out-format='%i' "${MIRROR_FILTERS[@]}" "$LOCAL" "$REMOTE")
-DELETES=$(printf '%s\n' "$DRY_OUTPUT" | awk '
-  /^\*deleting([[:space:]]|$)/ { n++; next }
-  /^$/ { next }
-  /^[<>ch.][fdLDS][cstTpoguaxnb.+? ]{7}([[:space:]]|$)/ { next }
-  /^[<>ch.][fdLDS][cstTpoguaxnb.+? ]{9}([[:space:]]|$)/ { next }
-  { print "ERROR: unrecognized rsync dry-run output; refusing mirror." > "/dev/stderr"; invalid = 1; exit 2 }
-  END { if (invalid) exit 2; print n + 0 }
-')
+DELETES=$(printf '%s\n' "$DRY_OUTPUT" | count_dry_run_deletes)
 if [ "$DELETES" -gt 0 ]; then
   # Count the actual remote population, not rsync's changed-line output. A
   # delete mixed with many additions must not dilute the safety percentage.

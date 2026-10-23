@@ -92,9 +92,13 @@ MIRROR_EXCLUDES=()
 MIRROR_FILTERS=()
 
 build_mirror_filters() {
-  local pattern
+  local pattern extras=()
   MIRROR_EXCLUDES=("${SYNC_DEFAULT_EXCLUDES[@]}")
-  for pattern in ${MIMIR_SYNC_EXTRA_EXCLUDES:-}; do
+  # Split on whitespace without pathname expansion: a pattern such as '*.md'
+  # must reach rsync verbatim, not be expanded against the working directory.
+  read -r -d '' -a extras <<< "${MIMIR_SYNC_EXTRA_EXCLUDES:-}" || true
+  # An empty array expands as unbound under `set -u` in bash 3.2.
+  for pattern in ${extras[@]+"${extras[@]}"}; do
     case "$pattern" in
       -*|+*|'!'*|*[[:cntrl:]]*)
         echo "ERROR: MIMIR_SYNC_EXTRA_EXCLUDES entries must be plain patterns (no leading -, + or !)." >&2
@@ -108,6 +112,30 @@ build_mirror_filters() {
   for pattern in "${MIRROR_EXCLUDES[@]}"; do
     MIRROR_FILTERS+=("--exclude=$pattern")
   done
+}
+
+# Count deletions in rsync's itemized dry-run output (stdin). Any line that is
+# not a recognised item is an error (exit 2), so the gate fails closed on
+# surprises. The one tolerated diagnostic is rsync declining to delete a
+# directory that still holds excluded (protected) children, e.g. a removed
+# source directory whose NAS copy keeps node_modules. rsync exits 0 for it and
+# deletes nothing, so it is not a deletion; only its count is reported, never
+# the path. GNU rsync and macOS openrsync word it differently.
+count_dry_run_deletes() {
+  awk '
+    /^\*deleting([[:space:]]|$)/ { n++; next }
+    /^$/ { next }
+    /^[<>ch.][fdLDS][cstTpoguaxnb.+? ]{7}([[:space:]]|$)/ { next }
+    /^[<>ch.][fdLDS][cstTpoguaxnb.+? ]{9}([[:space:]]|$)/ { next }
+    /^cannot delete non-empty directory: ./ { kept++; next }
+    /^rsync\([0-9]+\): warning: .+: not empty, cannot delete$/ { kept++; next }
+    { print "ERROR: unrecognized rsync dry-run output; refusing mirror." > "/dev/stderr"; invalid = 1; exit 2 }
+    END {
+      if (invalid) exit 2
+      if (kept > 0) print "NOTE: " kept " non-empty director(ies) kept because they hold excluded content." > "/dev/stderr"
+      print n + 0
+    }
+  '
 }
 
 quote_remote_sh() {
@@ -128,7 +156,15 @@ build_remote_population_command() {
   local first=1
   for pattern in "${MIRROR_EXCLUDES[@]}"; do
     dir_only=0
-    case "$pattern" in */) dir_only=1; pattern="${pattern%/}" ;; esac
+    # rsync's trailing /*** excludes the directory itself and everything under
+    # it. find -path would match only descendants, so match the directory too:
+    # pruning it removes its contents from the count as well. This is
+    # deliberately type-agnostic, which can only shrink the denominator.
+    case "$pattern" in
+      */'***') pattern="${pattern%/\*\*\*}" ;;
+      */) dir_only=1; pattern="${pattern%/}" ;;
+    esac
+    [ -n "$pattern" ] || pattern='*'
     case "$pattern" in
       /*) quoted=$(quote_remote_sh "$root$pattern"); predicate="-path $quoted" ;;
       */*) quoted=$(quote_remote_sh "*/$pattern"); predicate="-path $quoted" ;;

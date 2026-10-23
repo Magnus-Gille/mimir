@@ -100,7 +100,8 @@ Sync behaviour shared by both scripts (implemented in `scripts/sync-common.sh`):
 - **Node lookup.** `MIMIR_NODE_BIN` (absolute, executable) wins; otherwise `node` is
   looked up on `PATH` plus `MIMIR_NODE_SEARCH_PATH`. The scan is never skipped.
 - **Refusal classes.** Every refusal to mirror logs `class=<name>` and exits nonzero:
-  `import_failed`, `scanner_unavailable` (no node or no built `dist/cli/secret-scan.js`;
+  `config_invalid` (bad limits, bad excludes, no NAS configured; reported before any
+  network work), `import_failed`, `scanner_unavailable` (no node or no built `dist/cli/secret-scan.js`;
   exit 69), `scan_failed` (scanner ran and reported failure or incomplete items; exit 1),
   `promotion_failed`, `promotion_blocked`, `dry_run_failed`, `delete_gate`, `push_failed`.
   A secret that is found and quarantined is not a refusal: the scanner exits 0, the
@@ -121,8 +122,14 @@ Sync behaviour shared by both scripts (implemented in `scripts/sync-common.sh`):
   (`--delete-excluded` is not used), so cache directories already on the NAS are left
   in place and contribute no deletions. The remote population (the percentage
   denominator) prunes the same names, so the NAS snapshot tree and cached directories
-  do not dilute the percentage. Previously mirrored caches stay on the NAS until removed
-  there by hand.
+  do not dilute the percentage. A trailing `/***` is pruned as the directory itself plus
+  its contents (matching rsync); the count errs towards a smaller, stricter denominator.
+  If a source directory is gone but its NAS copy holds protected children, rsync keeps
+  the directory and prints a "not empty, cannot delete" diagnostic; the gate accepts
+  exactly that diagnostic (GNU and openrsync wording), does not count it as a deletion,
+  and still rejects any other unrecognised dry-run line. `MIMIR_SYNC_EXTRA_EXCLUDES` is
+  split on whitespace without glob expansion, so `*.md` reaches rsync verbatim.
+  Previously mirrored caches stay on the NAS until removed there by hand.
 
 Share-link helper:
 
