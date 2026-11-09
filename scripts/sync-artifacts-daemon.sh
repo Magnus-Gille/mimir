@@ -27,6 +27,9 @@ PENDING="$STATE_DIR/import-pending"
 QUARANTINE="${MIMIR_QUARANTINE_DIR:-${LOCAL%/}-quarantine}"
 MAX_DELETE="${MIMIR_SYNC_MAX_DELETE:-1000}"
 MAX_DELETE_PCT="${MIMIR_SYNC_MAX_DELETE_PCT:-20}"
+UNREACHABLE_ALERT_AFTER="${MIMIR_SYNC_UNREACHABLE_ALERT_AFTER:-12}"
+UNREACHABLE_ALERT_HOURS="${MIMIR_SYNC_UNREACHABLE_ALERT_HOURS:-24}"
+UNREACHABLE_STATE="$STATE_DIR/nas-unreachable"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=sync-common.sh
 . "$SCRIPT_DIR/sync-common.sh"
@@ -67,16 +70,60 @@ case "$MAX_DELETE" in ''|*[!0-9]*) echo "ERROR: MIMIR_SYNC_MAX_DELETE must be a 
 case "$MAX_DELETE_PCT" in ''|*[!0-9]*) echo "ERROR: MIMIR_SYNC_MAX_DELETE_PCT must be an integer from 0 to 100." >&2; exit 1;; esac
 [ "$MAX_DELETE_PCT" -le 100 ] || { echo "ERROR: MIMIR_SYNC_MAX_DELETE_PCT must be at most 100." >&2; exit 1; }
 MAX_DELETE_PCT=$((10#$MAX_DELETE_PCT))
+case "$UNREACHABLE_ALERT_AFTER" in ''|*[!0-9]*) echo "ERROR: MIMIR_SYNC_UNREACHABLE_ALERT_AFTER must be a positive integer." >&2; exit 1;; esac
+case "$UNREACHABLE_ALERT_HOURS" in ''|*[!0-9]*) echo "ERROR: MIMIR_SYNC_UNREACHABLE_ALERT_HOURS must be a positive integer." >&2; exit 1;; esac
+UNREACHABLE_ALERT_AFTER=$((10#$UNREACHABLE_ALERT_AFTER))
+UNREACHABLE_ALERT_HOURS=$((10#$UNREACHABLE_ALERT_HOURS))
+[ "$UNREACHABLE_ALERT_AFTER" -ge 1 ] && [ "$UNREACHABLE_ALERT_HOURS" -ge 1 ] || { echo "ERROR: MIMIR_SYNC_UNREACHABLE_ALERT_AFTER and _HOURS must be at least 1." >&2; exit 1; }
 build_mirror_filters || exit 1
 REFUSAL_CLASS=unexpected
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Sync triggered"
 
-# Check if NAS is reachable (2s timeout)
-if ! ssh -o ConnectTimeout=2 -o BatchMode=yes "$NAS" true 2>/dev/null; then
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] NAS not reachable — skipping"
-    exit 0
-fi
+# Record one unreachable skip. One miss is normal (the laptop is often off the
+# network), so only a sustained run of misses alerts: at least
+# MIMIR_SYNC_UNREACHABLE_ALERT_AFTER consecutive skips, or no successful
+# contact for MIMIR_SYNC_UNREACHABLE_ALERT_HOURS. The state file holds only two
+# integers (skip count, epoch of last known contact); the panel message is a
+# fixed class plus the count, never a host, path or ssh output. The skip stays
+# exit 0.
+record_unreachable_skip() {
+  local class="$1" skips=0 since now
+  now=$(date +%s)
+  since=$now
+  if [ -f "$UNREACHABLE_STATE" ]; then
+    { read -r skips && read -r since; } < "$UNREACHABLE_STATE" 2>/dev/null || { skips=0; since=$now; }
+    case "$skips" in ''|*[!0-9]*) skips=0 ;; esac
+    case "$since" in ''|*[!0-9]*) since=$now ;; esac
+    skips=$((10#$skips))
+    since=$((10#$since))
+  fi
+  skips=$((skips + 1))
+  if mkdir -p "$STATE_DIR" 2>/dev/null && chmod 700 "$STATE_DIR" 2>/dev/null &&
+     printf '%s\n%s\n' "$skips" "$since" > "$UNREACHABLE_STATE.tmp" 2>/dev/null &&
+     mv "$UNREACHABLE_STATE.tmp" "$UNREACHABLE_STATE" 2>/dev/null; then
+    :
+  else
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARN: could not persist the unreachable-skip counter" >&2
+  fi
+  if [ "$skips" -ge "$UNREACHABLE_ALERT_AFTER" ] || [ $(( now - since )) -ge $(( UNREACHABLE_ALERT_HOURS * 3600 )) ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] NAS unreachable alert (class=$class skips=$skips)" >&2
+    heimdall_sync_panel fail "class=${class} exit=0 skips=${skips}"
+  fi
+}
+
+# Check if NAS is reachable (2s timeout). ssh's own message may name the host,
+# so it is inspected here and never printed or forwarded.
+SSH_ERR=$(ssh -o ConnectTimeout=2 -o BatchMode=yes "$NAS" true 2>&1 >/dev/null) || {
+  UNREACHABLE_CLASS=nas_unreachable
+  case "$SSH_ERR" in *"Could not resolve hostname"*) UNREACHABLE_CLASS=nas_unresolvable ;; esac
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] NAS not reachable — skipping"
+  record_unreachable_skip "$UNREACHABLE_CLASS"
+  exit 0
+}
+# Reachable again: the next successful mirror pushes the pass panel, which
+# clears any alert; the counter restarts from zero.
+rm -f "$UNREACHABLE_STATE" "$UNREACHABLE_STATE.tmp"
 
 # Keep imports outside the mirrored/servable tree until the scanner has
 # accepted them. The pending tree itself is the durable recovery record: if
