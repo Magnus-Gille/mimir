@@ -729,7 +729,17 @@ describe.each(SYNC_SCRIPTS)("%s stalled-sync visibility", (script) => {
       const { result } = harness.run({ ...curl.env, [missing]: "", MOCK_SCAN_RC: "17" });
       expect(result.status).not.toBe(0);
       expect(curl.args()).toBe("");
+      // MIMIR-76: an undeliverable fail alert is announced in the log.
+      expect(result.stderr).toContain("WARN: Heimdall alert NOT delivered (class=scan_failed exit=1)");
+      expect(result.stderr).not.toContain(TOKEN);
     }
+  });
+
+  it("does not warn about missing Heimdall variables after a successful mirror", () => {
+    const harness = createSyncHarness(script);
+    const { result } = harness.run({ HEIMDALL_HUB_URL: "", HEIMDALL_FLEET_TOKEN: "" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).not.toContain("Heimdall alert NOT delivered");
   });
 
   it("refuses a fleet token containing a line break and keeps the sync failure", () => {

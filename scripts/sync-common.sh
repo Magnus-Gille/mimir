@@ -190,7 +190,15 @@ remove_empty_source() {
 # never appears in argv, and is never logged.
 heimdall_sync_panel() {
   local state="$1" message="$2" token="${HEIMDALL_FLEET_TOKEN:-}"
-  [ -n "${HEIMDALL_HUB_URL:-}" ] && [ -n "$token" ] || return 0
+  if [ -z "${HEIMDALL_HUB_URL:-}" ] || [ -z "$token" ]; then
+    # A fail alert that cannot be delivered must not vanish silently (MIMIR-76:
+    # delete_gate refusals went unseen for five days because the launchd job
+    # had no Heimdall variables). Name only the missing variables, never values.
+    if [ "$state" = fail ]; then
+      echo "WARN: Heimdall alert NOT delivered (${message}): HEIMDALL_HUB_URL and HEIMDALL_FLEET_TOKEN must both be set in the sync job environment." >&2
+    fi
+    return 0
+  fi
   command -v curl >/dev/null 2>&1 || return 0
   case "$token" in
     *$'\r'*|*$'\n'*)
