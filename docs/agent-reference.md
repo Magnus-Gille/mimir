@@ -116,8 +116,13 @@ Sync behaviour shared by both scripts (implemented in `scripts/sync-common.sh`):
   `class=<name> exit=<n>`, never file names. The token goes to curl on stdin, not argv.
   A successful mirror pushes a `pass` panel. The daemon also publishes `error` through
   `MIMIR_REMOTE_FRESHNESS_PUBLISHER` when configured; without it the legacy heartbeat
-  simply stops advancing, so freshness goes stale. Under launchd, the Heimdall variables
-  must be in the job's `EnvironmentVariables`.
+  simply stops advancing, so freshness goes stale. Under launchd the job must receive
+  both Heimdall variables. Keep the token out of the plist: point `ProgramArguments` at a
+  small wrapper that exports `HEIMDALL_HUB_URL`, reads `HEIMDALL_FLEET_TOKEN` from the
+  login Keychain (`security find-generic-password -w`), and `exec`s
+  `sync-artifacts-daemon.sh`. If either variable is missing, a `fail` panel is not
+  delivered, but the script logs `WARN: Heimdall alert NOT delivered (class=...)` to
+  stderr instead of failing silently (MIMIR-76).
 - **Unreachable NAS (daemon only).** A failed reachability probe still logs
   `NAS not reachable — skipping` and exits 0 (the laptop is often off the network), but
   counts consecutive skips in `MIMIR_SYNC_STATE_DIR/nas-unreachable` (two integers). At
