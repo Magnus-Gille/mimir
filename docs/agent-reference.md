@@ -118,6 +118,17 @@ Sync behaviour shared by both scripts (implemented in `scripts/sync-common.sh`):
   `MIMIR_REMOTE_FRESHNESS_PUBLISHER` when configured; without it the legacy heartbeat
   simply stops advancing, so freshness goes stale. Under launchd, the Heimdall variables
   must be in the job's `EnvironmentVariables`.
+- **Unreachable NAS (daemon only).** A failed reachability probe still logs
+  `NAS not reachable — skipping` and exits 0 (the laptop is often off the network), but
+  counts consecutive skips in `MIMIR_SYNC_STATE_DIR/nas-unreachable` (two integers). At
+  `MIMIR_SYNC_UNREACHABLE_ALERT_AFTER` skips or `MIMIR_SYNC_UNREACHABLE_ALERT_HOURS` hours
+  without contact, a `fail` panel is pushed with `class=nas_unreachable exit=0 skips=N`
+  (`nas_unresolvable` when ssh reports `Could not resolve hostname`, a configuration
+  error rather than a network blip). The panel and curl argv carry no host, path or token,
+  and ssh's message is never printed. No freshness `error` is published for this class
+  because that needs the NAS the run could not reach; the stale heartbeat covers it. A
+  successful run clears the counter and pushes `pass`. The manual script already exits
+  nonzero when the NAS is unreachable (`import_failed`).
 - **Cache excludes.** `node_modules/`, `__pycache__/`, `.venv/`, `venv/`, `.next/`,
   `.pytest_cache/`, `.mypy_cache/` and `.DS_Store` are excluded from the delete-gate
   dry run, the real rsync and the remote population count, identically. `.git`,
@@ -186,6 +197,8 @@ Related checked-in unit files:
 | `MIMIR_SYNC_MAX_DELETE` | `1000` | Abort laptop→NAS mirror at or above this many deletions |
 | `MIMIR_SYNC_MAX_DELETE_PCT` | `20` | Abort mirror above this percentage of what rsync could delete under the mirror filters (empty-source dry run) |
 | `MIMIR_SYNC_STATE_DIR` | `$XDG_STATE_HOME/mimir` or `~/.local/state/mimir` | Durable out-of-tree staging for unverified inbox imports |
+| `MIMIR_SYNC_UNREACHABLE_ALERT_AFTER` | `12` | Daemon only: consecutive "NAS not reachable" skips (6 h at a 30-minute interval) before a `fail` panel with `class=nas_unreachable` is pushed; counter lives in `$MIMIR_SYNC_STATE_DIR/nas-unreachable` and resets on the next reachable run |
+| `MIMIR_SYNC_UNREACHABLE_ALERT_HOURS` | `24` | Daemon only: also alert when the NAS has been unreachable this long since the last successful contact (or the first recorded skip) |
 | `MIMIR_NODE_BIN` | — | Absolute path to the `node` that runs the secret scan; if set but unusable the sync fails as `scanner_unavailable` (no PATH fallback) |
 | `MIMIR_NODE_SEARCH_PATH` | `/opt/homebrew/bin:/usr/local/bin` | Directories appended to `PATH` when looking up `node` (launchd's PATH lacks them) |
 | `MIMIR_SECRET_SCAN_CLI` | `<repo>/dist/cli/secret-scan.js` | Built scanner entrypoint (override mainly for tests) |

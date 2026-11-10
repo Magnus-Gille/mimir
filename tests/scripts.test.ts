@@ -35,6 +35,10 @@ function mockSyncCommands(root: string): { bin: string; calls: string } {
   executable(
     join(bin, "ssh"),
     `printf 'ssh %s\n' "$*" >> "$SYNC_CALLS"
+if [ -n "\${MOCK_SSH_FAIL:-}" ] && [ "\${!#}" = true ]; then
+  printf '%s\n' "\${MOCK_SSH_ERR:-}" >&2
+  exit 255
+fi
 exit 0
 `,
   );
@@ -755,6 +759,112 @@ describe.each(SYNC_SCRIPTS)("%s stalled-sync visibility", (script) => {
       expect(invocations).not.toContain("sync 'success'");
     } else {
       expect(invocations).not.toContain("mimir-publish-freshness");
+    }
+  });
+});
+
+describe("daemon unreachable-NAS alerting", () => {
+  const TOKEN = "fleet-token-SENTINEL-1234";
+  const HOST = "secret-nas-host.internal";
+  const SCRIPT = "sync-artifacts-daemon.sh";
+
+  function setup() {
+    const harness = createSyncHarness(SCRIPT);
+    const args = join(harness.root, "curl.args");
+    const stdin = join(harness.root, "curl.stdin");
+    executable(
+      join(harness.bin, "curl"),
+      `printf '%s\\n' "$*" >> "$CURL_ARGS"\ncat >> "$CURL_STDIN"\nexit 0\n`,
+    );
+    const state = join(harness.root, "state");
+    const env = {
+      HEIMDALL_HUB_URL: "http://hub.invalid/api/panels",
+      HEIMDALL_FLEET_TOKEN: TOKEN,
+      CURL_ARGS: args,
+      CURL_STDIN: stdin,
+      MIMIR_NAS: `mimir@${HOST}`,
+      MIMIR_SYNC_STATE_DIR: state,
+      MOCK_SSH_FAIL: "1",
+      MOCK_SSH_ERR: `ssh: connect to host ${HOST} port 22: Operation timed out`,
+    };
+    const read = (path: string) => (existsSync(path) ? readFileSync(path, "utf8") : "");
+    return { harness, env, state, curlArgs: () => read(args), curlStdin: () => read(stdin) };
+  }
+
+  it("stays silent (exit 0, no panel) below both thresholds", () => {
+    const { harness, env, curlArgs } = setup();
+    for (let i = 0; i < 11; i++) {
+      const { result } = harness.run(env);
+      expect(result.status, result.stderr).toBe(0);
+    }
+    expect(curlArgs()).toBe("");
+  });
+
+  it("pushes a content-blind nas_unreachable fail panel at the skip threshold", () => {
+    const { harness, env, state, curlArgs, curlStdin } = setup();
+    let last!: ReturnType<typeof harness.run>;
+    for (let i = 0; i < 12; i++) last = harness.run(env);
+    expect(last.result.status).toBe(0);
+    expect(readFileSync(join(state, "nas-unreachable"), "utf8").split("\n")[0]).toBe("12");
+    const body = curlArgs();
+    expect(body).toContain('"state":"fail"');
+    expect(body).toContain("class=nas_unreachable exit=0 skips=12");
+    // Content-blind: neither the panel nor curl's argv carries host, path or token.
+    for (const secret of [HOST, TOKEN, harness.root, "/home/mimir", "mimir@"]) {
+      expect(body).not.toContain(secret);
+    }
+    expect(curlStdin()).toContain(`Authorization: Bearer ${TOKEN}`);
+    expect(`${last.result.stdout}\n${last.result.stderr}`).not.toContain(TOKEN);
+    expect(`${last.result.stdout}\n${last.result.stderr}`).not.toContain("Operation timed out");
+    expect(last.invocations).not.toContain(TOKEN);
+  });
+
+  it("honours a lowered MIMIR_SYNC_UNREACHABLE_ALERT_AFTER", () => {
+    const { harness, env, curlArgs } = setup();
+    harness.run({ ...env, MIMIR_SYNC_UNREACHABLE_ALERT_AFTER: "2" });
+    expect(curlArgs()).toBe("");
+    harness.run({ ...env, MIMIR_SYNC_UNREACHABLE_ALERT_AFTER: "2" });
+    expect(curlArgs()).toContain("skips=2");
+  });
+
+  it("alerts on a single skip once there has been no contact for the hour limit", () => {
+    const { harness, env, state, curlArgs } = setup();
+    mkdirSync(state, { recursive: true });
+    const longAgo = Math.floor(Date.now() / 1000) - 25 * 3600;
+    writeFileSync(join(state, "nas-unreachable"), `1\n${longAgo}\n`);
+    const { result } = harness.run(env);
+    expect(result.status).toBe(0);
+    expect(curlArgs()).toContain("class=nas_unreachable exit=0 skips=2");
+  });
+
+  it("resets the counter after a reachable run and pushes pass", () => {
+    const { harness, env, state, curlArgs } = setup();
+    for (let i = 0; i < 12; i++) harness.run(env);
+    expect(existsSync(join(state, "nas-unreachable"))).toBe(true);
+    const { result } = harness.run({ ...env, MOCK_SSH_FAIL: "" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(join(state, "nas-unreachable"))).toBe(false);
+    expect(curlArgs().trim().split("\n").at(-1)).toContain('"state":"pass"');
+    // Starting over: the next miss is skip 1, below threshold, no new fail panel.
+    const before = curlArgs();
+    harness.run(env);
+    expect(readFileSync(join(state, "nas-unreachable"), "utf8").split("\n")[0]).toBe("1");
+    expect(curlArgs()).toBe(before);
+  });
+
+  it("classifies a name-resolution failure as nas_unresolvable without leaking the host", () => {
+    const { harness, env, curlArgs } = setup();
+    const resolve = { ...env, MOCK_SSH_ERR: `ssh: Could not resolve hostname ${HOST}: Name or service not known` };
+    for (let i = 0; i < 12; i++) harness.run(resolve);
+    expect(curlArgs()).toContain("class=nas_unresolvable exit=0 skips=12");
+    expect(curlArgs()).not.toContain(HOST);
+  });
+
+  it("rejects invalid threshold settings as config_invalid", () => {
+    const { harness, env } = setup();
+    for (const bad of [{ MIMIR_SYNC_UNREACHABLE_ALERT_AFTER: "0" }, { MIMIR_SYNC_UNREACHABLE_ALERT_HOURS: "x" }]) {
+      const { result } = harness.run({ ...env, ...bad });
+      expect(result.status).toBe(1);
     }
   });
 });
