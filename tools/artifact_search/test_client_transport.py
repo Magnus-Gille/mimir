@@ -496,6 +496,45 @@ class ClientRemoteIntegrationTests(unittest.TestCase):
                 client._transport(_profile(), payload)
         self.assertEqual(raised.exception.code, "invalid_response")
 
+    def test_transport_failures_expose_bounded_reason_without_ssh_output(self):
+        payload = b'{"query":"north star","top":5}'
+        env = {"HOME": str(self.workspace)}
+        cases = (
+            ("ssh_connect_failed", 255),
+            ("remote_helper_failed", 3),
+        )
+        for reason, code in cases:
+            with self.subTest(reason=reason):
+                shim = self.workspace / ("fail-" + reason)
+                shim.mkdir()
+                script = shim / "ssh"
+                script.write_text("#!/bin/sh\ncat >/dev/null\necho 'secret-host refused' >&2\nexit %d\n" % code)
+                script.chmod(0o755)
+                with patch.dict(os.environ, {**env, "PATH": str(shim)}):
+                    with self.assertRaises(client.ClientError) as raised:
+                        client._transport(_profile(), payload)
+                self.assertEqual(raised.exception.code, "transport_unavailable")
+                self.assertEqual(raised.exception.reason, reason)
+        with patch.dict(os.environ, {**env, "PATH": str(self.workspace / "empty-path")}):
+            with self.assertRaises(client.ClientError) as raised:
+                client._transport(_profile(), payload)
+        self.assertEqual(raised.exception.reason, "ssh_not_found")
+
+    def test_reason_is_surfaced_by_cli_and_agent_envelopes_and_unknown_reason_dropped(self):
+        from io import StringIO
+        from unittest.mock import patch as mock_patch
+
+        failing = client.ClientError("transport_unavailable", "ssh_connect_failed")
+        with patch.object(agent_tool, "search", side_effect=failing):
+            failure = agent_tool.handle_tool_input({"query": "north star"})
+        self.assertEqual(failure["error"], {"code": "transport_unavailable", "reason": "ssh_connect_failed"})
+        output = StringIO()
+        with patch.object(client_cli, "search", side_effect=failing), mock_patch("sys.stdout", output):
+            status = client_cli.main(["north star", "--config", str(self._profile_file()), "--json"])
+        self.assertEqual(status, 1)
+        self.assertEqual(json.loads(output.getvalue())["error"], {"code": "transport_unavailable", "reason": "ssh_connect_failed"})
+        self.assertIsNone(client.ClientError("transport_unavailable", "Connection refused 10.0.0.1").reason)
+
     def test_ssh_transport_timeout_kills_child_and_returns_stable_error(self):
         audit = self.workspace / "timeout-audit.json"
         self._fake_ssh(audit, b"", sleep=True)
@@ -513,6 +552,7 @@ class ClientRemoteIntegrationTests(unittest.TestCase):
             with self.assertRaises(client.ClientError) as raised:
                 client._transport(_profile(), b'{"query":"north star","top":5}')
         self.assertEqual(raised.exception.code, "transport_unavailable")
+        self.assertEqual(raised.exception.reason, "ssh_timeout")
         self.assertLess(time.monotonic() - started, 10)
         # The fake ssh sleeps 20 seconds, so it can only have ended by being killed and reaped.
         self.assertEqual(len(children), 1)

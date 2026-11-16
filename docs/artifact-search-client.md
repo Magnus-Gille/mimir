@@ -100,6 +100,23 @@ raw SSH diagnostics, remote exception text or HTTP error bodies. Examples includ
 `invalid_profile`, `transport_unavailable`, `credential_unavailable`, `unauthorized`,
 `retrieval_unavailable`, `invalid_response`, and `stale_response`.
 
+A `transport_unavailable` error also carries a bounded `error.reason` that locates
+the failing layer without exposing SSH output, hosts or addresses:
+
+| `reason` | Meaning | Typical action |
+|---|---|---|
+| `ssh_not_found` | No `ssh` binary on the launcher's `PATH`. | Fix `PATH` for the agent environment. |
+| `ssh_spawn_failed` | `ssh` could not be started (permissions/sandbox). | Allow the process in the agent sandbox. |
+| `ssh_connect_failed` | OpenSSH itself failed (exit 255): network blocked, DNS, host key, auth, missing agent socket. | Typical in a sandbox without network or `~/.ssh`/`SSH_AUTH_SOCK`; run from an environment with the existing noninteractive SSH route. |
+| `ssh_timeout` | The 45-second budget was exhausted. | Check reachability/latency. |
+| `remote_helper_failed` | SSH worked but the remote helper exited non-zero (e.g. no Python 3.10+). | Check the search host. |
+| `ssh_killed` | `ssh` was terminated by a signal. | Check sandbox/resource limits. |
+
+`unavailable` is never `no_results`; do not treat it as an empty archive. A
+sandboxed agent that cannot reach the search host over SSH is expected to report
+`ssh_connect_failed` (the sandbox must permit the existing SSH route; do not
+weaken host-key or credential handling to work around it).
+
 Python consumers can call
 `tools.artifact_search.agent_tool.artifact_search(query, top=5, mode=None, profile_path=...)`
 and obtain `TOOL_DEFINITION` from the same module. This is a command/function

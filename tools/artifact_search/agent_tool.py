@@ -43,12 +43,15 @@ GUIDANCE = (
 _CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
-def _failure(status: str, code: str) -> dict[str, Any]:
+def _failure(status: str, code: str, reason: str | None = None) -> dict[str, Any]:
     safe_code = code if _CODE.fullmatch(code) else "client_error"
+    error: dict[str, Any] = {"code": safe_code}
+    if reason is not None and _CODE.fullmatch(reason):
+        error["reason"] = reason
     return {
         "schema": OUTPUT_SCHEMA,
         "status": status,
-        "error": {"code": safe_code},
+        "error": error,
         "evidence": None,
         "answer_completeness": "not_assessed",
         "guidance": GUIDANCE,
@@ -79,7 +82,7 @@ def artifact_search(query: str, top: int = 5, *, mode: str | None = None, profil
     except ClientError as error:
         code = error.code if isinstance(error.code, str) else "client_error"
         status = "invalid_request" if code == "invalid_request" else "unavailable"
-        return _failure(status, code)
+        return _failure(status, code, getattr(error, "reason", None))
     status = "ok" if receipt.get("results") else "no_results"
     return {
         "schema": OUTPUT_SCHEMA,
