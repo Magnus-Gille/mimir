@@ -241,7 +241,14 @@ def _transport(profile, payload):
                     raise ClientError('transport_unavailable', 'ssh_timeout')
                 for key, _ in selector.select(remaining):
                     if key.fileobj is process.stdin:
-                        count = os.write(process.stdin.fileno(), pending)
+                        try:
+                            count = os.write(process.stdin.fileno(), pending)
+                        except BrokenPipeError:
+                            # ssh exited before reading the request (e.g. denied at once);
+                            # let its exit status decide the reason via process.wait().
+                            selector.unregister(process.stdin)
+                            process.stdin.close()
+                            continue
                         pending = pending[count:]
                         if not pending:
                             selector.unregister(process.stdin)

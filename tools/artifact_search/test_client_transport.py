@@ -520,6 +520,20 @@ class ClientRemoteIntegrationTests(unittest.TestCase):
                 client._transport(_profile(), payload)
         self.assertEqual(raised.exception.reason, "ssh_not_found")
 
+    def test_ssh_dying_before_reading_request_reports_exit_status_reason(self):
+        shim = self.workspace / "fast-die"
+        shim.mkdir()
+        script = shim / "ssh"
+        script.write_text("#!/bin/sh\nexit 255\n")
+        script.chmod(0o755)
+        with patch.dict(os.environ, {"HOME": str(self.workspace), "PATH": str(shim)}):
+            # Simulate the write racing a child that already exited.
+            with patch.object(client.os, "write", side_effect=BrokenPipeError):
+                with self.assertRaises(client.ClientError) as raised:
+                    client._transport(_profile(), b'{"query":"north star","top":5}')
+        self.assertEqual(raised.exception.code, "transport_unavailable")
+        self.assertEqual(raised.exception.reason, "ssh_connect_failed")
+
     def test_reason_is_surfaced_by_cli_and_agent_envelopes_and_unknown_reason_dropped(self):
         from io import StringIO
         from unittest.mock import patch as mock_patch
