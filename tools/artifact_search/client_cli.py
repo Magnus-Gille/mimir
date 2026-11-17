@@ -19,9 +19,12 @@ class _Parser(argparse.ArgumentParser):
         raise ValueError("invalid arguments")
 
 
-def _error(status: str, code: str) -> dict:
+def _error(status: str, code: str, reason: str | None = None) -> dict:
     safe_code = code if isinstance(code, str) and _CODE.fullmatch(code) else "client_error"
-    return {"schema": "mimir-artifact-search-v1", "status": status, "error": {"code": safe_code}}
+    error = {"code": safe_code}
+    if isinstance(reason, str) and _CODE.fullmatch(reason):
+        error["reason"] = reason
+    return {"schema": "mimir-artifact-search-v1", "status": status, "error": error}
 
 
 def _safe_text(value) -> str:
@@ -153,7 +156,7 @@ def main(argv=None) -> int:
     except ClientError as error:
         code = error.code if isinstance(error.code, str) else "client_error"
         status = "invalid_request" if code == "invalid_request" else "unavailable"
-        print(json.dumps(_error(status, code)))
+        print(json.dumps(_error(status, code, getattr(error, "reason", None))))
         return 2 if status == "invalid_request" else 1
     if args.json:
         print(json.dumps(receipt, ensure_ascii=False))

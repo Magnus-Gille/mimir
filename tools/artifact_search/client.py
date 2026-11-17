@@ -31,10 +31,27 @@ ABSTENTION_REASONS = (None, 'no_vectors', 'below_cosine_floor', 'too_few_units_f
 MIN_ZSCORE_UNITS = 8
 
 
+# Bounded, secret-free sub-reasons for transport_unavailable. They distinguish
+# where the SSH route failed (local launcher/sandbox vs. network vs. remote
+# helper) without ever exposing SSH stderr, hosts, or remote exception text.
+TRANSPORT_REASONS = frozenset({
+    'ssh_not_found', 'ssh_spawn_failed', 'ssh_timeout', 'ssh_connect_failed', 'remote_helper_failed', 'ssh_killed',
+})
+
+
 class ClientError(Exception):
-    def __init__(self, code):
+    def __init__(self, code, reason=None):
         self.code = code
+        self.reason = reason if reason in TRANSPORT_REASONS else None
         super().__init__(code)
+
+
+def _exit_reason(status):
+    # OpenSSH exits 255 for its own failures (DNS/connect/host-key/auth/denied
+    # network); any other non-zero status is the remote helper's exit status.
+    if status < 0:
+        return 'ssh_killed'
+    return 'ssh_connect_failed' if status == 255 else 'remote_helper_failed'
 
 
 def _require(condition):
@@ -221,10 +238,17 @@ def _transport(profile, payload):
             while selector.get_map():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise ClientError('transport_unavailable')
+                    raise ClientError('transport_unavailable', 'ssh_timeout')
                 for key, _ in selector.select(remaining):
                     if key.fileobj is process.stdin:
-                        count = os.write(process.stdin.fileno(), pending)
+                        try:
+                            count = os.write(process.stdin.fileno(), pending)
+                        except BrokenPipeError:
+                            # ssh exited before reading the request (e.g. denied at once);
+                            # let its exit status decide the reason via process.wait().
+                            selector.unregister(process.stdin)
+                            process.stdin.close()
+                            continue
                         pending = pending[count:]
                         if not pending:
                             selector.unregister(process.stdin)
@@ -236,8 +260,9 @@ def _transport(profile, payload):
                             raise ClientError('invalid_response')
                         if not data:
                             selector.unregister(process.stdout)
-            if process.wait(timeout=max(0.01, deadline - time.monotonic())):
-                raise ClientError('transport_unavailable')
+            status = process.wait(timeout=max(0.01, deadline - time.monotonic()))
+            if status:
+                raise ClientError('transport_unavailable', _exit_reason(status))
         envelope = decode(bytes(chunks))
         _require(isinstance(envelope, dict) and type(envelope.get('ok')) is bool)
         if envelope['ok']:
@@ -245,8 +270,12 @@ def _transport(profile, payload):
             return envelope['data']
         code = envelope.get('error')
         raise ClientError(code if isinstance(code, str) and code in ERRORS else 'invalid_response')
-    except (OSError, subprocess.TimeoutExpired):
-        raise ClientError('transport_unavailable') from None
+    except subprocess.TimeoutExpired:
+        raise ClientError('transport_unavailable', 'ssh_timeout') from None
+    except FileNotFoundError:
+        raise ClientError('transport_unavailable', 'ssh_not_found') from None
+    except OSError:
+        raise ClientError('transport_unavailable', 'ssh_spawn_failed') from None
     except (ValueError, UnicodeError, RecursionError):
         raise ClientError('invalid_response') from None
     finally:
